@@ -49,15 +49,30 @@ export function testLayout(policy: Record<string, unknown> = {}): unknown {
   };
 }
 
+export interface FakeProbeResult {
+  model: string;
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
 export interface FakeSupervisorState {
   /** Training run state reported/managed by the fake. */
   training: "idle" | "running" | "stopping";
+  /** When true, /v1/training/start answers 200 but the run stays
+   * idle, like a spawn failure surfacing via the child error path. */
+  trainingStartIgnored: boolean;
   /** Whether the fake's vLLM servers are asleep. */
   sleeping: boolean;
   /** GPU memory in use as a fraction of total. */
   gpuUsedRatio: number;
   /** Whether synthetic probes succeed. */
   probeOk: boolean;
+  /** Overrides the /v1/probe results entirely (simulates a supervisor
+   * whose configured model set drifted from the fleet layout). */
+  probeResults: FakeProbeResult[] | null;
+  /** Last /v1/probe request body, for asserting the wire contract. */
+  lastProbeBody: unknown;
   /** When false every call fails like a network error. */
   reachable: boolean;
   calls: string[];
@@ -68,9 +83,12 @@ export function fakeSupervisorState(
 ): FakeSupervisorState {
   return {
     training: "idle",
+    trainingStartIgnored: false,
     sleeping: true,
     gpuUsedRatio: 0.1,
     probeOk: true,
+    probeResults: null,
+    lastProbeBody: null,
     reachable: true,
     calls: [],
     ...overrides,
@@ -88,6 +106,7 @@ function supervisorResponse(
   state: FakeSupervisorState,
   method: string,
   pathname: string,
+  body: string,
 ): Response {
   state.calls.push(`${method} ${pathname}`);
   switch (`${method} ${pathname}`) {
@@ -120,7 +139,9 @@ function supervisorResponse(
       state.training = "idle";
       return json({ status: "ok" });
     case "POST /v1/training/start":
-      state.training = "running";
+      if (!state.trainingStartIgnored) {
+        state.training = "running";
+      }
       return json({ status: "ok" });
     case "POST /v1/vllm/wake":
       state.sleeping = false;
@@ -138,18 +159,21 @@ function supervisorResponse(
           },
         ],
       });
-    case "POST /v1/probe":
+    case "POST /v1/probe": {
+      state.lastProbeBody = body === "" ? null : JSON.parse(body);
+      const results = state.probeResults ?? [
+        {
+          model: "example-chat-small",
+          ok: state.probeOk,
+          latencyMs: 5,
+          ...(!state.probeOk && { error: "synthetic failure" }),
+        },
+      ];
       return json({
-        ok: state.probeOk,
-        results: [
-          {
-            model: "example-chat-small",
-            ok: state.probeOk,
-            latencyMs: 5,
-            ...(!state.probeOk && { error: "synthetic failure" }),
-          },
-        ],
+        ok: results.length > 0 && results.every((r) => r.ok),
+        results,
       });
+    }
     default:
       return new Response("not found", { status: 404 });
   }
@@ -187,7 +211,12 @@ export function buildFakeFetch(options: {
         return Promise.reject(new TypeError("fetch failed"));
       }
       return Promise.resolve(
-        supervisorResponse(supervisor, init?.method ?? "GET", url.pathname),
+        supervisorResponse(
+          supervisor,
+          init?.method ?? "GET",
+          url.pathname,
+          typeof init?.body === "string" ? init.body : "",
+        ),
       );
     }
     if (url.pathname === "/v1/chat/completions") {

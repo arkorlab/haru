@@ -6,10 +6,12 @@ import {
   getFleetSnapshot,
   getOperation,
   switchActive,
+  transitionDomainSlots,
 } from "@haru/db";
 import { createTestDatabase } from "@haru/db/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { reconcileFleet } from "./reconciler/reconciler.js";
 import { executeStep } from "./reconciler/steps.js";
 
 import type { HaruDatabase, OperationRow } from "@haru/db";
@@ -126,6 +128,89 @@ describe("switch_active under concurrent ticks", () => {
     const after = await getFleetSnapshot(database, "default");
     expect(after?.activeDomainId).toBe(domainId("alpha"));
     expect(after?.routeRevision).toBe(staleFleet.routeRevision);
+  });
+
+  it("marks the target's already-serving slots failed when switch_active times out", async () => {
+    // Probe advances the target's inference slots to serving BEFORE
+    // switch_active commits routing, so a promote dying at
+    // switch_active must not leave a non-active domain recorded as
+    // serving.
+    const { operation } = await createOperation(database, {
+      fleetId: staleFleet.id,
+      kind: "promote",
+      targetDomainId: domainId("beta"),
+    });
+    // Claimed a full minute ago: past the switch_active budget.
+    await claimOperation(
+      database,
+      operation.id,
+      "switch_active",
+      new Date(Date.now() - 60_000),
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["sleeping"],
+      "serving",
+    );
+
+    const result = await reconcileFleet(
+      {
+        database,
+        fetchFn: fetch,
+        now: () => new Date(),
+        supervisorToken: undefined,
+      },
+      "default",
+    );
+    expect(result?.operation?.state).toBe("failed");
+    expect(result?.operation?.error?.code).toBe("step_timeout");
+
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(domainId("alpha"));
+    const betaSlots = after?.domains
+      .find((d) => d.slug === "beta")!
+      .slots.filter((s) => s.kind === "inference");
+    expect(betaSlots?.every((s) => s.state === "failed")).toBe(true);
+  });
+
+  it("leaves a failed demote target's serving slots serving (sleep genuinely did not happen)", async () => {
+    const { operation } = await createOperation(database, {
+      fleetId: staleFleet.id,
+      kind: "demote",
+      targetDomainId: domainId("beta"),
+    });
+    await claimOperation(
+      database,
+      operation.id,
+      "sleep_vllm",
+      new Date(Date.now() - 600_000),
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["sleeping"],
+      "serving",
+    );
+
+    const result = await reconcileFleet(
+      {
+        database,
+        fetchFn: fetch,
+        now: () => new Date(),
+        supervisorToken: undefined,
+      },
+      "default",
+    );
+    expect(result?.operation?.state).toBe("failed");
+
+    const after = await getFleetSnapshot(database, "default");
+    const betaSlots = after?.domains
+      .find((d) => d.slug === "beta")!
+      .slots.filter((s) => s.kind === "inference");
+    expect(betaSlots?.every((s) => s.state === "serving")).toBe(true);
   });
 
   it("still fails cas_lost when the pointer moved somewhere else", async () => {

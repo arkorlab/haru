@@ -136,6 +136,28 @@ describe("applyFleetLayout", () => {
     expect(await getFleetSnapshot(database, "missing")).toBeNull();
   });
 
+  it("prefers id over a colliding UUID-shaped slug", async () => {
+    const { fleetId } = await applyFleetLayout(database, exampleLayout());
+    // The slug charset admits UUID-shaped strings: a second fleet
+    // whose slug IS the first fleet's id must not shadow the id
+    // lookup (nor win by planner whim).
+    const collider = exampleLayout() as { slug: string };
+    collider.slug = fleetId;
+    const { fleetId: colliderId } = await applyFleetLayout(database, collider);
+    expect(colliderId).not.toBe(fleetId);
+    expect((await getFleetSnapshot(database, fleetId))?.id).toBe(fleetId);
+  });
+
+  it("falls back to the slug lookup for a UUID-shaped reference matching no id", async () => {
+    const uuidShapedSlug = "00000000-0000-4000-8000-000000000000";
+    const layout = exampleLayout() as { slug: string };
+    layout.slug = uuidShapedSlug;
+    const { fleetId } = await applyFleetLayout(database, layout);
+    expect((await getFleetSnapshot(database, uuidShapedSlug))?.id).toBe(
+      fleetId,
+    );
+  });
+
   it("rejects a layout with an unknown active domain", async () => {
     const layout = exampleLayout() as { activeDomainSlug: string };
     layout.activeDomainSlug = "ghost";

@@ -73,5 +73,21 @@ export const fleetLayoutSchema = z
       message: "each (gpuIndex, kind) pair must be unique within a domain",
       path: ["domains"],
     },
+  )
+  // `model` is the routing key the chat proxy matches exactly; a name
+  // bound twice within one domain would silently send all of that
+  // model's traffic to whichever slot happens to sort first.
+  .refine(
+    (layout) =>
+      layout.domains.every((domain) => {
+        const names = domain.slots.flatMap((slot) =>
+          slot.kind === "inference" ? slot.models.map((m) => m.name) : [],
+        );
+        return new Set(names).size === names.length;
+      }),
+    {
+      message: "model binding names must be unique within a domain",
+      path: ["domains"],
+    },
   );
 export type FleetLayout = z.infer<typeof fleetLayoutSchema>;

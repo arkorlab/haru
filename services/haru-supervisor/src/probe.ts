@@ -1,12 +1,15 @@
 import type { ProbeResult } from "@haru/protocol";
 
-const PROBE_CALL_TIMEOUT_MS = 60_000;
+/** Fallback when the caller does not send a probe budget. */
+export const DEFAULT_PROBE_CALL_TIMEOUT_MS = 60_000;
 
 /**
  * Run one synthetic (non-streaming) chat completion against a local
  * vLLM server and report success + latency. Used by the promotion
  * flow to prove a freshly woken server actually generates tokens
- * before routing flips to it.
+ * before routing flips to it. `timeoutMs` comes from the caller's
+ * probe budget so the local vLLM request never outlives the caller's
+ * own wait.
  */
 export async function probeModel(
   fetchFunction: typeof fetch,
@@ -14,12 +17,13 @@ export async function probeModel(
   model: { name: string; port: number },
   prompt: string,
   maxTokens: number,
+  timeoutMs: number = DEFAULT_PROBE_CALL_TIMEOUT_MS,
 ): Promise<ProbeResult> {
   const startedAt = now();
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
-  }, PROBE_CALL_TIMEOUT_MS);
+  }, timeoutMs);
   try {
     const response = await fetchFunction(
       `http://127.0.0.1:${model.port}/v1/chat/completions`,

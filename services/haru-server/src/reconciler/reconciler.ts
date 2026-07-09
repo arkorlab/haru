@@ -132,6 +132,32 @@ async function pollHeartbeats(
   }
 }
 
+/**
+ * Mark a failed promotion's target inference slots failed so a later
+ * promote starts from a clean state. "serving" is included because the
+ * probe step advances slots to serving BEFORE switch_active commits
+ * routing: a promote failing at switch_active leaves an awake but
+ * non-active domain, and its recorded state must demand a fresh
+ * wake+probe cycle before it is trusted again. Demotes are excluded:
+ * their target's serving slots reflect a sleep that genuinely did not
+ * happen.
+ */
+async function markFailedPromotionSlots(
+  database: HaruDatabase,
+  operation: OperationRow,
+): Promise<void> {
+  if (operation.kind !== "promote") {
+    return;
+  }
+  await transitionDomainSlots(
+    database,
+    operation.targetDomainId,
+    "inference",
+    ["waking", "probing", "serving"],
+    "failed",
+  );
+}
+
 /** Handle a step that exceeded its policy timeout. */
 async function handleStepTimeout(
   dependencies: ReconcilerDependencies,
@@ -140,6 +166,23 @@ async function handleStepTimeout(
   step: OperationStep,
 ): Promise<void> {
   if (isBestEffortStep(step)) {
+    // Advance first: the CAS on the current step decides which of two
+    // racing timeout ticks owns the timeout. The loser (or a tick
+    // racing a concurrent successful completion) must not degrade the
+    // old domain or write a duplicate audit event.
+    const next = nextStep(operation.kind, step);
+    const hasAdvanced = await (next === null
+      ? completeOperation(dependencies.database, operation.id, step)
+      : advanceStep(
+          dependencies.database,
+          operation.id,
+          step,
+          next,
+          dependencies.now(),
+        ));
+    if (!hasAdvanced) {
+      return;
+    }
     // Post-commit cleanup of the old active domain: degrade it and
     // move on. The old active being unhealthy is typically why the
     // failover happened; never fail the operation for it.
@@ -161,16 +204,6 @@ async function handleStepTimeout(
       type: "operation.step.timeout_best_effort",
       payload: { step },
     });
-    const next = nextStep(operation.kind, step);
-    await (next === null
-      ? completeOperation(dependencies.database, operation.id, step)
-      : advanceStep(
-          dependencies.database,
-          operation.id,
-          step,
-          next,
-          dependencies.now(),
-        ));
     return;
   }
   // Guarded on the current step: a concurrent tick that advanced or
@@ -188,15 +221,7 @@ async function handleStepTimeout(
   if (!didFail) {
     return;
   }
-  // A failed promotion must leave the target's half-woken inference
-  // slots marked failed so a later promote starts from a clean state.
-  await transitionDomainSlots(
-    dependencies.database,
-    operation.targetDomainId,
-    "inference",
-    ["waking", "probing"],
-    "failed",
-  );
+  await markFailedPromotionSlots(dependencies.database, operation);
   await appendEvent(dependencies.database, {
     fleetId: fleet.id,
     operationId: operation.id,
@@ -293,13 +318,7 @@ async function advanceInFlightOperation(
       if (!didFail) {
         break;
       }
-      await transitionDomainSlots(
-        dependencies.database,
-        operation.targetDomainId,
-        "inference",
-        ["waking", "probing"],
-        "failed",
-      );
+      await markFailedPromotionSlots(dependencies.database, operation);
       await appendEvent(dependencies.database, {
         fleetId: fleet.id,
         operationId: operation.id,

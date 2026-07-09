@@ -12,6 +12,7 @@ import {
 import { fleetLayoutSchema } from "./layout.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
+import { probeRequestSchema } from "./supervisor.js";
 import { joinUrl } from "./url.js";
 
 describe("slugSchema", () => {
@@ -178,6 +179,50 @@ describe("fleetLayoutSchema", () => {
         domains: [domain, domain],
       }),
     ).toThrow();
+  });
+
+  it("rejects a model name bound twice within one domain", () => {
+    const domain = validLayout.domains[0]!;
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [
+          {
+            ...domain,
+            slots: [
+              ...domain.slots,
+              {
+                kind: "inference",
+                gpuIndex: 1,
+                models: [
+                  // Same routing key as the gpuIndex 0 slot: the chat
+                  // proxy would silently pick one of the two URLs.
+                  { name: "example-chat", servingUrl: "http://127.0.0.1:9002" },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/unique within a domain/);
+  });
+
+  it("allows the same model names across domains (active/standby symmetry)", () => {
+    const domain = validLayout.domains[0]!;
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [domain, { ...domain, slug: "beta" }],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("probeRequestSchema", () => {
+  it("accepts an optional caller-provided timeout budget", () => {
+    expect(probeRequestSchema.parse({}).timeoutMs).toBeUndefined();
+    expect(probeRequestSchema.parse({ timeoutMs: 1500 }).timeoutMs).toBe(1500);
+    expect(() => probeRequestSchema.parse({ timeoutMs: 0 })).toThrow();
   });
 });
 

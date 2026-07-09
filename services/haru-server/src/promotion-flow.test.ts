@@ -57,6 +57,16 @@ function makeApp(now?: () => Date) {
 
 const beta = () => fleet.domains.find((d) => d.slug === "beta")!;
 
+async function reconcileOnce(
+  app: ReturnType<typeof makeApp>,
+): Promise<Record<string, unknown>> {
+  const response = await app.request("/v1/fleets/default/reconcile", {
+    method: "POST",
+  });
+  expect(response.status).toBe(200);
+  return (await response.json()) as Record<string, unknown>;
+}
+
 async function reconcileUntilSettled(
   app: ReturnType<typeof makeApp>,
   maxTicks = 12,
@@ -172,6 +182,50 @@ describe("full promotion flow", () => {
     ).toBe(true);
   });
 
+  it("fails the promotion when the supervisor probes only a subset of the layout's models", async () => {
+    await seed();
+    // Config drift: the supervisor reports a successful probe, but for
+    // a model set that does not cover the layout's routing keys.
+    betaSupervisor.probeResults = [
+      { model: "some-other-model", ok: true, latencyMs: 5 },
+    ];
+    const app = makeApp();
+
+    await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+
+    const result = await reconcileUntilSettled(app);
+    const operation = result.operation as {
+      state: string;
+      error: { code: string; message: string } | null;
+    };
+    expect(operation.state).toBe("failed");
+    expect(operation.error?.code).toBe("probe_failed");
+    expect(operation.error?.message).toContain("example-chat-small");
+
+    // Routing safety: alpha stays active.
+    const intentResponse = await app.request("/v1/fleets/default/route-intent");
+    const intent = routeIntentSchema.parse(await intentResponse.json());
+    expect(intent.active?.domainSlug).toBe("alpha");
+  });
+
+  it("passes the policy probe budget through to the supervisor probe call", async () => {
+    await seed({ probeTimeoutMs: 12_345 });
+    const app = makeApp();
+
+    await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+    const result = await reconcileUntilSettled(app);
+    expect((result.operation as { state: string }).state).toBe("succeeded");
+    expect(betaSupervisor.lastProbeBody).toMatchObject({ timeoutMs: 12_345 });
+  });
+
   it("re-promoting after success is an idempotent no-op", async () => {
     await seed();
     const app = makeApp();
@@ -250,5 +304,50 @@ describe("full promotion flow", () => {
     expect((result.operation as { state: string }).state).toBe("succeeded");
     expect(betaSupervisor.sleeping).toBe(true);
     expect(betaSupervisor.training).toBe("running");
+  });
+
+  it("a demote whose training never starts stays pending until the step budget fails it", async () => {
+    await seed({ startTrainingTimeoutMs: 500 });
+    betaSupervisor.sleeping = false;
+    betaSupervisor.training = "idle";
+    // /v1/training/start answers 200 but the run never leaves idle
+    // (e.g. the training command fails to spawn).
+    betaSupervisor.trainingStartIgnored = true;
+    const app = makeApp();
+
+    await app.request("/v1/fleets/default/demote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+
+    // Inside the budget the step must be PENDING, not a false success:
+    // the start call went out but the status poll still reports idle.
+    for (let tick = 0; tick < 4; tick += 1) {
+      await app.request("/v1/fleets/default/reconcile", { method: "POST" });
+    }
+    expect(betaSupervisor.calls).toContain("POST /v1/training/start");
+    const inflight = await reconcileOnce(app);
+    expect((inflight.operation as { state: string }).state).toBe("running");
+
+    // Past the budget the operation fails instead of reporting a
+    // demote that never actually started training.
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    const result = await reconcileUntilSettled(app);
+    const operation = result.operation as {
+      state: string;
+      error: { code: string } | null;
+    };
+    expect(operation.state).toBe("failed");
+    expect(operation.error?.code).toBe("step_timeout");
+
+    // The DB never recorded training slots as running.
+    const after = await getFleetSnapshot(database, "default");
+    const betaAfter = after?.domains.find((d) => d.slug === "beta");
+    expect(
+      betaAfter?.slots
+        .filter((s) => s.kind === "training")
+        .every((s) => s.state === "idle"),
+    ).toBe(true);
   });
 });

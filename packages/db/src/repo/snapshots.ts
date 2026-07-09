@@ -3,7 +3,7 @@ import {
   resolveFleetPolicy,
   type FleetSnapshot,
 } from "@haru/protocol";
-import { eq, inArray, or, type SQL } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 import { domains, fleets, slots } from "../schema/index.js";
 
@@ -12,11 +12,30 @@ import type { HaruDatabase } from "../client.js";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** WHERE clause matching a fleet by slug, or by id when `ref` is a UUID. */
-export function fleetReferenceWhere(reference: string): SQL | undefined {
-  return UUID_RE.test(reference)
-    ? or(eq(fleets.id, reference), eq(fleets.slug, reference))
-    : eq(fleets.slug, reference);
+/**
+ * Resolve a fleet reference: by id when it is UUID-shaped, falling
+ * back to slug. Two separate lookups (never `id = ref OR slug = ref`):
+ * the slug charset admits UUID-shaped slugs, and a single OR query
+ * would return a planner-picked winner when one fleet's id collides
+ * with another fleet's slug. Id wins deterministically instead.
+ */
+async function findFleetRow(database: HaruDatabase, reference: string) {
+  if (UUID_RE.test(reference)) {
+    const byId = await database
+      .select()
+      .from(fleets)
+      .where(eq(fleets.id, reference))
+      .limit(1);
+    if (byId[0]) {
+      return byId[0];
+    }
+  }
+  const bySlug = await database
+    .select()
+    .from(fleets)
+    .where(eq(fleets.slug, reference))
+    .limit(1);
+  return bySlug[0];
 }
 
 /**
@@ -29,12 +48,7 @@ export async function getFleetSnapshot(
   database: HaruDatabase,
   reference: string,
 ): Promise<FleetSnapshot | null> {
-  const fleetRows = await database
-    .select()
-    .from(fleets)
-    .where(fleetReferenceWhere(reference))
-    .limit(1);
-  const fleet = fleetRows[0];
+  const fleet = await findFleetRow(database, reference);
   if (!fleet) {
     return null;
   }

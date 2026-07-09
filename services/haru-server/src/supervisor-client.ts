@@ -136,11 +136,20 @@ export const supervisorClient = {
     options: SupervisorClientOptions,
     prompt: string,
     maxTokens: number,
+    timeoutMs: number,
   ): Promise<ProbeResponse> {
+    // The probe budget rides in the body so the supervisor's inner
+    // per-model timers stay in sync with this client call's timeout;
+    // otherwise a lowered policy budget would abort the HTTP call
+    // while the supervisor keeps the vLLM request running.
     return parseAs(
       probeResponseSchema,
       "/v1/probe",
-      await call(options, "POST", "/v1/probe", { prompt, maxTokens }),
+      await call(options, "POST", "/v1/probe", {
+        prompt,
+        maxTokens,
+        timeoutMs,
+      }),
     );
   },
 };

@@ -263,20 +263,43 @@ async function probe(context: StepContext): Promise<StepOutcome> {
       `domain ${domain.slug} has no supervisor URL`,
     );
   }
+  // Every model binding the fleet layout routes to this domain must
+  // be proven, not just the models the supervisor happens to be
+  // configured with: a drifted supervisor probing a subset must not
+  // let switch_active route traffic to an unprobed (or absent) model.
+  const expectedModels = new Set(
+    domain.slots.flatMap((slot) =>
+      slot.spec.kind === "inference" ? slot.spec.models.map((m) => m.name) : [],
+    ),
+  );
+  if (expectedModels.size === 0) {
+    return failed(
+      "probe_failed",
+      "target domain has no inference model bindings to probe",
+    );
+  }
   try {
     const result = await supervisorClient.probe(
       options,
       context.fleet.policy.probe.prompt,
       context.fleet.policy.probe.maxTokens,
+      context.fleet.policy.probeTimeoutMs,
     );
-    const hasResults = result.results.length > 0;
-    if (!result.ok || !hasResults) {
-      const failures = hasResults
-        ? result.results
-            .filter((r) => !r.ok)
-            .map((r) => `${r.model}: ${r.error ?? "failed"}`)
-            .join("; ")
-        : "supervisor reported no probeable models (config drift?)";
+    const okModels = new Set(
+      result.results.filter((r) => r.ok).map((r) => r.model),
+    );
+    const missing = [...expectedModels.difference(okModels)];
+    if (!result.ok || missing.length > 0) {
+      const failures = [
+        ...result.results
+          .filter((r) => !r.ok)
+          .map((r) => `${r.model}: ${r.error ?? "failed"}`),
+        ...(missing.length > 0
+          ? [
+              `not probed by the supervisor (config drift?): ${missing.join(", ")}`,
+            ]
+          : []),
+      ].join("; ");
       // Routing safety: the fleet pointer has not moved yet, so a
       // failed probe leaves the old active domain serving traffic.
       return failed("probe_failed", `synthetic inference failed: ${failures}`);
@@ -445,6 +468,19 @@ async function startTraining(context: StepContext): Promise<StepOutcome> {
   }
   try {
     await supervisorClient.startTraining(options);
+    // /v1/training/start returns before the child process proves
+    // healthy (a spawn failure drops the run back to idle via its
+    // error handler), so completion is what the status poll reports,
+    // not the 200 on the start call. Same vacuous-truth guard as
+    // stop_training: zero reported training slots is config drift.
+    const status = await supervisorClient.status(options);
+    const trainingSlots = status.slots.filter((s) => s.kind === "training");
+    const isAllRunning =
+      trainingSlots.length > 0 &&
+      trainingSlots.every((s) => s.training?.state === "running");
+    if (!isAllRunning) {
+      return PENDING;
+    }
     await transitionDomainSlots(
       context.database,
       domain.id,

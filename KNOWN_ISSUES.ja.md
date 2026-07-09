@@ -44,6 +44,28 @@
 - 意図する修正: `proxyChatCompletion` でリクエストシグナルと
   タイムアウトシグナルを合成する。
 
+### chat ルーティングは TTL 付きスナップショットキャッシュから配信される (昇格後の staleness は有界)
+
+- 場所: `services/haru-server/src/app.ts` (`cachedSnapshot`、
+  `snapshotCacheTtlMs`、既定 2000 ms)。
+- 現状: `switch_active` が `activeDomainId` を切り替えた後も、
+  キャッシュ済み fleet 参照への chat completions は TTL が切れるまで
+  旧 active ドメインへルーティングされうる。`demote_old_sleep` が
+  そのドメインを sleep させている最中も含む (該当リクエストは
+  502/504 で即時に失敗し、クライアントがリトライする)。
+- 先送りの理由: これは見落としではなく意図的な上限。プロセス内の
+  キャッシュ無効化フックで直るのは単一インスタンス構成のみ:
+  `POST /reconcile` (や 2 台目の haru-server) はこのキャッシュを
+  持たないプロセスからポインタを動かせるため、どのみち TTL が
+  正直な staleness の上限になる。フェイルオーバーは稀であり、
+  ホットパスの大幅な軽量化と引き換えの「リトライ可能なエラー
+  最大 2 秒」はこのスライスでは許容と判断した。
+- 意図する修正: キャッシュエントリを `routeRevision` でキーし、
+  リクエストごとに安価な revision のみの SELECT を行う (ポインタ
+  移動は即時反映、重い 3-SELECT スナップショットはキャッシュ維持)。
+  加えて、同居する reconciler から `switch_active` 成功後に
+  キャッシュをクリアする。
+
 ### @haru/core の状態遷移表がランタイムで強制されていない
 
 - 場所: `packages/core/src/slot-state.ts`、

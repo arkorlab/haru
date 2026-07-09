@@ -303,6 +303,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
           model,
           parsed.data.prompt,
           parsed.data.maxTokens,
+          parsed.data.timeoutMs,
         ),
       ),
     );

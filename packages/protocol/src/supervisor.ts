@@ -127,6 +127,13 @@ export type GpuMemory = z.infer<typeof gpuMemorySchema>;
 export const probeRequestSchema = z.object({
   prompt: z.string().min(1).default("ping"),
   maxTokens: z.number().int().positive().default(4),
+  /**
+   * Per-model completion timeout. The caller (reconciler) passes its
+   * probe step budget so the supervisor never keeps a vLLM request
+   * alive past the point the caller stopped waiting for it; omitted
+   * means the supervisor's built-in default.
+   */
+  timeoutMs: z.number().int().positive().optional(),
 });
 export type ProbeRequest = z.infer<typeof probeRequestSchema>;
 

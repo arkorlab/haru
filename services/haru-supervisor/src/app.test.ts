@@ -259,6 +259,38 @@ describe("POST /v1/probe", () => {
     expect(body.ok).toBe(false);
     expect(body.results[0].error).toContain("500");
   });
+
+  it("bounds each completion by the caller-provided timeoutMs", async () => {
+    // vLLM never answers; the caller's tiny budget must abort the
+    // request instead of holding it for the built-in 60s default.
+    const neverResolvingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new Error("aborted by timeout"));
+        });
+      });
+    const app = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: neverResolvingFetch,
+      spawnFn: noopSpawn,
+      exec: () =>
+        Promise.resolve({ code: 0, stdout: "0, 1000, 97887\n", stderr: "" }),
+    });
+    const response = await app.request("/v1/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ timeoutMs: 1 }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(
+      (body.results as { error?: string }[]).every((r) =>
+        r.error?.includes("aborted"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("loadSupervisorConfig", () => {

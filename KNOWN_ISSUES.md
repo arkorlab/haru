@@ -45,6 +45,28 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Intended fix: combine the request signal with the timeout signal in
   `proxyChatCompletion`.
 
+### Chat routing serves from a TTL snapshot cache (bounded staleness after promotion)
+
+- Where: `services/haru-server/src/app.ts` (`cachedSnapshot`,
+  `snapshotCacheTtlMs`, default 2000 ms).
+- Current: after `switch_active` flips `activeDomainId`, chat
+  completions for a cached fleet reference may keep routing to the
+  previous active domain until the TTL expires, including while
+  `demote_old_sleep` is putting that domain to sleep (those requests
+  fail fast with 502/504 and the client retries).
+- Why deferred: this is a deliberate bound, not an oversight. An
+  in-process invalidation hook only fixes the single-instance case:
+  `POST /reconcile` (or a second haru-server instance) can flip the
+  pointer from a process that does not hold this cache, so the TTL is
+  the honest staleness bound either way. Failovers are rare;
+  2 seconds of retryable errors against an 80-95% cheaper hot path
+  was judged acceptable for this slice.
+- Intended fix: key cache entries by `routeRevision` with a cheap
+  revision-only SELECT per request (pointer moves surface
+  immediately, the expensive 3-SELECT snapshot stays cached), and
+  additionally clear the cache from the co-located reconciler after a
+  successful `switch_active`.
+
 ### Slot/domain state tables in @haru/core are not enforced at runtime
 
 - Where: `packages/core/src/slot-state.ts`,

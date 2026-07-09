@@ -259,6 +259,11 @@ fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   display name, existing slot specs): seeding is insert-only by
   design. Slot states for NEWLY added slots follow the live routing
   pointer.
+- **Chat routing may lag a promotion by up to the snapshot cache TTL
+  (2 s).** The chat proxy serves from a per-fleet snapshot cache;
+  requests hitting the demoting old active during that window fail
+  fast and should be retried. This is a deliberate bound (see
+  KNOWN_ISSUES for the reasoning and intended fix).
 
 ## Intentionally out of scope (for now)
 
