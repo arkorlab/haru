@@ -197,11 +197,18 @@ export async function completeOperation(
   return rows.length === 1;
 }
 
-/** Fail an in-flight operation with a structured error. */
+/**
+ * Fail an in-flight operation with a structured error. When
+ * `fromStep` is given the failure is additionally guarded on the
+ * current step, so a reconcile tick that lost a race (another tick
+ * already advanced or completed the step) cannot fail an operation
+ * for a step that is no longer running.
+ */
 export async function failOperation(
   database: HaruDatabase,
   operationId: string,
   error: OperationError,
+  fromStep?: OperationStep,
 ): Promise<boolean> {
   const rows = await database
     .update(operations)
@@ -215,6 +222,9 @@ export async function failOperation(
       and(
         eq(operations.id, operationId),
         inArray(operations.state, ["pending", "running"]),
+        ...(fromStep === undefined
+          ? []
+          : [eq(operations.currentStep, fromStep)]),
       ),
     )
     .returning({ id: operations.id });

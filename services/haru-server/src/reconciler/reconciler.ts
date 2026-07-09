@@ -142,11 +142,21 @@ async function handleStepTimeout(
       : advanceStep(dependencies.database, operation.id, step, next));
     return;
   }
-  await failOperation(dependencies.database, operation.id, {
+  // Guarded on the current step: a concurrent tick that advanced or
+  // completed this step in the meantime makes the fail a no-op.
+  const didFail = await failOperation(
+    dependencies.database,
+    operation.id,
+    {
+      step,
+      code: "step_timeout",
+      message: `step ${step} exceeded its timeout`,
+    },
     step,
-    code: "step_timeout",
-    message: `step ${step} exceeded its timeout`,
-  });
+  );
+  if (!didFail) {
+    return;
+  }
   // A failed promotion must leave the target's half-woken inference
   // slots marked failed so a later promote starts from a clean state.
   await transitionDomainSlots(
@@ -224,11 +234,21 @@ async function advanceInFlightOperation(
       break;
     }
     case "failed": {
-      await failOperation(dependencies.database, operation.id, {
+      // Same step guard as the timeout path: only the tick whose fail
+      // actually landed performs the cleanup and audit write.
+      const didFail = await failOperation(
+        dependencies.database,
+        operation.id,
+        {
+          step,
+          code: outcome.code,
+          message: outcome.message,
+        },
         step,
-        code: outcome.code,
-        message: outcome.message,
-      });
+      );
+      if (!didFail) {
+        break;
+      }
       await transitionDomainSlots(
         dependencies.database,
         operation.targetDomainId,

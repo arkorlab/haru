@@ -203,6 +203,36 @@ describe("operation lifecycle CAS", () => {
     ).toBe(false);
   });
 
+  it("failOperation with a step guard no-ops when the step already advanced", async () => {
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "stop_training");
+    await advanceStep(database, operation.id, "stop_training", "verify_gpu");
+    // A tick that still believes the operation is on stop_training
+    // (e.g. it raced a faster tick) must not be able to fail it.
+    expect(
+      await failOperation(
+        database,
+        operation.id,
+        { step: "stop_training", code: "step_timeout", message: "stale" },
+        "stop_training",
+      ),
+    ).toBe(false);
+    expect((await getOperation(database, operation.id))?.state).toBe("running");
+    // The tick that holds the real current step can.
+    expect(
+      await failOperation(
+        database,
+        operation.id,
+        { step: "verify_gpu", code: "boom", message: "real" },
+        "verify_gpu",
+      ),
+    ).toBe(true);
+  });
+
   it("toOperationSnapshot round-trips through the protocol schema", async () => {
     const { operation } = await createOperation(database, {
       fleetId: fleet.id,

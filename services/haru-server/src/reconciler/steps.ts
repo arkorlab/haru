@@ -1,4 +1,5 @@
 import {
+  getFleetSnapshot,
   switchActive as switchActivePointer,
   transitionDomainSlots,
 } from "@haru/db";
@@ -258,6 +259,14 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
     context.operation.targetDomainId,
   );
   if (result === null) {
+    // CAS lost. A concurrent reconcile tick executing this same
+    // operation may have already moved the pointer to our target;
+    // re-read before declaring failure so racing ticks converge on
+    // done instead of failing a promotion that actually landed.
+    const fresh = await getFleetSnapshot(context.database, context.fleet.id);
+    if (fresh?.activeDomainId === context.operation.targetDomainId) {
+      return DONE;
+    }
     return failed(
       "cas_lost",
       "active pointer moved concurrently; refusing to overwrite",
