@@ -1,0 +1,81 @@
+/**
+ * Client for vLLM's local admin endpoints (sleep mode controls).
+ *
+ * These endpoints are development-mode controls (the servers must run
+ * with sleep mode enabled and VLLM_SERVER_DEV_MODE=1) and are private
+ * by construction: every vLLM server managed by this supervisor binds
+ * to 127.0.0.1, so the only way to reach sleep/wake from outside the
+ * host is through the supervisor's authenticated control API.
+ */
+
+export class VllmAdminError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "VllmAdminError";
+  }
+}
+
+const LOCAL_HOST = "127.0.0.1";
+const ADMIN_CALL_TIMEOUT_MS = 120_000;
+
+async function adminCall(
+  fetchFunction: typeof fetch,
+  port: number,
+  method: "GET" | "POST",
+  pathAndQuery: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, ADMIN_CALL_TIMEOUT_MS);
+  try {
+    const response = await fetchFunction(
+      `http://${LOCAL_HOST}:${port}${pathAndQuery}`,
+      { method, signal: controller.signal },
+    );
+    if (!response.ok) {
+      throw new VllmAdminError(
+        `vLLM :${port} ${pathAndQuery} returned ${response.status}`,
+      );
+    }
+    return response;
+  } catch (error) {
+    if (error instanceof VllmAdminError) {
+      throw error;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new VllmAdminError(
+      `vLLM :${port} ${pathAndQuery} unreachable: ${detail}`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Put the server to sleep. Level 1 offloads weights to CPU RAM and
+ * discards the KV cache: the fastest wake path. */
+export async function sleepServer(
+  fetchFunction: typeof fetch,
+  port: number,
+  level: 1 = 1,
+): Promise<void> {
+  await adminCall(fetchFunction, port, "POST", `/sleep?level=${level}`);
+}
+
+/** Wake a sleeping server (no-op on an awake one). */
+export async function wakeServer(
+  fetchFunction: typeof fetch,
+  port: number,
+): Promise<void> {
+  await adminCall(fetchFunction, port, "POST", "/wake_up");
+}
+
+/** Whether the server is currently asleep. */
+export async function isServerSleeping(
+  fetchFunction: typeof fetch,
+  port: number,
+): Promise<boolean> {
+  const response = await adminCall(fetchFunction, port, "GET", "/is_sleeping");
+  const body = (await response.json()) as { is_sleeping?: unknown };
+  return body.is_sleeping === true;
+}

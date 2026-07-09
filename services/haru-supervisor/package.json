@@ -1,0 +1,33 @@
+{
+  "name": "@haru/supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "haru GPU-domain supervisor: vLLM sleep/wake orchestration, training lifecycle, synthetic probes, readiness",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings . && eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@haru/protocol": "workspace:*",
+    "@hono/node-server": "catalog:",
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

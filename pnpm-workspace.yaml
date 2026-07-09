@@ -1,0 +1,67 @@
+packages:
+  - "packages/*"
+  - "services/*"
+# Single source of truth for direct third-party dependency versions.
+# Workspace package.json files reference entries here as
+# `"<name>": "catalog:"` so a bump is one line here instead of N
+# parallel edits prone to drift. Workspace-internal links stay as
+# `workspace:*`.
+catalog:
+  "@electric-sql/pglite": "^0.5.4"
+  "@eslint/js": "^10.0.1"
+  "@hono/node-server": "^2.0.8"
+  "@neondatabase/serverless": "^1.1.0"
+  "@stylistic/eslint-plugin": "^5.10.0"
+  "@types/eslint-plugin-promise": "^7.3.0"
+  "@types/node": "^26"
+  "@vitest/coverage-v8": "^4.1.10"
+  "@vitest/eslint-plugin": "^1.6.17"
+  drizzle-kit: "^0.31.10"
+  drizzle-orm: "^0.45.2"
+  eslint: "^10.6.0"
+  eslint-import-resolver-typescript: "^4.4.4"
+  eslint-plugin-import-x: "^4.16.2"
+  eslint-plugin-n: "^18.0.1"
+  eslint-plugin-promise: "^7.3.0"
+  eslint-plugin-regexp: "^3.1.0"
+  eslint-plugin-unicorn: "^71.1.0"
+  globals: "^17.7.0"
+  hono: "^4.12.28"
+  # ESLint 10 loads eslint.config.ts through jiti.
+  jiti: "^2.7.0"
+  oxfmt: "0.58.0"
+  oxlint: "1.73.0"
+  tsx: "^4.23.0"
+  turbo: "^2.10.4"
+  # TypeScript 7 stable (7.0.2, the first stable 7.x) was published on
+  # 2026-07-08 and is still inside the 24h `minimumReleaseAge` window
+  # at the time of writing. `7.0.1-rc` is the same 7.0 line and clears
+  # the gate. Bump to `^7.0.2` after 2026-07-09T15:55Z.
+  typescript: "7.0.1-rc"
+  typescript-eslint: "^8.63.0"
+  vitest: "^4.1.10"
+  yaml: "^2.9.0"
+  zod: "^4.4.3"
+catalogs:
+  # TypeScript 7 (the native compiler) drives `tsc` builds and
+  # typechecking, but typescript-eslint's supported peer range is
+  # still `>=4.8.4 <6.1.0`. The root package.json installs this 6.x
+  # copy purely so ESLint's type-aware `projectService` has a
+  # compatible compiler API to load; every package-level `tsc`
+  # invocation resolves the default-catalog TypeScript 7 instead.
+  # Drop this catalog (and repoint the root to `catalog:`) once
+  # typescript-eslint supports TypeScript 7.
+  tseslint:
+    typescript: "6.0.3"
+minimumReleaseAge: 1440
+trustPolicy: no-downgrade
+# Block transitive deps from resolving via exotic sources
+# (git+ssh://..., direct tarball URLs) that would bypass the
+# release-age and downgrade gates above.
+blockExoticSubdeps: true
+# Explicit allow-list for postinstall scripts. `esbuild` is required
+# by tsx's runtime loader; `unrs-resolver` (pulled in by
+# eslint-import-resolver-typescript) materialises its native binding.
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

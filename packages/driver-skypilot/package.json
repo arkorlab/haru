@@ -1,0 +1,39 @@
+{
+  "name": "@haru/driver-skypilot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SkyPilot driver boundary for the haru GPU HAL: domain spec to sky task translation and CLI wrapping",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./exec": {
+      "types": "./dist/exec.d.ts",
+      "default": "./dist/exec.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings . && eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@haru/protocol": "workspace:*",
+    "yaml": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
