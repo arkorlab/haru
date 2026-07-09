@@ -14,6 +14,8 @@ Thanks for your interest! Haru is at an **early stage**: the core idea (a provid
 
 If you have an idea for a non-trivial change (a new driver, a new promotion step, a policy knob), please open an issue first so we can align on the state-machine and API shape before you write code.
 
+Looking for something concrete to pick up? [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks reviewed-and-deferred work (with file references and intended fixes) that is ready to be taken.
+
 ## Repo layout
 
 ```

@@ -235,6 +235,10 @@ for development conventions and PR guidelines.
 
 ## Known limitations (this slice)
 
+Contributor-facing deferred work (structural debt, efficiency backlog,
+test-validity notes) is tracked with file references and intended
+fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
 - **Auto-failover triggers on heartbeat staleness or a `failed` domain
   state only.** An active domain whose vLLM processes die while its
   supervisor stays reachable is marked `degraded` (visible in route
