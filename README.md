@@ -1,24 +1,24 @@
-# haru
+# Haru
 
-**haru** is a GPU Hardware Abstraction Layer (HAL) for LLM inference
+**Haru** is a GPU Hardware Abstraction Layer (HAL) for LLM inference
 fleets, inspired by the role the HAL plays in an operating system: it
 gives higher-level systems a small, stable, provider-neutral surface
 over messy, heterogeneous GPU infrastructure. The name also reads as
-haru (spring) in Japanese.
+haru (spring: 春) in Japanese.
 
-## Why haru exists
+## Why Haru exists
 
 Products that host LLM inference need GPU lifecycle management:
 provisioning machines, supervising runtimes, failing over between
 regions, deciding where traffic should go. Embedding that logic into a
 product control plane couples it to one deployment and one provider.
-haru extracts it into an independent layer with its own state store,
+Haru extracts it into an independent layer with its own state store,
 so a product control plane can stay focused on users, catalogs and
-metadata, and consume haru through a small HTTP API.
+metadata, and consume Haru through a small HTTP API.
 
 ## The Active/Standby architecture
 
-haru's initial mission is hot failover for self-hosted LLM inference
+Haru's initial mission is hot failover for self-hosted LLM inference
 at the cost of zero idle GPUs:
 
 - The **active** domain serves OpenAI-compatible inference traffic.
@@ -48,20 +48,20 @@ at the cost of zero idle GPUs:
 The intended layout is one GPU hosting a bundle of smaller models
 (one vLLM server per model) and a second GPU hosting one large model,
 mirrored across two failure domains (different regions or different
-clouds). haru itself hard-codes none of this: fleets, domains, slots,
+clouds). Haru itself hard-codes none of this: fleets, domains, slots,
 models and placement are all data.
 
-## Layering: SkyPilot, SkyServe, and haru
+## Layering: SkyPilot, SkyServe, and Haru
 
 - **[SkyPilot](https://skypilot.readthedocs.io/)** is the lower-level
-  multi-cloud GPU provisioning layer. haru asks SkyPilot to create,
+  multi-cloud GPU provisioning layer. Haru asks SkyPilot to create,
   stop and inspect GPU domains; AWS/GCP/region/spot/GPU constraints
   are expressed as SkyPilot task configuration, never as direct cloud
   API calls.
 - **[SkyServe](https://skypilot.readthedocs.io/en/latest/serving/sky-serve.html)**
   is the serving-oriented orchestration layer for active inference
   services: replicas, placement, recovery, load balancing.
-- **haru** is the higher-level GPU HAL that neither replaces: it owns
+- **Haru** is the higher-level GPU HAL that neither replaces: it owns
   Fleet/Domain/Slot state, Active/Standby promotion, the standby
   sleep-and-train lifecycle, route intent, and runtime supervision.
 
@@ -74,7 +74,7 @@ models and placement are all data.
 | **Slot** | One workload on one GPU: an `inference` slot (the models a GPU serves, each with its own vLLM server) or a `training` slot (the preemptible LoRA job that runs while the domain is standby). |
 | **Driver** | The provisioning boundary (`@haru/driver-skypilot`, `@haru/driver-skyserve`): translate domain/service specs into SkyPilot/SkyServe YAML and wrap the `sky` CLI behind an injectable, testable exec function. |
 | **Supervisor** | The per-domain agent (`services/haru-supervisor`): vLLM sleep/wake orchestration, training start/stop with grace/SIGKILL escalation, GPU memory checks, synthetic probes, readiness. |
-| **RouteIntent** | The provider-neutral routing answer (`active`/`standby` targets, eligibility, weights, revision) that external routing layers consume. haru contains no router-vendor logic. |
+| **RouteIntent** | The provider-neutral routing answer (`active`/`standby` targets, eligibility, weights, revision) that external routing layers consume. Haru contains no router-vendor logic. |
 
 ## Repository layout
 
@@ -149,7 +149,7 @@ server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
 
 ## vLLM requirements (supervisor hosts)
 
-Every vLLM server managed by a haru supervisor must be started with:
+Every vLLM server managed by a Haru supervisor must be started with:
 
 - `--enable-sleep-mode` and `VLLM_SERVER_DEV_MODE=1` (the sleep/wake
   admin endpoints are development-mode endpoints),
@@ -214,7 +214,7 @@ in `pnpm-workspace.yaml`).
 
 - **Direct AWS/GCP providers.** SkyPilot and SkyServe are the only
   drivers; clouds are placement constraints, not integrations.
-- **Router/DNS/proxy reconciliation.** haru emits provider-neutral
+- **Router/DNS/proxy reconciliation.** Haru emits provider-neutral
   route intent; acting on it (DNS, edge proxies, CDN configuration)
   belongs to the consumer.
 - **Driver-backed provisioning in the reconciler.** The drivers are
