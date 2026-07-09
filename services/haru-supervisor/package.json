@@ -9,7 +9,7 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint --deny-warnings . && eslint .",
+    "lint": "oxlint --type-aware --deny-warnings . && eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

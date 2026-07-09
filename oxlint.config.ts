@@ -1,9 +1,13 @@
 import { defineConfig } from "oxlint";
 
 // Fast pre-flight linter. Every package's `lint` script runs
-// `oxlint --deny-warnings . && eslint .`; this config mirrors the
-// non-type-aware rules configured in `eslint.config.ts` so the two
-// linters agree. Type-aware rules stay ESLint-only.
+// `oxlint --type-aware --deny-warnings . && eslint .`; this config
+// mirrors the non-type-aware rules configured in `eslint.config.ts`
+// so the two linters agree. `--type-aware` (tsgo-backed via
+// oxlint-tsgolint) additionally enables the type-aware rules in the
+// enabled categories (e.g. typescript/no-floating-promises);
+// typescript-eslint's strictTypeChecked remains the second opinion on
+// the ESLint side.
 export default defineConfig({
   plugins: ["typescript", "unicorn", "oxc", "import", "promise"],
   categories: {

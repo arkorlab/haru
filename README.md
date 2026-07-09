@@ -6,6 +6,8 @@ gives higher-level systems a small, stable, provider-neutral surface
 over messy, heterogeneous GPU infrastructure. The name also reads as
 haru (spring: 春) in Japanese.
 
+[日本語版 README](README.ja.md)
+
 ## Why Haru exists
 
 Products that host LLM inference need GPU lifecycle management:
@@ -28,7 +30,7 @@ at the cost of zero idle GPUs:
   RAM and the KV cache is discarded. This frees the standby GPUs'
   VRAM, which is used to run **preemptible LoRA training** while the
   domain waits.
-- When the active domain fails, haru promotes the standby:
+- When the active domain fails, Haru promotes the standby:
 
   1. stop LoRA training (SIGTERM, then SIGKILL after a grace period;
      checkpointing is best-effort inside the grace window and failover
@@ -198,7 +200,7 @@ curl -s -X POST localhost:8700/v1/fleets/default/reconcile  # repeat until settl
 pnpm install
 pnpm build          # turbo run build (topological)
 pnpm typecheck      # tsc --noEmit everywhere
-pnpm lint           # oxlint --deny-warnings, then strict type-aware ESLint
+pnpm lint           # oxlint --type-aware --deny-warnings, then strict type-aware ESLint
 pnpm format         # oxfmt --write
 pnpm format:check   # CI gate
 pnpm test           # vitest everywhere (PGlite-backed DB and server tests)
@@ -208,7 +210,11 @@ TypeScript 7 (`tsc`) builds and typechecks the code; a TypeScript 6.x
 copy is installed at the workspace root only for typescript-eslint's
 type-aware linting (its supported peer range is still `<6.1.0`). Drop
 the extra copy once typescript-eslint supports TS 7 (see the comment
-in `pnpm-workspace.yaml`).
+in `pnpm-workspace.yaml`). oxlint's type-aware rules run through the
+tsgo-backed `oxlint-tsgolint` binary, independently of both copies.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) ([日本語](CONTRIBUTING.ja.md))
+for development conventions and PR guidelines.
 
 ## Intentionally out of scope (for now)
 
