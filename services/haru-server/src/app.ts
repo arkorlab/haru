@@ -1,7 +1,15 @@
-import { buildRouteIntent, decideDemotion, decidePromotion } from "@haru/core";
+import {
+  buildRouteIntent,
+  decideDemotion,
+  decidePromotion,
+  findRoutableBinding,
+  isRoutableDomainState,
+  routableModels,
+} from "@haru/core";
 import {
   appendEvent,
   createOperation,
+  getFleetRouteRevision,
   getFleetSnapshot,
   toOperationSnapshot,
 } from "@haru/db";
@@ -10,8 +18,11 @@ import {
   demoteRequestSchema,
   errorBody,
   promoteRequestSchema,
+  readJsonBody,
   type FleetSnapshot,
+  type OperationAcceptedResponse,
   type OperationKind,
+  type PromoteNoopResponse,
 } from "@haru/protocol";
 import { Hono } from "hono";
 
@@ -46,18 +57,8 @@ export interface AppDependencies {
 
 interface SnapshotCacheEntry {
   snapshot: FleetSnapshot;
+  routeRevision: number;
   expiresAtMs: number;
-}
-
-/** Parse a request body as JSON, mapping malformed JSON to null. */
-async function readJsonBody(c: {
-  req: { json: () => Promise<unknown> };
-}): Promise<unknown> {
-  try {
-    return await c.req.json();
-  } catch {
-    return null;
-  }
 }
 
 export function createApp(dependencies: AppDependencies) {
@@ -69,28 +70,47 @@ export function createApp(dependencies: AppDependencies) {
     config.chatHeaderTimeoutMs ?? DEFAULT_CHAT_HEADER_TIMEOUT_MS;
   const snapshotCacheTtlMs = config.snapshotCacheTtlMs ?? 2000;
 
+  // Tiny read cache for the chat hot path so per-request DB load stays
+  // bounded. Keyed by fleet id (slug and UUID references share one
+  // entry) and revalidated per request against the fleet's route
+  // revision (one narrow SELECT), so an active-pointer move surfaces
+  // immediately; the TTL only bounds non-routing staleness (slot
+  // states). The reconciler additionally drops the entry after a
+  // winning switch_active in this process.
+  const snapshotCache = new Map<string, SnapshotCacheEntry>();
+
   const reconcilerDependencies = {
     database,
     fetchFn: fetchFunction,
     now,
     supervisorToken: config.supervisorToken,
+    onRouteChange: (fleetId: string) => {
+      snapshotCache.delete(fleetId);
+    },
   };
 
-  // Tiny read cache for the chat hot path so per-request DB load stays
-  // bounded. Route changes surface within the TTL.
-  const snapshotCache = new Map<string, SnapshotCacheEntry>();
   async function cachedSnapshot(
     reference: string,
   ): Promise<FleetSnapshot | null> {
+    const pointer = await getFleetRouteRevision(database, reference);
+    if (!pointer) {
+      return null;
+    }
     const nowMs = now().getTime();
-    const hit = snapshotCache.get(reference);
-    if (hit && hit.expiresAtMs > nowMs) {
+    const hit = snapshotCache.get(pointer.id);
+    // A number comparison on hit?.routeRevision narrows hit: equality
+    // with a number can only hold when the entry exists.
+    if (
+      hit?.routeRevision === pointer.routeRevision &&
+      hit.expiresAtMs > nowMs
+    ) {
       return hit.snapshot;
     }
-    const snapshot = await getFleetSnapshot(database, reference);
+    const snapshot = await getFleetSnapshot(database, pointer.id);
     if (snapshot) {
-      snapshotCache.set(reference, {
+      snapshotCache.set(pointer.id, {
         snapshot,
+        routeRevision: snapshot.routeRevision,
         expiresAtMs: nowMs + snapshotCacheTtlMs,
       });
     }
@@ -152,7 +172,7 @@ export function createApp(dependencies: AppDependencies) {
         body: {
           status: "already_active",
           routeRevision: decision.routeRevision,
-        },
+        } satisfies PromoteNoopResponse,
       };
     }
     if (decision.type === "invalid_target") {
@@ -194,12 +214,12 @@ export function createApp(dependencies: AppDependencies) {
       body: {
         status: "accepted",
         operation: toOperationSnapshot(result.operation),
-      },
+      } satisfies OperationAcceptedResponse,
     };
   }
 
   app.post("/v1/fleets/:fleetId/promote", async (c) => {
-    const body: unknown = await readJsonBody(c);
+    const body: unknown = await readJsonBody(c, null);
     const parsed = promoteRequestSchema.safeParse(body);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
@@ -213,7 +233,7 @@ export function createApp(dependencies: AppDependencies) {
   });
 
   app.post("/v1/fleets/:fleetId/demote", async (c) => {
-    const body: unknown = await readJsonBody(c);
+    const body: unknown = await readJsonBody(c, null);
     const parsed = demoteRequestSchema.safeParse(body);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
@@ -259,10 +279,7 @@ export function createApp(dependencies: AppDependencies) {
       snapshot.activeDomainId === null
         ? undefined
         : snapshot.domains.find((d) => d.id === snapshot.activeDomainId);
-    const isRoutable =
-      active !== undefined &&
-      (active.state === "ready" || active.state === "degraded");
-    if (!active || !isRoutable) {
+    if (!active || !isRoutableDomainState(active)) {
       return c.json(
         errorBody(
           "no_active_domain",
@@ -272,14 +289,14 @@ export function createApp(dependencies: AppDependencies) {
       );
     }
 
-    const bindings = active.slots.flatMap((slot) =>
-      slot.spec.kind === "inference" && slot.state === "serving"
-        ? slot.spec.models
-        : [],
-    );
-    const binding = bindings.find((b) => b.name === model);
+    // Same per-model routability predicate route intent reports, so
+    // haru's own ingress and external routing consumers agree.
+    const binding = findRoutableBinding(active, model);
     if (!binding) {
-      const available = bindings.map((b) => b.name).join(", ");
+      const available = routableModels(active)
+        .filter((m) => m.eligible)
+        .map((m) => m.name)
+        .join(", ");
       return c.json(
         errorBody(
           "model_not_found",
@@ -294,8 +311,15 @@ export function createApp(dependencies: AppDependencies) {
       binding.servingUrl,
       bodyText,
       chatHeaderTimeoutMs,
+      // Propagate a pre-header client disconnect to the upstream so an
+      // abandoned request stops generating immediately.
+      c.req.raw.signal,
     );
     if (!result.ok) {
+      if (result.status === 499) {
+        // The client is gone; a bare nginx-style 499 for logs/tests.
+        return new Response(null, { status: 499 });
+      }
       return c.json(result.body, result.status);
     }
     return result.response;

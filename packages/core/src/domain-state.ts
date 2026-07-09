@@ -22,7 +22,10 @@ const DOMAIN_TRANSITIONS: Record<DomainState, readonly DomainState[]> = {
   provisioning: ["ready", "failed", "stopping"],
   ready: ["degraded", "failed", "stopping"],
   degraded: ["ready", "failed", "stopping"],
-  failed: ["provisioning", "stopping"],
+  // failed -> degraded: an escalated-away active whose supervisor
+  // heartbeats again rejoins as degraded (then recovers to ready via
+  // the normal heartbeat path).
+  failed: ["provisioning", "degraded", "stopping"],
   stopping: ["stopped"],
   stopped: ["provisioning"],
 };

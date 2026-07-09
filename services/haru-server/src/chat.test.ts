@@ -1,4 +1,9 @@
-import { applyFleetLayout } from "@haru/db";
+import {
+  applyFleetLayout,
+  getFleetSnapshot,
+  switchActive,
+  transitionDomainSlots,
+} from "@haru/db";
 import { createTestDatabase } from "@haru/db/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -9,6 +14,7 @@ import {
   testLayout,
   ALPHA_SERVING,
   ALPHA_SUPERVISOR,
+  BETA_SERVING,
   BETA_SUPERVISOR,
 } from "./fake-supervisor.test-helper.js";
 
@@ -161,7 +167,8 @@ describe("POST /v1/chat/completions", () => {
     const hangingFetch: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => {
-          reject(new DOMException("The operation was aborted.", "AbortError"));
+          const reason: unknown = init.signal?.reason;
+          reject(reason instanceof Error ? reason : new Error("aborted"));
         });
       });
     const app = chatApp({
@@ -195,5 +202,89 @@ describe("POST /v1/chat/completions", () => {
     });
     expect(response.status).toBe(502);
     expect((await response.json()).error.code).toBe("upstream_unreachable");
+  });
+
+  it("aborts the upstream and answers 499 when the client disconnects pre-headers", async () => {
+    let wasUpstreamAborted = false;
+    const hangingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          wasUpstreamAborted = true;
+          const reason: unknown = init.signal?.reason;
+          reject(reason instanceof Error ? reason : new Error("aborted"));
+        });
+      });
+    // Long TTFB budget: only the client signal can cut this request.
+    const app = chatApp({
+      fetchFn: hangingFetch,
+      config: { chatHeaderTimeoutMs: 60_000 },
+    });
+    const client = new AbortController();
+    const pending = app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: chatBody,
+      signal: client.signal,
+    });
+    // Let the handler reach the upstream fetch, then walk away.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    client.abort();
+    const response = await pending;
+    expect(response.status).toBe(499);
+    expect(wasUpstreamAborted).toBe(true);
+  });
+
+  it("routes to the new active immediately after a pointer move (cache revalidation)", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const app = chatApp({ chatCalls });
+    const request = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+      });
+
+    // First request populates the snapshot cache with alpha active.
+    expect((await request()).status).toBe(200);
+    expect(chatCalls[0]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+
+    // A pointer move from OUTSIDE this process (no in-process
+    // invalidation hook fires): direct CAS, then walk beta's slots to
+    // serving. The per-request revision check must bust the cache
+    // within the TTL.
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+    await transitionDomainSlots(
+      database,
+      betaId,
+      "inference",
+      ["sleeping"],
+      "waking",
+    );
+    await transitionDomainSlots(
+      database,
+      betaId,
+      "inference",
+      ["waking"],
+      "probing",
+    );
+    await transitionDomainSlots(
+      database,
+      betaId,
+      "inference",
+      ["probing"],
+      "serving",
+    );
+
+    expect((await request()).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
   });
 });

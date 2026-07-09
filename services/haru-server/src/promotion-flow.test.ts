@@ -285,6 +285,77 @@ describe("full promotion flow", () => {
     );
   });
 
+  it("escalates a reachable-but-dead active to failed and auto-fails-over", async () => {
+    await seed({ autoFailover: true, degradedGraceMs: 100 });
+    // Alpha's supervisor answers every call, but its models are down:
+    // heartbeat staleness never fires, so only the degraded
+    // escalation path can promote away from it.
+    alphaSupervisor.sleeping = true;
+    const app = makeApp();
+
+    // First tick: active ready + !status.ready -> degraded.
+    await reconcileOnce(app);
+    const degraded = await getFleetSnapshot(database, "default");
+    expect(degraded?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "degraded",
+    );
+    expect(degraded?.activeDomainId).toBe(
+      degraded?.domains.find((d) => d.slug === "alpha")?.id,
+    );
+
+    // Past the grace, the escalation flips alpha to failed and the
+    // auto-failover promote fires in the same tick.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const result = await reconcileUntilSettled(app);
+    const operation = result.operation as {
+      state: string;
+      targetDomainId: string;
+    };
+    expect(operation.state).toBe("succeeded");
+    expect(operation.targetDomainId).toBe(beta().id);
+
+    const intentResponse = await app.request("/v1/fleets/default/route-intent");
+    const intent = routeIntentSchema.parse(await intentResponse.json());
+    expect(intent.active?.domainSlug).toBe("beta");
+
+    // The escalated old active rejoins via failed -> degraded (and
+    // recovers as a standby) because its supervisor keeps answering.
+    await reconcileOnce(app);
+    await reconcileOnce(app);
+    const after = await getFleetSnapshot(database, "default");
+    expect(["degraded", "ready"]).toContain(
+      after?.domains.find((d) => d.slug === "alpha")?.state,
+    );
+  });
+
+  it("polls domain heartbeats concurrently", async () => {
+    await seed();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const base = buildFakeFetch({
+      supervisors: {
+        [ALPHA_SUPERVISOR]: alphaSupervisor,
+        [BETA_SUPERVISOR]: betaSupervisor,
+      },
+    });
+    const gated: typeof fetch = async (input, init) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const response = await base(input, init);
+      inFlight -= 1;
+      return response;
+    };
+    const app = createApp({
+      database,
+      config: { supervisorToken: "supervisor-secret" },
+      fetchFn: gated,
+    });
+    await reconcileOnce(app);
+    // Both domains' status polls were in flight at the same time.
+    expect(maxInFlight).toBe(2);
+  });
+
   it("demote puts a standby to sleep and starts training", async () => {
     await seed();
     // Beta starts sleeping+training in the layout; wake it first so the

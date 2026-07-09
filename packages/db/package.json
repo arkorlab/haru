@@ -27,6 +27,7 @@
     "db:seed": "tsx src/seed.ts"
   },
   "dependencies": {
+    "@haru/core": "workspace:*",
     "@haru/protocol": "workspace:*",
     "@neondatabase/serverless": "catalog:",
     "drizzle-orm": "catalog:",
@@ -35,8 +36,10 @@
   "devDependencies": {
     "@electric-sql/pglite": "catalog:",
     "@types/node": "catalog:",
+    "@types/pg": "catalog:",
     "@vitest/coverage-v8": "catalog:",
     "drizzle-kit": "catalog:",
+    "pg": "catalog:",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

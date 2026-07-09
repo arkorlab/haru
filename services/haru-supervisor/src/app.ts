@@ -1,10 +1,11 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-
 import {
+  isBearerTokenValid,
   errorBody,
   probeRequestSchema,
+  readJsonBody,
   trainingStopRequestSchema,
   vllmTargetRequestSchema,
+  type ReadyResponse,
   type SupervisorConfig,
   type SupervisorSlotStatus,
 } from "@haru/protocol";
@@ -14,17 +15,6 @@ import { readGpuMemory, type ExecFunction } from "./gpu.js";
 import { probeModel } from "./probe.js";
 import { TrainingRun, type SpawnFunction } from "./training.js";
 import { isServerSleeping, sleepServer, wakeServer } from "./vllm-client.js";
-
-/** Parse a request body as JSON, mapping malformed/absent JSON to {}. */
-async function readJsonBody(c: {
-  req: { json: () => Promise<unknown> };
-}): Promise<unknown> {
-  try {
-    return await c.req.json();
-  } catch {
-    return {};
-  }
-}
 
 /** Probe one local vLLM server's sleep state; null when unreachable. */
 async function sleepingOrNull(
@@ -44,12 +34,6 @@ function isReady(statuses: SupervisorSlotStatus[]): boolean {
     .filter((s) => s.kind === "inference")
     .flatMap((s) => s.models ?? []);
   return models.length > 0 && models.every((m) => m.sleeping === false);
-}
-
-function isSameSecret(a: string, b: string): boolean {
-  const digestA = createHash("sha256").update(a).digest();
-  const digestB = createHash("sha256").update(b).digest();
-  return timingSafeEqual(digestA, digestB);
 }
 
 export interface SupervisorDependencies {
@@ -101,13 +85,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   app.use("/v1/*", async (c, next) => {
-    if (token === undefined || token === "") {
-      await next();
-      return;
-    }
-    const header = c.req.header("authorization") ?? "";
-    const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (presented === "" || !isSameSecret(presented, token)) {
+    if (!isBearerTokenValid(c.req.header("authorization"), token)) {
       return c.json(
         errorBody("unauthorized", "invalid or missing bearer token"),
         401,
@@ -117,29 +95,36 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   async function slotStatuses(): Promise<SupervisorSlotStatus[]> {
-    const statuses: SupervisorSlotStatus[] = [];
-    for (const slot of inferenceSlots) {
-      const models = await Promise.all(
-        slot.models.map(async (model) => ({
-          name: model.name,
-          port: model.port,
-          sleeping: await sleepingOrNull(fetchFunction, model.port),
-        })),
-      );
-      statuses.push({ gpuIndex: slot.gpuIndex, kind: "inference", models });
-    }
-    for (const slot of trainingSlots) {
+    // All local vLLM servers are probed concurrently (across slots,
+    // not just within one) so a multi-model host answers /v1/status
+    // within one admin-call round trip.
+    const inferenceStatuses = await Promise.all(
+      inferenceSlots.map(
+        async (slot): Promise<SupervisorSlotStatus> => ({
+          gpuIndex: slot.gpuIndex,
+          kind: "inference",
+          models: await Promise.all(
+            slot.models.map(async (model) => ({
+              name: model.name,
+              port: model.port,
+              sleeping: await sleepingOrNull(fetchFunction, model.port),
+            })),
+          ),
+        }),
+      ),
+    );
+    const trainingStatuses = trainingSlots.map((slot): SupervisorSlotStatus => {
       const run = trainingRuns.get(slot.gpuIndex);
-      statuses.push({
+      return {
         gpuIndex: slot.gpuIndex,
         kind: "training",
         training: {
           state: run?.state ?? "idle",
           pids: run?.pids ?? [],
         },
-      });
-    }
-    return statuses;
+      };
+    });
+    return [...inferenceStatuses, ...trainingStatuses];
   }
 
   app.get("/v1/status", async (c) => {
@@ -149,7 +134,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
 
   app.get("/v1/ready", async (c) => {
     const slots = await slotStatuses();
-    return c.json({ ready: isReady(slots) });
+    return c.json({ ready: isReady(slots) } satisfies ReadyResponse);
   });
 
   function targetInferenceSlots(gpuIndex: number | undefined) {
@@ -169,17 +154,26 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     gpuIndex: number | undefined,
     action: (port: number) => Promise<void>,
   ): Promise<{ ok: true } | { ok: false; failures: string[] }> {
-    const failures: string[] = [];
-    for (const slot of targetInferenceSlots(gpuIndex)) {
-      for (const model of slot.models) {
+    // Fan out concurrently: a slow sleep/wake on one model must not
+    // serialize behind the others (multi-model hosts would otherwise
+    // exceed the reconciler's nudge timeout and rely on retries). The
+    // per-model catch keeps the collect-all-failures envelope, in
+    // config order.
+    const models = targetInferenceSlots(gpuIndex).flatMap(
+      (slot) => slot.models,
+    );
+    const outcomes = await Promise.all(
+      models.map(async (model) => {
         try {
           await action(model.port);
+          return null;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          failures.push(`${model.name}: ${detail}`);
+          return `${model.name}: ${detail}`;
         }
-      }
-    }
+      }),
+    );
+    const failures = outcomes.filter((outcome) => outcome !== null);
     return failures.length === 0 ? { ok: true } : { ok: false, failures };
   }
 
@@ -191,7 +185,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   }
 
   app.post("/v1/vllm/sleep", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c));
+    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c, {}));
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -216,7 +210,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/vllm/wake", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c));
+    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c, {}));
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -246,7 +240,9 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/training/stop", async (c) => {
-    const parsed = trainingStopRequestSchema.safeParse(await readJsonBody(c));
+    const parsed = trainingStopRequestSchema.safeParse(
+      await readJsonBody(c, {}),
+    );
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -288,7 +284,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/probe", async (c) => {
-    const parsed = probeRequestSchema.safeParse(await readJsonBody(c));
+    const parsed = probeRequestSchema.safeParse(await readJsonBody(c, {}));
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }

@@ -1,5 +1,5 @@
 {
-  "id": "0a93e280-79e9-4e56-aa2a-1972b7a95fa5",
+  "id": "71662a01-a331-4189-b325-da1f00b5e9f2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -327,6 +327,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "source_domain_id": {
+          "name": "source_domain_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "current_step": {
           "name": "current_step",
           "type": "text",
@@ -338,13 +344,6 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "attempt": {
-          "name": "attempt",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
         },
         "error": {
           "name": "error",

@@ -102,8 +102,8 @@ describe("GET /v1/fleets/:fleetId/route-intent", () => {
     const intent = routeIntentSchema.parse(await response.json());
     expect(intent.active?.domainSlug).toBe("alpha");
     expect(intent.active?.eligible).toBe(true);
-    expect(intent.standby?.domainSlug).toBe("beta");
-    expect(intent.standby?.weight).toBe(0);
+    expect(intent.standbys.map((s) => s.domainSlug)).toEqual(["beta"]);
+    expect(intent.standbys[0]?.weight).toBe(0);
     expect(intent.revision).toBe(1);
   });
 });

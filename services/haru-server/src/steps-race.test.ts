@@ -147,11 +147,26 @@ describe("switch_active under concurrent ticks", () => {
       "switch_active",
       new Date(Date.now() - 60_000),
     );
+    // Walk the legal wake path the promotion would have taken.
     await transitionDomainSlots(
       database,
       domainId("beta"),
       "inference",
       ["sleeping"],
+      "waking",
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["waking"],
+      "probing",
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["probing"],
       "serving",
     );
 
@@ -187,11 +202,26 @@ describe("switch_active under concurrent ticks", () => {
       "sleep_vllm",
       new Date(Date.now() - 600_000),
     );
+    // Walk the legal wake path the promotion would have taken.
     await transitionDomainSlots(
       database,
       domainId("beta"),
       "inference",
       ["sleeping"],
+      "waking",
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["waking"],
+      "probing",
+    );
+    await transitionDomainSlots(
+      database,
+      domainId("beta"),
+      "inference",
+      ["probing"],
       "serving",
     );
 

@@ -1,11 +1,8 @@
-import { readFileSync } from "node:fs";
-
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { applyFleetLayout } from "./repo/layout.js";
 import {
   advanceStep,
-  bumpAttempt,
   claimOperation,
   completeOperation,
   createOperation,
@@ -15,7 +12,7 @@ import {
   toOperationSnapshot,
 } from "./repo/operations.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
-import { createTestDatabase } from "./testing/index.js";
+import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
 import type { HaruDatabase } from "./client.js";
 import type { FleetSnapshot } from "@haru/protocol";
@@ -26,11 +23,7 @@ let fleet: FleetSnapshot;
 
 beforeEach(async () => {
   ({ db: database, close } = await createTestDatabase());
-  const layoutJson = readFileSync(
-    new URL("../examples/fleet.example.json", import.meta.url),
-    "utf8",
-  );
-  await applyFleetLayout(database, JSON.parse(layoutJson));
+  await applyFleetLayout(database, loadExampleFleetLayout());
   const snapshot = await getFleetSnapshot(database, "default");
   if (!snapshot) throw new Error("seed failed");
   fleet = snapshot;
@@ -113,16 +106,18 @@ describe("operation lifecycle CAS", () => {
       kind: "promote",
       targetDomainId: beta().id,
     });
-    expect(await claimOperation(database, operation.id, "stop_training")).toBe(
-      true,
+    // The winning claim returns the full claimed row (no re-read).
+    const claimed = await claimOperation(
+      database,
+      operation.id,
+      "stop_training",
     );
-    expect(await claimOperation(database, operation.id, "stop_training")).toBe(
-      false,
-    );
-    const row = await getOperation(database, operation.id);
-    expect(row?.state).toBe("running");
-    expect(row?.currentStep).toBe("stop_training");
-    expect(row?.stepStartedAt).not.toBeNull();
+    expect(claimed?.state).toBe("running");
+    expect(claimed?.currentStep).toBe("stop_training");
+    expect(claimed?.stepStartedAt).not.toBeNull();
+    expect(
+      await claimOperation(database, operation.id, "stop_training"),
+    ).toBeNull();
   });
 
   it("advanceStep races produce exactly one winner", async () => {
@@ -136,24 +131,11 @@ describe("operation lifecycle CAS", () => {
       advanceStep(database, operation.id, "stop_training", "verify_gpu"),
       advanceStep(database, operation.id, "stop_training", "verify_gpu"),
     ]);
-    expect([a, b].filter(Boolean)).toHaveLength(1);
+    const winners = [a, b].filter((row) => row !== null);
+    expect(winners).toHaveLength(1);
+    expect(winners[0]?.currentStep).toBe("verify_gpu");
     const row = await getOperation(database, operation.id);
     expect(row?.currentStep).toBe("verify_gpu");
-    expect(row?.attempt).toBe(0);
-  });
-
-  it("bumpAttempt counts nudges on the current step only", async () => {
-    const { operation } = await createOperation(database, {
-      fleetId: fleet.id,
-      kind: "promote",
-      targetDomainId: beta().id,
-    });
-    await claimOperation(database, operation.id, "stop_training");
-    await bumpAttempt(database, operation.id, "stop_training");
-    await bumpAttempt(database, operation.id, "stop_training");
-    await bumpAttempt(database, operation.id, "verify_gpu");
-    const row = await getOperation(database, operation.id);
-    expect(row?.attempt).toBe(2);
   });
 
   it("complete requires the expected final step", async () => {
@@ -165,11 +147,12 @@ describe("operation lifecycle CAS", () => {
     await claimOperation(database, operation.id, "sleep_vllm");
     expect(
       await completeOperation(database, operation.id, "start_training"),
-    ).toBe(false);
+    ).toBeNull();
     await advanceStep(database, operation.id, "sleep_vllm", "start_training");
     expect(
-      await completeOperation(database, operation.id, "start_training"),
-    ).toBe(true);
+      (await completeOperation(database, operation.id, "start_training"))
+        ?.state,
+    ).toBe("succeeded");
     const row = await getOperation(database, operation.id);
     expect(row?.state).toBe("succeeded");
     expect(row?.finishedAt).not.toBeNull();
@@ -184,12 +167,14 @@ describe("operation lifecycle CAS", () => {
     });
     await claimOperation(database, operation.id, "stop_training");
     expect(
-      await failOperation(database, operation.id, {
-        step: "stop_training",
-        code: "timeout",
-        message: "training did not stop in time",
-      }),
-    ).toBe(true);
+      (
+        await failOperation(database, operation.id, {
+          step: "stop_training",
+          code: "timeout",
+          message: "training did not stop in time",
+        })
+      )?.state,
+    ).toBe("failed");
     const row = await getOperation(database, operation.id);
     expect(row?.state).toBe("failed");
     expect(row?.error?.code).toBe("timeout");
@@ -200,7 +185,7 @@ describe("operation lifecycle CAS", () => {
         code: "again",
         message: "no",
       }),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   it("failOperation with a step guard no-ops when the step already advanced", async () => {
@@ -220,7 +205,7 @@ describe("operation lifecycle CAS", () => {
         { step: "stop_training", code: "step_timeout", message: "stale" },
         "stop_training",
       ),
-    ).toBe(false);
+    ).toBeNull();
     expect((await getOperation(database, operation.id))?.state).toBe("running");
     // The tick that holds the real current step can.
     expect(
@@ -230,7 +215,7 @@ describe("operation lifecycle CAS", () => {
         { step: "verify_gpu", code: "boom", message: "real" },
         "verify_gpu",
       ),
-    ).toBe(true);
+    ).not.toBeNull();
   });
 
   it("toOperationSnapshot round-trips through the protocol schema", async () => {

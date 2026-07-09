@@ -21,7 +21,6 @@ export const operationSnapshotSchema = z.object({
   targetDomainId: z.uuid(),
   currentStep: operationStepSchema.nullable(),
   stepStartedAt: z.iso.datetime({ offset: true }).nullable(),
-  attempt: z.number().int().nonnegative(),
   error: operationErrorSchema.nullable(),
   createdAt: z.iso.datetime({ offset: true }),
   finishedAt: z.iso.datetime({ offset: true }).nullable(),

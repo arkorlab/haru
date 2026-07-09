@@ -11,6 +11,10 @@ export const serverEnvironmentSchema = z.object({
   /** TTFB bound for the chat proxy; raise for long non-streaming
    * completions (headers arrive only after full generation). */
   HARU_CHAT_HEADER_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  /** Fleet snapshot cache TTL for the chat hot path (default 2000).
+   * Pointer moves surface immediately regardless (per-request route
+   * revision check); this only bounds slot-state staleness. */
+  HARU_SNAPSHOT_CACHE_TTL_MS: z.coerce.number().int().positive().optional(),
   /** Reconcile loop interval; unset disables the background loop. */
   HARU_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   /** Fleets the background loop reconciles (comma-separated slugs). */

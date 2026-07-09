@@ -22,7 +22,6 @@ export function toOperationSnapshot(row: OperationRow): OperationSnapshot {
     targetDomainId: row.targetDomainId,
     currentStep: row.currentStep,
     stepStartedAt: row.stepStartedAt?.toISOString() ?? null,
-    attempt: row.attempt,
     error: row.error ?? null,
     createdAt: row.createdAt.toISOString(),
     finishedAt: row.finishedAt?.toISOString() ?? null,
@@ -107,7 +106,11 @@ export async function getOperation(
   return rows[0] ?? null;
 }
 
-/** Claim a pending operation for execution (pending -> running). */
+/**
+ * Claim a pending operation for execution (pending -> running).
+ * Returns the claimed row (so callers need no re-read), or null when
+ * the CAS lost.
+ */
 export async function claimOperation(
   database: HaruDatabase,
   operationId: string,
@@ -116,19 +119,18 @@ export async function claimOperation(
   // against its own injected clock, so mixing in the DB clock would
   // shift every step-timeout budget by the host/DB skew.
   at: Date = new Date(),
-): Promise<boolean> {
+): Promise<OperationRow | null> {
   const rows = await database
     .update(operations)
     .set({
       state: "running",
       currentStep: firstStep,
       stepStartedAt: at,
-      attempt: 0,
       updatedAt: sql`now()`,
     })
     .where(and(eq(operations.id, operationId), eq(operations.state, "pending")))
-    .returning({ id: operations.id });
-  return rows.length === 1;
+    .returning();
+  return rows[0] ?? null;
 }
 
 /**
@@ -143,13 +145,12 @@ export async function advanceStep(
   toStep: OperationStep,
   /** App clock; see claimOperation. */
   at: Date = new Date(),
-): Promise<boolean> {
+): Promise<OperationRow | null> {
   const rows = await database
     .update(operations)
     .set({
       currentStep: toStep,
       stepStartedAt: at,
-      attempt: 0,
       updatedAt: sql`now()`,
     })
     .where(
@@ -159,26 +160,8 @@ export async function advanceStep(
         eq(operations.currentStep, fromStep),
       ),
     )
-    .returning({ id: operations.id });
-  return rows.length === 1;
-}
-
-/** Record one more reconciler nudge on the current step. */
-export async function bumpAttempt(
-  database: HaruDatabase,
-  operationId: string,
-  step: OperationStep,
-): Promise<void> {
-  await database
-    .update(operations)
-    .set({ attempt: sql`${operations.attempt} + 1`, updatedAt: sql`now()` })
-    .where(
-      and(
-        eq(operations.id, operationId),
-        eq(operations.state, "running"),
-        eq(operations.currentStep, step),
-      ),
-    );
+    .returning();
+  return rows[0] ?? null;
 }
 
 /** Finish a running operation from its final step. */
@@ -186,7 +169,7 @@ export async function completeOperation(
   database: HaruDatabase,
   operationId: string,
   fromStep: OperationStep,
-): Promise<boolean> {
+): Promise<OperationRow | null> {
   const rows = await database
     .update(operations)
     .set({
@@ -202,8 +185,8 @@ export async function completeOperation(
         eq(operations.currentStep, fromStep),
       ),
     )
-    .returning({ id: operations.id });
-  return rows.length === 1;
+    .returning();
+  return rows[0] ?? null;
 }
 
 /**
@@ -218,7 +201,7 @@ export async function failOperation(
   operationId: string,
   error: OperationError,
   fromStep?: OperationStep,
-): Promise<boolean> {
+): Promise<OperationRow | null> {
   const rows = await database
     .update(operations)
     .set({
@@ -236,6 +219,6 @@ export async function failOperation(
           : [eq(operations.currentStep, fromStep)]),
       ),
     )
-    .returning({ id: operations.id });
-  return rows.length === 1;
+    .returning();
+  return rows[0] ?? null;
 }

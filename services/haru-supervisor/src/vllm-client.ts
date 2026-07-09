@@ -8,6 +8,8 @@
  * host is through the supervisor's authenticated control API.
  */
 
+import { fetchWithTimeout } from "@haru/protocol";
+
 export class VllmAdminError extends Error {
   constructor(message: string) {
     super(message);
@@ -24,14 +26,12 @@ async function adminCall(
   method: "GET" | "POST",
   pathAndQuery: string,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, ADMIN_CALL_TIMEOUT_MS);
   try {
-    const response = await fetchFunction(
+    const response = await fetchWithTimeout(
+      fetchFunction,
       `http://${LOCAL_HOST}:${port}${pathAndQuery}`,
-      { method, signal: controller.signal },
+      { method },
+      ADMIN_CALL_TIMEOUT_MS,
     );
     if (!response.ok) {
       throw new VllmAdminError(
@@ -47,8 +47,6 @@ async function adminCall(
     throw new VllmAdminError(
       `vLLM :${port} ${pathAndQuery} unreachable: ${detail}`,
     );
-  } finally {
-    clearTimeout(timer);
   }
 }
 

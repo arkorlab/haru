@@ -1,51 +1,65 @@
-import { errorBody, joinUrl } from "@haru/protocol";
+import { errorBody, fetchWithTimeout, joinUrl } from "@haru/protocol";
 
 /** Default bound on the wait for upstream response headers (TTFB). */
 export const DEFAULT_CHAT_HEADER_TIMEOUT_MS = 30_000;
 
 export type ChatProxyResult =
   | { ok: true; response: Response }
-  | { ok: false; status: 502 | 504; body: ReturnType<typeof errorBody> };
+  | { ok: false; status: 502 | 504; body: ReturnType<typeof errorBody> }
+  /**
+   * The CLIENT disconnected before upstream headers arrived; the
+   * upstream request was aborted with it. There is nobody left to
+   * answer, so there is no error body (the route returns a bare
+   * nginx-style 499 for logs/tests).
+   */
+  | { ok: false; status: 499; body: null };
 
 /**
  * Forward an OpenAI-compatible chat completion to a serving URL and
  * return the upstream response as-is (streaming passthrough).
  *
  * The abort timer bounds only the pre-header wait: once headers
- * arrive it is cleared, so a long SSE body is never cut mid-stream.
- * The body text is forwarded verbatim: unknown OpenAI params and
- * vendor extensions survive untouched.
+ * arrive it is cleared, so a long SSE body is never cut mid-stream
+ * (a mid-stream client disconnect still propagates by cancelling the
+ * passthrough body). `clientSignal` (the incoming request's signal)
+ * aborts the upstream fetch when the client goes away pre-headers, so
+ * an abandoned request does not keep generating for a full TTFB
+ * window. The body text is forwarded verbatim: unknown OpenAI params
+ * and vendor extensions survive untouched.
  */
 export async function proxyChatCompletion(
   fetchFunction: typeof fetch,
   servingUrl: string,
   bodyText: string,
   headerTimeoutMs: number,
+  clientSignal?: AbortSignal,
 ): Promise<ChatProxyResult> {
   // joinUrl preserves any path prefix on servingUrl (deployments
   // behind path-routing gateways); `new URL("/x", base)` would drop it.
   const url = joinUrl(servingUrl, "/v1/chat/completions");
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, headerTimeoutMs);
   let upstream: Response;
   try {
-    upstream = await fetchFunction(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: bodyText,
-      signal: controller.signal,
-    });
+    upstream = await fetchWithTimeout(
+      fetchFunction,
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyText,
+      },
+      headerTimeoutMs,
+      clientSignal,
+    );
   } catch (error) {
     // Undici aborts surface as DOMException, not Error subclasses;
-    // match on the name instead of instanceof.
-    const isAbort =
-      typeof error === "object" &&
-      error !== null &&
-      "name" in error &&
-      error.name === "AbortError";
-    if (isAbort) {
+    // match on the name instead of instanceof. fetchWithTimeout's own
+    // timer aborts with a TimeoutError, which distinguishes "we gave
+    // up" from "the client went away".
+    const abortName =
+      typeof error === "object" && error !== null && "name" in error
+        ? error.name
+        : undefined;
+    if (abortName === "TimeoutError") {
       return {
         ok: false,
         status: 504,
@@ -54,6 +68,9 @@ export async function proxyChatCompletion(
           `upstream did not return headers within ${headerTimeoutMs}ms`,
         ),
       };
+    }
+    if (abortName === "AbortError" || clientSignal?.aborted === true) {
+      return { ok: false, status: 499, body: null };
     }
     const detail = error instanceof Error ? error.message : String(error);
     return {
@@ -64,8 +81,6 @@ export async function proxyChatCompletion(
         `upstream unreachable: ${detail}`,
       ),
     };
-  } finally {
-    clearTimeout(timer);
   }
 
   // Re-emit the upstream body untouched. Copy only the content type:

@@ -1,4 +1,4 @@
-import { supervisorStatusSchema } from "@haru/protocol";
+import { requestTargetUrl, supervisorStatusSchema } from "@haru/protocol";
 import { describe, expect, it } from "vitest";
 
 import { createSupervisorApp } from "./app.js";
@@ -31,19 +31,9 @@ interface FakeVllmState {
   probeOk: boolean;
 }
 
-function requestTarget(input: string | URL | Request): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.href;
-  }
-  return input.url;
-}
-
 function fakeVllmFetch(state: FakeVllmState): typeof fetch {
   return (input, init) => {
-    const url = new URL(requestTarget(input));
+    const url = new URL(requestTargetUrl(input));
     const port = Number(url.port);
     state.calls.push(
       `${init?.method ?? "GET"} ${url.host}${url.pathname}${url.search}`,
@@ -189,6 +179,28 @@ describe("vLLM sleep/wake control", () => {
     const app = makeApp({ state });
     const response = await app.request("/v1/vllm/wake", { method: "POST" });
     expect(response.status).toBe(200);
+  });
+
+  it("fans the admin action out to every model concurrently", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const gatedFetch: typeof fetch = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inFlight -= 1;
+      return Response.json({ status: "ok" });
+    };
+    const app = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: gatedFetch,
+      spawnFn: noopSpawn,
+    });
+    const response = await app.request("/v1/vllm/wake", { method: "POST" });
+    expect(response.status).toBe(200);
+    // Both models' wake calls were in flight together, not serialized.
+    expect(maxInFlight).toBe(2);
   });
 });
 

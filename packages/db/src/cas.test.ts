@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
@@ -7,7 +5,7 @@ import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
 import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
-import { createTestDatabase } from "./testing/index.js";
+import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
 import type { HaruDatabase } from "./client.js";
 import type { FleetSnapshot } from "@haru/protocol";
@@ -16,17 +14,9 @@ let database: HaruDatabase;
 let close: () => Promise<void>;
 let fleet: FleetSnapshot;
 
-const layout = (): unknown =>
-  JSON.parse(
-    readFileSync(
-      new URL("../examples/fleet.example.json", import.meta.url),
-      "utf8",
-    ),
-  );
-
 beforeEach(async () => {
   ({ db: database, close } = await createTestDatabase());
-  await applyFleetLayout(database, layout());
+  await applyFleetLayout(database, loadExampleFleetLayout());
   const snapshot = await getFleetSnapshot(database, "default");
   if (!snapshot) throw new Error("seed failed");
   fleet = snapshot;
@@ -87,13 +77,16 @@ describe("transitionDomain", () => {
       await transitionDomain(database, alpha().id, ["ready"], "degraded"),
     ).toBe(false);
     expect(
-      await transitionDomain(
-        database,
-        alpha().id,
-        ["ready", "degraded"],
-        "ready",
-      ),
+      await transitionDomain(database, alpha().id, ["degraded"], "ready"),
     ).toBe(true);
+  });
+
+  it("rejects from-lists that violate the core state table", async () => {
+    // ready -> ready is not an edge: the repo layer enforces the core
+    // tables at call time instead of silently matching zero rows.
+    await expect(
+      transitionDomain(database, alpha().id, ["ready", "degraded"], "ready"),
+    ).rejects.toThrow(/invalid domain transition/);
   });
 
   it("markDomainSeen records the heartbeat", async () => {
@@ -112,10 +105,22 @@ describe("slot transitions", () => {
       (s) => s.kind === "inference" && s.state === "serving",
     )!;
     expect(
-      await transitionSlot(database, servingSlot.id, ["serving"], "sleeping"),
+      await transitionSlot(
+        database,
+        servingSlot.id,
+        "inference",
+        ["serving"],
+        "sleeping",
+      ),
     ).toBe(true);
     expect(
-      await transitionSlot(database, servingSlot.id, ["serving"], "sleeping"),
+      await transitionSlot(
+        database,
+        servingSlot.id,
+        "inference",
+        ["serving"],
+        "sleeping",
+      ),
     ).toBe(false);
   });
 

@@ -1,4 +1,4 @@
-import type { ProbeResult } from "@haru/protocol";
+import { fetchWithTimeout, type ProbeResult } from "@haru/protocol";
 
 /** Fallback when the caller does not send a probe budget. */
 export const DEFAULT_PROBE_CALL_TIMEOUT_MS = 60_000;
@@ -20,12 +20,9 @@ export async function probeModel(
   timeoutMs: number = DEFAULT_PROBE_CALL_TIMEOUT_MS,
 ): Promise<ProbeResult> {
   const startedAt = now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
   try {
-    const response = await fetchFunction(
+    const response = await fetchWithTimeout(
+      fetchFunction,
       `http://127.0.0.1:${model.port}/v1/chat/completions`,
       {
         method: "POST",
@@ -36,8 +33,8 @@ export async function probeModel(
           max_tokens: maxTokens,
           stream: false,
         }),
-        signal: controller.signal,
       },
+      timeoutMs,
     );
     const latencyMs = now() - startedAt;
     if (!response.ok) {
@@ -67,7 +64,5 @@ export async function probeModel(
       latencyMs: now() - startedAt,
       error: detail,
     };
-  } finally {
-    clearTimeout(timer);
   }
 }

@@ -3,31 +3,37 @@ import { InvalidTransitionError } from "./domain-state.js";
 import type { SlotKind, SlotState } from "@haru/protocol";
 
 /**
- * Slot state machines, gated by slot kind.
+ * Slot state machines, gated by slot kind. These tables are the single
+ * source of truth: the DB repo layer asserts every compare-and-swap's
+ * (from, to) pair against them, and the reconciler derives shared
+ * from-lists via `statesWithEdgeTo`.
  *
  * Inference: starting -> serving -> sleeping -> waking -> probing ->
- * serving. Sleeping is the standby posture (vLLM level 1 sleep);
- * waking/probing are the promotion path back to serving.
+ * serving is the promotion path. Recovery/cleanup edges: failed ->
+ * waking (wake retry after a failed promotion) and starting | waking |
+ * probing -> sleeping (demote cleanup can catch a slot anywhere on the
+ * wake path).
  *
  * Training: idle -> training -> stopping -> idle. Stopping covers the
- * SIGTERM grace window and the SIGKILL escalation; it resolves to idle
- * once the processes exited and VRAM is released.
+ * SIGTERM grace window and the SIGKILL escalation. training -> idle
+ * directly records a stop that completed within one nudge; stopping ->
+ * training covers a demote retry restarting training mid-cleanup.
  */
 const INFERENCE_TRANSITIONS: Partial<Record<SlotState, readonly SlotState[]>> =
   {
-    starting: ["serving", "failed", "stopped"],
+    starting: ["serving", "sleeping", "failed", "stopped"],
     serving: ["sleeping", "failed", "stopped"],
     sleeping: ["waking", "failed", "stopped"],
-    waking: ["probing", "failed", "stopped"],
-    probing: ["serving", "failed", "stopped"],
-    failed: ["starting", "stopped"],
+    waking: ["probing", "sleeping", "failed", "stopped"],
+    probing: ["serving", "sleeping", "failed", "stopped"],
+    failed: ["waking", "starting", "stopped"],
     stopped: ["starting"],
   };
 
 const TRAINING_TRANSITIONS: Partial<Record<SlotState, readonly SlotState[]>> = {
   idle: ["training", "failed", "stopped"],
-  training: ["stopping", "failed", "stopped"],
-  stopping: ["idle", "failed", "stopped"],
+  training: ["stopping", "idle", "failed", "stopped"],
+  stopping: ["idle", "training", "failed", "stopped"],
   failed: ["idle", "stopped"],
   stopped: ["idle"],
 };
@@ -65,4 +71,20 @@ export function assertSlotTransition(
   if (!canTransitionSlot(kind, from, to)) {
     throw new InvalidTransitionError(`${kind} slot`, from, to);
   }
+}
+
+/**
+ * Every state with an edge into `to`: the full predecessor set. The
+ * reconciler uses this to derive compare-and-swap from-lists straight
+ * from the table wherever "any state that can reach X" is the intended
+ * semantics; deliberately narrower from-lists stay literal at the call
+ * site (and are still validated by the repo layer).
+ */
+export function statesWithEdgeTo(
+  kind: SlotKind,
+  to: SlotState,
+): readonly SlotState[] {
+  return (Object.entries(TABLES[kind]) as [SlotState, readonly SlotState[]][])
+    .filter(([, targets]) => targets.includes(to))
+    .map(([from]) => from);
 }

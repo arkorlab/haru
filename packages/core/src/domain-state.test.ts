@@ -21,6 +21,7 @@ const ALLOWED: ReadonlySet<string> = new Set([
   "degraded>failed",
   "degraded>stopping",
   "failed>provisioning",
+  "failed>degraded",
   "failed>stopping",
   "stopping>stopped",
   "stopped>provisioning",

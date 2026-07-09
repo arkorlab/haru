@@ -1,10 +1,13 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import { z } from "zod";
 
-import { defaultExec, SkyCliError, type ExecFunction } from "./exec.js";
+import {
+  createSkyRunner,
+  DEFAULT_SKY_COMMAND_TIMEOUT_MS,
+  DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
+  SkyCliError,
+  writeTemporaryYaml,
+  type ExecFunction,
+} from "./exec.js";
 import {
   skyClusterStatusSchema,
   type DomainLaunchSpec,
@@ -16,12 +19,8 @@ import { renderSkyTaskYaml } from "./yaml.js";
 /** Writes rendered task YAML somewhere `sky` can read it; injectable. */
 export type WriteTaskFileFunction = (contents: string) => Promise<string>;
 
-const defaultWriteTaskFile: WriteTaskFileFunction = async (contents) => {
-  const directory = await mkdtemp(path.join(tmpdir(), "haru-sky-"));
-  const taskPath = path.join(directory, "task.yaml");
-  await writeFile(taskPath, contents, "utf8");
-  return taskPath;
-};
+const defaultWriteTaskFile: WriteTaskFileFunction = (contents) =>
+  writeTemporaryYaml("haru-sky-", "task.yaml", contents);
 
 export interface SkypilotDriverOptions {
   exec?: ExecFunction;
@@ -32,9 +31,6 @@ export interface SkypilotDriverOptions {
   commandTimeoutMs?: number;
 }
 
-const DEFAULT_LAUNCH_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
-
 /**
  * SkyPilot driver: haru's lower-level multi-cloud provisioning
  * boundary. haru asks SkyPilot to create/stop/inspect GPU domains and
@@ -44,26 +40,12 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 export function createSkypilotDriver(
   options: SkypilotDriverOptions = {},
 ): SkypilotDriver {
-  const exec = options.exec ?? defaultExec;
+  const runSky = createSkyRunner(options.exec);
   const writeTaskFile = options.writeTaskFile ?? defaultWriteTaskFile;
-  const launchTimeoutMs = options.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS;
+  const launchTimeoutMs =
+    options.launchTimeoutMs ?? DEFAULT_SKY_LAUNCH_TIMEOUT_MS;
   const commandTimeoutMs =
-    options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
-
-  async function runSky(
-    arguments_: readonly string[],
-    timeoutMs: number,
-  ): Promise<string> {
-    const result = await exec("sky", arguments_, { timeoutMs });
-    if (result.code !== 0) {
-      throw new SkyCliError(
-        `sky ${arguments_.join(" ")}`,
-        result.code,
-        result.stderr,
-      );
-    }
-    return result.stdout;
-  }
+    options.commandTimeoutMs ?? DEFAULT_SKY_COMMAND_TIMEOUT_MS;
 
   return {
     async launchDomain(spec: DomainLaunchSpec) {

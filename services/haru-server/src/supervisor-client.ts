@@ -1,4 +1,5 @@
 import {
+  fetchWithTimeout,
   gpuMemorySchema,
   joinUrl,
   probeResponseSchema,
@@ -46,10 +47,6 @@ async function call(
   path: string,
   body?: unknown,
 ): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, options.timeoutMs);
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
@@ -57,12 +54,16 @@ async function call(
     headers.authorization = `Bearer ${options.token}`;
   }
   try {
-    const response = await options.fetchFn(joinUrl(options.baseUrl, path), {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-    });
+    const response = await fetchWithTimeout(
+      options.fetchFn,
+      joinUrl(options.baseUrl, path),
+      {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      },
+      options.timeoutMs,
+    );
     if (!response.ok) {
       throw new SupervisorError(
         `supervisor ${path} returned ${response.status}`,
@@ -76,8 +77,6 @@ async function call(
     }
     const detail = error instanceof Error ? error.message : String(error);
     throw new SupervisorError(`supervisor ${path} unreachable: ${detail}`);
-  } finally {
-    clearTimeout(timer);
   }
 }
 

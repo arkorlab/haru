@@ -87,6 +87,7 @@ export function domain(
     supervisorUrl: `http://127.0.0.1:87${slug === "alpha" ? "01" : "02"}`,
     servingBaseUrl: `http://127.0.0.1:90${slug === "alpha" ? "01" : "02"}`,
     lastSeenAt: null,
+    stateUpdatedAt: "2024-01-01T00:00:00.000Z",
     slots: [inferenceSlot(id), trainingSlot(id)],
     ...overrides,
   };

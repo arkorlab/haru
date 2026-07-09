@@ -4,6 +4,8 @@
  * in the test fleet layout, keyed by origin.
  */
 
+import { requestTargetUrl } from "@haru/protocol";
+
 export const ALPHA_SUPERVISOR = "https://alpha-supervisor.test";
 export const BETA_SUPERVISOR = "https://beta-supervisor.test";
 export const ALPHA_SERVING = "https://alpha-serving.test";
@@ -179,16 +181,6 @@ function supervisorResponse(
   }
 }
 
-function requestTarget(input: string | URL | Request): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.href;
-  }
-  return input.url;
-}
-
 export interface FakeUpstreamCall {
   url: string;
   body: string;
@@ -204,7 +196,7 @@ export function buildFakeFetch(options: {
   chatCalls?: FakeUpstreamCall[];
 }): typeof fetch {
   return (input, init) => {
-    const url = new URL(requestTarget(input));
+    const url = new URL(requestTargetUrl(input));
     const supervisor = options.supervisors[url.origin];
     if (supervisor) {
       if (!supervisor.reachable) {

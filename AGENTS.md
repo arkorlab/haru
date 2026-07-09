@@ -51,9 +51,11 @@ deferrals there; delete entries when fixed).
 Dependency graph (enforce it when adding imports):
 
 ```
-@haru/protocol (zod only; source of type truth: schemas, enums, joinUrl)
+@haru/protocol (zod + node builtins; source of type truth: schemas, enums,
+   │              joinUrl/fetchWithTimeout/exec/bearer-auth shared helpers)
    ├── @haru/core            pure logic, NO I/O (state tables, plans, route intent)
-   ├── @haru/db              Drizzle schema + CAS repositories + PGlite test harness
+   │      └── @haru/db       Drizzle schema + CAS repositories (they ENFORCE the
+   │                         core state tables) + PGlite/Postgres test harness
    ├── @haru/driver-skypilot / driver-skyserve   YAML renderers + `sky` CLI wrappers
    ├── services/haru-server  Hono API + reconciler + chat proxy (uses core/db/drivers)
    └── services/haru-supervisor  depends on protocol ONLY (deliberate) - anything
@@ -78,19 +80,31 @@ Dependency graph (enforce it when adding imports):
   cleanup steps act on it, never on "the other domain".
 - The reconciler is **re-entrant check-and-nudge**: one step nudge per tick,
   every executor safe to re-run, long operations converge via status polls.
-  Step outcomes are `done | pending | failed`; only the tick whose CAS lands
-  writes audit events. `stepStartedAt` is written with the injected app clock
-  (not `sql\`now()\``) because timeouts compare against `dependencies.now()` -
-  keep it that way or DB/host clock skew shifts every budget.
-- Supervisor call failures map through `supervisorFailure`: 401/403 fail the
-  step immediately (`supervisor_unauthorized`); everything else (network,
-  timeout, schema-invalid body) is `pending` until the policy budget expires.
-  Response parsing must stay inside the SupervisorError wrapping - a raw
-  ZodError would abort the whole reconcile tick.
-- The from-state lists in `reconciler/steps.ts` are the **executed** slot
-  state machine; the tables in `@haru/core/slot-state.ts` are documentation
-  and are not runtime-enforced (they disagree on recovery/cleanup edges - see
-  KNOWN_ISSUES before "fixing" either side).
+  Executor outcomes and step timeouts both map into one `StepResolution`
+  applied by a single CAS-then-audit path (`applyStepResolution`); only the
+  tick whose advance/complete/fail CAS lands degrades domains, cleans up
+  slots, and writes audit events. A `pending` nudge writes NOTHING to the DB.
+  `stepStartedAt` and `domains.stateUpdatedAt` are written with the injected
+  app clock (not `sql\`now()\``) because step timeouts and the degraded
+  escalation compare against `dependencies.now()` - keep it that way or
+  DB/host clock skew shifts every budget.
+- Supervisor call failures map through `withSupervisor`: 401/403 on a target
+  domain fail the step immediately (`supervisor_unauthorized`); everything
+  else (network, timeout, schema-invalid body) is `pending` until the policy
+  budget expires, and best-effort "source" steps treat even auth failures as
+  pending (the old active may be torn down). Response parsing must stay
+  inside the SupervisorError wrapping - a raw ZodError would abort the whole
+  reconcile tick.
+- The state tables in `@haru/core` (slot-state.ts, domain-state.ts) are the
+  **enforced single source of truth**: the DB repo layer asserts every
+  (from, to) pair (`InvalidTransitionError` on violation), and
+  `reconciler/steps.ts` derives shared from-lists via `statesWithEdgeTo`.
+  From-lists that are deliberately NARROWER than the table's predecessor set
+  stay literal at the call site with a "why" comment - keep new ones that way.
+- Degraded escalation: an ACTIVE domain that stays `degraded` past
+  `policy.degradedGraceMs` (autoFailover on) is CAS-escalated to `failed`,
+  which makes `detectFailover`'s failed trigger fire in the same tick; a
+  reachable supervisor recovers a failed domain via `failed -> degraded`.
 - Completion checks over supervisor-reported lists must guard the empty case
   (`length > 0 && every(...)`) - a drifted supervisor config must not make a
   step vacuously succeed.
@@ -103,8 +117,10 @@ Dependency graph (enforce it when adding imports):
   proxy only ever constructs `/v1/chat/completions` paths.
 - The chat proxy forwards the request body as **raw text** (byte-identical,
   vendor extensions survive) and copies only `content-type` back; the abort
-  timer bounds TTFB only, never the streaming body. `model` is a lowercase
-  routing key (schema-enforced on bindings) matched exactly.
+  timer bounds TTFB only, never the streaming body, and a pre-header client
+  disconnect aborts the upstream (bare 499 back). `model` is a lowercase
+  routing key (schema-enforced on bindings) resolved through the same
+  per-model predicate route intent reports (`findRoutableBinding` in core).
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.
@@ -125,10 +141,15 @@ Dependency graph (enforce it when adding imports):
 
 Everything runs without GPUs, cloud accounts, or a live database:
 
-- `@haru/db/testing` (`createTestDatabase`) boots in-memory PGlite and replays
-  the committed migrations, so CAS repository tests execute real SQL. Note
-  PGlite is single-connection: `Promise.all` "races" serialize, proving
-  winner/loser semantics but not true lock contention.
+- `@haru/db/testing` (`createTestDatabase`) boots in-memory PGlite with the
+  committed migrations applied (replayed once per vitest worker, then cloned
+  via a dumped data dir - do not re-add per-test `migrate` calls), so CAS
+  repository tests execute real SQL. PGlite is single-connection:
+  `Promise.all` "races" serialize, proving winner/loser semantics but not
+  true lock contention - that is covered by the CI `test-postgres` lane,
+  which sets `HARU_TEST_DATABASE_URL` and runs the same suites against a
+  real Postgres (one throwaway database per test). `loadExampleFleetLayout`
+  is the shared example-layout loader for tests.
 - All I/O is injectable (fetch, exec, spawn, clock); server tests drive the
   Hono app with `app.request()` against scripted fake supervisors
   (`fake-supervisor.test-helper.ts`); the supervisor uses fake timers for the

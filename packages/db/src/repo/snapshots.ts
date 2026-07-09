@@ -39,10 +39,28 @@ async function findFleetRow(database: HaruDatabase, reference: string) {
 }
 
 /**
- * Load the full read model of a fleet (three short SELECTs, no
- * transaction). The result is validated through the protocol schema so
- * malformed jsonb (spec/placement/policy) surfaces here instead of
- * deep inside a consumer.
+ * Narrow routing-pointer lookup for the chat hot path: resolves a
+ * fleet reference to its id + current route revision without loading
+ * domains/slots. The snapshot cache keys on the id and revalidates on
+ * the revision, so pointer moves surface immediately while the heavy
+ * snapshot stays cached.
+ */
+export async function getFleetRouteRevision(
+  database: HaruDatabase,
+  reference: string,
+): Promise<{ id: string; slug: string; routeRevision: number } | null> {
+  const fleet = await findFleetRow(database, reference);
+  if (!fleet) {
+    return null;
+  }
+  return { id: fleet.id, slug: fleet.slug, routeRevision: fleet.routeRevision };
+}
+
+/**
+ * Load the full read model of a fleet (a fleet lookup, then domains
+ * and slots in parallel; no transaction). The result is validated
+ * through the protocol schema so malformed jsonb (spec/placement/
+ * policy) surfaces here instead of deep inside a consumer.
  */
 export async function getFleetSnapshot(
   database: HaruDatabase,
@@ -53,20 +71,23 @@ export async function getFleetSnapshot(
     return null;
   }
 
-  const domainRows = await database
+  // Slots filter via a domain subquery on the fleet id so both reads
+  // can run concurrently instead of waiting for the domain ids.
+  const fleetDomainIds = database
+    .select({ id: domains.id })
+    .from(domains)
+    .where(eq(domains.fleetId, fleet.id));
+  const domainsQuery = database
     .select()
     .from(domains)
     .where(eq(domains.fleetId, fleet.id))
     .orderBy(domains.slug);
-  const domainIds = domainRows.map((d) => d.id);
-  const slotRows =
-    domainIds.length === 0
-      ? []
-      : await database
-          .select()
-          .from(slots)
-          .where(inArray(slots.domainId, domainIds))
-          .orderBy(slots.gpuIndex, slots.kind);
+  const slotsQuery = database
+    .select()
+    .from(slots)
+    .where(inArray(slots.domainId, fleetDomainIds))
+    .orderBy(slots.gpuIndex, slots.kind);
+  const [domainRows, slotRows] = await Promise.all([domainsQuery, slotsQuery]);
 
   return fleetSnapshotSchema.parse({
     id: fleet.id,
@@ -85,6 +106,7 @@ export async function getFleetSnapshot(
       supervisorUrl: d.supervisorUrl,
       servingBaseUrl: d.servingBaseUrl,
       lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
+      stateUpdatedAt: d.stateUpdatedAt.toISOString(),
       slots: slotRows
         .filter((s) => s.domainId === d.id)
         .map((s) => ({

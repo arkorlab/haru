@@ -86,6 +86,12 @@ export const domainSnapshotSchema = z.object({
   /** OpenAI-compatible base URL used as the domain-level fallback. */
   servingBaseUrl: z.url().nullable(),
   lastSeenAt: z.iso.datetime({ offset: true }).nullable(),
+  /**
+   * When the domain last changed state. Written with the reconciler's
+   * injected app clock (not the DB clock) because the degraded
+   * escalation budget compares against that same clock.
+   */
+  stateUpdatedAt: z.iso.datetime({ offset: true }),
   slots: z.array(slotSnapshotSchema),
 });
 export type DomainSnapshot = z.infer<typeof domainSnapshotSchema>;

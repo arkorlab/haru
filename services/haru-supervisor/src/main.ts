@@ -1,12 +1,12 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 
+import { defaultExec, type ExecFunction } from "@haru/protocol";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 
 import { createSupervisorApp } from "./app.js";
 import { loadSupervisorConfig } from "./config.js";
 
-import type { ExecFunction } from "./gpu.js";
 import type { SpawnFunction } from "./training.js";
 
 const environmentSchema = z.object({
@@ -30,24 +30,11 @@ if (
 
 const EXEC_TIMEOUT_MS = 15_000;
 
-const realExec: ExecFunction = (command, arguments_) =>
-  new Promise((resolve) => {
-    // The timeout kills a wedged nvidia-smi (a known failure mode on
-    // sick GPUs/drivers) instead of leaking a pending handler per
-    // verify_gpu retry.
-    execFile(
-      command,
-      [...arguments_],
-      { timeout: EXEC_TIMEOUT_MS },
-      (error, stdout, stderr) => {
-        let code = 0;
-        if (error) {
-          code = typeof error.code === "number" ? error.code : 1;
-        }
-        resolve({ code, stdout, stderr });
-      },
-    );
-  });
+// The timeout kills a wedged nvidia-smi (a known failure mode on sick
+// GPUs/drivers) instead of leaking a pending handler per verify_gpu
+// retry.
+const realExec: ExecFunction = (command, arguments_, options) =>
+  defaultExec(command, arguments_, { timeoutMs: EXEC_TIMEOUT_MS, ...options });
 
 const realSpawn: SpawnFunction = (command, options) => {
   const [executable, ...arguments_] = command;

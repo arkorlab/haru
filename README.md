@@ -146,6 +146,7 @@ server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
 | `HARU_SUPERVISOR_TOKEN` | Bearer token presented to domain supervisors. |
 | `HARU_DEFAULT_FLEET` | Fleet used by `/v1/chat/completions` without an `X-Haru-Fleet` header. |
 | `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. |
+| `HARU_SNAPSHOT_CACHE_TTL_MS` | Fleet snapshot cache TTL on the chat hot path (default 2000). Routing-pointer moves surface immediately regardless (every request revalidates against the fleet's route revision); this only bounds slot-state staleness. |
 | `HARU_RECONCILE_INTERVAL_MS` | Enables the background reconcile loop at this interval. **Unset means no loop**: heartbeats, `autoFailover`, and operation progress then only run when something POSTs `/v1/fleets/:id/reconcile` (e.g. external cron). |
 | `HARU_RECONCILE_FLEETS` | Comma-separated fleet slugs the loop reconciles (falls back to `HARU_DEFAULT_FLEET`). |
 
@@ -235,19 +236,20 @@ for development conventions and PR guidelines.
 
 ## Known limitations (this slice)
 
-Contributor-facing deferred work (structural debt, efficiency backlog,
-test-validity notes) is tracked with file references and intended
-fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+Contributor-facing deferred work is tracked with file references and
+intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) (currently
+empty: the initial-slice backlog has been worked off).
 
-- **Auto-failover triggers on heartbeat staleness or a `failed` domain
-  state only.** An active domain whose vLLM processes die while its
-  supervisor stays reachable is marked `degraded` (visible in route
-  intent eligibility) but is NOT auto-promoted away from; promote it
-  manually or act on route intent externally.
 - **Auto-failover needs a reconcile driver.** Set
   `HARU_RECONCILE_INTERVAL_MS` (plus `HARU_RECONCILE_FLEETS`) or drive
   `POST /v1/fleets/:id/reconcile` from external cron; without either,
   `autoFailover` policy is inert.
+- **A reachable-but-dead active fails over only after
+  `degradedGraceMs`.** When the active domain's supervisor answers but
+  its models are not serving, the domain degrades immediately (visible
+  in route intent) and escalates to `failed` (triggering auto-failover
+  when enabled) only after staying degraded past the policy grace
+  (default 60 s); tune `degradedGraceMs` to taste.
 - **Model binding names are lowercase routing keys** and the vLLM
   server behind each binding must serve the same lowercase name (e.g.
   `--served-model-name`); the chat proxy matches exactly and forwards
@@ -259,11 +261,11 @@ fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   display name, existing slot specs): seeding is insert-only by
   design. Slot states for NEWLY added slots follow the live routing
   pointer.
-- **Chat routing may lag a promotion by up to the snapshot cache TTL
-  (2 s).** The chat proxy serves from a per-fleet snapshot cache;
-  requests hitting the demoting old active during that window fail
-  fast and should be retried. This is a deliberate bound (see
-  KNOWN_ISSUES for the reasoning and intended fix).
+- **Chat routing may lag non-routing state changes by up to the
+  snapshot cache TTL** (`HARU_SNAPSHOT_CACHE_TTL_MS`, default 2 s).
+  Routing-pointer moves are exempt: every request revalidates against
+  the fleet's route revision, so a promotion switches chat traffic
+  immediately.
 
 ## Intentionally out of scope (for now)
 

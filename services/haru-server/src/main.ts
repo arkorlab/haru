@@ -31,6 +31,7 @@ const app = createApp({
     supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
     defaultFleet: environment.HARU_DEFAULT_FLEET,
     chatHeaderTimeoutMs: environment.HARU_CHAT_HEADER_TIMEOUT_MS,
+    snapshotCacheTtlMs: environment.HARU_SNAPSHOT_CACHE_TTL_MS,
   },
 });
 

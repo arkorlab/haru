@@ -14,6 +14,7 @@ catalog:
   "@stylistic/eslint-plugin": "^5.10.0"
   "@types/eslint-plugin-promise": "^7.3.0"
   "@types/node": "^26"
+  "@types/pg": "^8.20.0"
   "@vitest/coverage-v8": "^4.1.10"
   "@vitest/eslint-plugin": "^1.6.17"
   drizzle-kit: "^0.31.10"
@@ -27,6 +28,9 @@ catalog:
   eslint-plugin-unicorn: "^71.1.0"
   globals: "^17.7.0"
   hono: "^4.12.28"
+  # node-postgres, used only by the optional real-Postgres test lane
+  # (HARU_TEST_DATABASE_URL); production stays on the Neon HTTP driver.
+  pg: "^8.22.0"
   # ESLint 10 loads eslint.config.ts through jiti.
   jiti: "^2.7.0"
   oxfmt: "0.58.0"

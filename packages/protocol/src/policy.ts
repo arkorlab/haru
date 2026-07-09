@@ -22,6 +22,13 @@ export const fleetPolicySchema = z.object({
   autoFailover: z.boolean().default(false),
   /** Active domain heartbeat staleness threshold. */
   heartbeatStaleMs: z.number().int().positive().default(30_000),
+  /**
+   * How long the ACTIVE domain may stay degraded (supervisor reachable
+   * but models not serving) before it escalates to failed, which makes
+   * auto-failover fire. Only meaningful with autoFailover on; standbys
+   * are never escalated (that would strip their promotability).
+   */
+  degradedGraceMs: z.number().int().positive().default(60_000),
   /** SIGTERM-to-SIGKILL grace for preemptible LoRA training. */
   trainingStopGraceMs: z.number().int().positive().default(30_000),
   /** Total bound for the stop_training step (grace + kill + exit). */

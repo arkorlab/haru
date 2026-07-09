@@ -1,15 +1,12 @@
-import { gpuMemorySchema, type GpuMemory } from "@haru/protocol";
+import {
+  gpuMemorySchema,
+  type ExecFunction,
+  type GpuMemory,
+} from "@haru/protocol";
 
-export interface ExecResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-export type ExecFunction = (
-  command: string,
-  arguments_: readonly string[],
-) => Promise<ExecResult>;
+// Re-exported for existing importers; the boundary now lives in
+// @haru/protocol so drivers and the supervisor share one exec shape.
+export type { ExecFunction, ExecResult } from "@haru/protocol";
 
 const NVIDIA_SMI_ARGS = [
   "--query-gpu=index,memory.used,memory.total",

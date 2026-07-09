@@ -1,7 +1,19 @@
 import { z } from "zod";
 
 import { slugSchema } from "./enums.js";
-import { modelBindingSchema } from "./fleet.js";
+
+/**
+ * One routed model on a target: the routing key plus whether traffic
+ * for it can be served right now (its slot is serving on a routable
+ * domain). Per-model eligibility lets a partially degraded domain keep
+ * serving its healthy models, matching the chat proxy's behavior.
+ */
+export const routeModelSchema = z.object({
+  name: z.string().min(1),
+  servingUrl: z.url(),
+  eligible: z.boolean(),
+});
+export type RouteModel = z.infer<typeof routeModelSchema>;
 
 /**
  * Provider-neutral routing target. Consumers (external routers, DNS
@@ -14,14 +26,15 @@ export const routeTargetSchema = z.object({
   /** OpenAI-compatible base URL for the domain, null if not yet known. */
   endpointUrl: z.url().nullable(),
   /**
-   * Whether traffic may be routed to this target right now. For the
-   * active target: domain is ready/degraded and every inference slot
-   * is serving. Standby targets are never eligible in this slice.
+   * Whether traffic may be routed to this target right now: active
+   * role, an endpoint URL, and AT LEAST ONE eligible model. All-or-
+   * nothing consumers can require `models.every((m) => m.eligible)`
+   * themselves. Standby targets are never eligible in this slice.
    */
   eligible: z.boolean(),
   /** Relative traffic weight (active: 1, standby: 0 in this slice). */
   weight: z.number().min(0).max(1),
-  models: z.array(modelBindingSchema),
+  models: z.array(routeModelSchema),
 });
 export type RouteTarget = z.infer<typeof routeTargetSchema>;
 
@@ -35,6 +48,12 @@ export const routeIntentSchema = z.object({
   revision: z.number().int().positive(),
   generatedAt: z.iso.datetime({ offset: true }),
   active: routeTargetSchema.nullable(),
-  standby: routeTargetSchema.nullable(),
+  /**
+   * Every non-active domain, ranked by promotion preference (state,
+   * then heartbeat freshness, then slug). Auto-failover promotes the
+   * first promotable entry, so consumers see the same ordering the
+   * reconciler acts on.
+   */
+  standbys: z.array(routeTargetSchema),
 });
 export type RouteIntent = z.infer<typeof routeIntentSchema>;

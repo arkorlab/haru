@@ -11,3 +11,14 @@ export function joinUrl(baseUrl: string, path: string): string {
   const suffix = path.startsWith("/") ? path : `/${path}`;
   return new URL(`${prefix}${suffix}`, base).href;
 }
+
+/** Normalise any fetch input shape to its target URL string. */
+export function requestTargetUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.href;
+  }
+  return input.url;
+}

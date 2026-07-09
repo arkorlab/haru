@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
   index,
-  integer,
   jsonb,
   pgTable,
   text,
@@ -35,8 +34,6 @@ export const operations = pgTable(
     /** Current OperationStep while running; null before claim/after finish. */
     currentStep: text("current_step"),
     stepStartedAt: timestamp("step_started_at", { withTimezone: true }),
-    /** Reconciler nudges spent on the current step (observability). */
-    attempt: integer("attempt").notNull().default(0),
     error: jsonb("error").$type<OperationError>(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()

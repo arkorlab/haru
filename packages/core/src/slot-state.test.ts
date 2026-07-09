@@ -5,6 +5,7 @@ import {
   assertSlotTransition,
   canTransitionSlot,
   isValidSlotState,
+  statesWithEdgeTo,
   validSlotStates,
 } from "./slot-state.js";
 
@@ -12,6 +13,7 @@ const ALL: readonly SlotState[] = slotStateSchema.options;
 
 const INFERENCE_ALLOWED: ReadonlySet<string> = new Set([
   "starting>serving",
+  "starting>sleeping",
   "starting>failed",
   "starting>stopped",
   "serving>sleeping",
@@ -21,11 +23,14 @@ const INFERENCE_ALLOWED: ReadonlySet<string> = new Set([
   "sleeping>failed",
   "sleeping>stopped",
   "waking>probing",
+  "waking>sleeping",
   "waking>failed",
   "waking>stopped",
   "probing>serving",
+  "probing>sleeping",
   "probing>failed",
   "probing>stopped",
+  "failed>waking",
   "failed>starting",
   "failed>stopped",
   "stopped>starting",
@@ -36,9 +41,11 @@ const TRAINING_ALLOWED: ReadonlySet<string> = new Set([
   "idle>failed",
   "idle>stopped",
   "training>stopping",
+  "training>idle",
   "training>failed",
   "training>stopped",
   "stopping>idle",
+  "stopping>training",
   "stopping>failed",
   "stopping>stopped",
   "failed>idle",
@@ -90,5 +97,24 @@ describe("slot state machine", () => {
     expect(() =>
       assertSlotTransition("inference", "sleeping", "waking"),
     ).not.toThrow();
+  });
+
+  it("statesWithEdgeTo derives the full predecessor set from the table", () => {
+    expect(statesWithEdgeTo("inference", "waking")).toEqual([
+      "sleeping",
+      "failed",
+    ]);
+    expect(statesWithEdgeTo("inference", "probing")).toEqual(["waking"]);
+    expect(statesWithEdgeTo("inference", "sleeping")).toEqual([
+      "starting",
+      "serving",
+      "waking",
+      "probing",
+    ]);
+    expect(statesWithEdgeTo("training", "stopping")).toEqual(["training"]);
+    expect(statesWithEdgeTo("training", "training")).toEqual([
+      "idle",
+      "stopping",
+    ]);
   });
 });
