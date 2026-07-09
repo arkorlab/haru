@@ -2,6 +2,7 @@ import {
   applyFleetLayout,
   claimOperation,
   createOperation,
+  failOperation,
   getFleetSnapshot,
   getOperation,
   switchActive,
@@ -107,6 +108,24 @@ describe("switch_active under concurrent ticks", () => {
     // re-read, see the pointer on the target, and report done.
     const outcome = await executeStep(contextFor(operation), "switch_active");
     expect(outcome).toEqual({ status: "done" });
+  });
+
+  it("refuses to flip routing for an operation that was already failed", async () => {
+    const operation = await claimedPromotion("beta");
+    // A concurrent tick timed the step out and failed the operation.
+    await failOperation(
+      database,
+      operation.id,
+      { step: "switch_active", code: "step_timeout", message: "timed out" },
+      "switch_active",
+    );
+
+    // The zombie tick's CAS must not land: the pointer stays on alpha.
+    const outcome = await executeStep(contextFor(operation), "switch_active");
+    expect(outcome.status).toBe("failed");
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(domainId("alpha"));
+    expect(after?.routeRevision).toBe(staleFleet.routeRevision);
   });
 
   it("still fails cas_lost when the pointer moved somewhere else", async () => {

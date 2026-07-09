@@ -158,17 +158,59 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
       : inferenceSlots.filter((slot) => slot.gpuIndex === gpuIndex);
   }
 
+  /**
+   * Apply an admin action to every model of the targeted slots.
+   * Attempts EVERY model even when earlier ones fail (a crashed vLLM
+   * process must not shield its healthy siblings from the command) and
+   * reports the failures as a JSON error envelope instead of an
+   * uncaught exception.
+   */
+  async function forEachTargetModel(
+    gpuIndex: number | undefined,
+    action: (port: number) => Promise<void>,
+  ): Promise<{ ok: true } | { ok: false; failures: string[] }> {
+    const failures: string[] = [];
+    for (const slot of targetInferenceSlots(gpuIndex)) {
+      for (const model of slot.models) {
+        try {
+          await action(model.port);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          failures.push(`${model.name}: ${detail}`);
+        }
+      }
+    }
+    return failures.length === 0 ? { ok: true } : { ok: false, failures };
+  }
+
+  function isUnknownGpuIndex(gpuIndex: number | undefined): boolean {
+    return (
+      gpuIndex !== undefined &&
+      inferenceSlots.every((slot) => slot.gpuIndex !== gpuIndex)
+    );
+  }
+
   app.post("/v1/vllm/sleep", async (c) => {
     const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c));
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
-    for (const slot of targetInferenceSlots(parsed.data.gpuIndex)) {
-      for (const model of slot.models) {
-        // Idempotent: sleeping an already-sleeping server is a no-op
-        // on the vLLM side.
-        await sleepServer(fetchFunction, model.port, 1);
-      }
+    if (isUnknownGpuIndex(parsed.data.gpuIndex)) {
+      return c.json(
+        errorBody("invalid_target", "no inference slot on that gpuIndex"),
+        404,
+      );
+    }
+    // Idempotent per model: sleeping an already-sleeping server is a
+    // no-op on the vLLM side.
+    const result = await forEachTargetModel(parsed.data.gpuIndex, (port) =>
+      sleepServer(fetchFunction, port, 1),
+    );
+    if (!result.ok) {
+      return c.json(
+        errorBody("upstream_unreachable", result.failures.join("; ")),
+        502,
+      );
     }
     return c.json({ status: "ok" });
   });
@@ -178,10 +220,20 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
-    for (const slot of targetInferenceSlots(parsed.data.gpuIndex)) {
-      for (const model of slot.models) {
-        await wakeServer(fetchFunction, model.port);
-      }
+    if (isUnknownGpuIndex(parsed.data.gpuIndex)) {
+      return c.json(
+        errorBody("invalid_target", "no inference slot on that gpuIndex"),
+        404,
+      );
+    }
+    const result = await forEachTargetModel(parsed.data.gpuIndex, (port) =>
+      wakeServer(fetchFunction, port),
+    );
+    if (!result.ok) {
+      return c.json(
+        errorBody("upstream_unreachable", result.failures.join("; ")),
+        502,
+      );
     }
     return c.json({ status: "ok" });
   });
@@ -241,6 +293,8 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
     const models = inferenceSlots.flatMap((slot) => slot.models);
+    // ok must not be vacuously true: a host with zero configured
+    // inference models cannot pass a readiness probe.
     const results = await Promise.all(
       models.map((model) =>
         probeModel(
@@ -252,7 +306,10 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
         ),
       ),
     );
-    return c.json({ ok: results.every((r) => r.ok), results });
+    return c.json({
+      ok: results.length > 0 && results.every((r) => r.ok),
+      results,
+    });
   });
 
   return app;

@@ -57,5 +57,21 @@ export const fleetLayoutSchema = z
       message: "domain slugs must be unique within a fleet",
       path: ["domains"],
     },
+  )
+  // The DB enforces UNIQUE(domain, gpuIndex, kind) with ON CONFLICT DO
+  // NOTHING on insert, which would silently drop a duplicate slot
+  // entry; reject it at parse time instead.
+  .refine(
+    (layout) =>
+      layout.domains.every((domain) => {
+        const keys = domain.slots.map(
+          (slot) => `${slot.gpuIndex}:${slot.kind}`,
+        );
+        return new Set(keys).size === keys.length;
+      }),
+    {
+      message: "each (gpuIndex, kind) pair must be unique within a domain",
+      path: ["domains"],
+    },
   );
 export type FleetLayout = z.infer<typeof fleetLayoutSchema>;

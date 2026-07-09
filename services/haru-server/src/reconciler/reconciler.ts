@@ -64,6 +64,7 @@ async function pollHeartbeats(
       token: dependencies.supervisorToken,
       timeoutMs: HEARTBEAT_TIMEOUT_MS,
     };
+    const isActiveDomain = domain.id === fleet.activeDomainId;
     try {
       const status = await supervisorClient.status(options);
       await markDomainSeen(
@@ -78,13 +79,36 @@ async function pollHeartbeats(
           ["provisioning"],
           "ready",
         );
-      } else if (domain.state === "degraded" && status.ready) {
+      } else if (isActiveDomain && domain.state === "ready" && !status.ready) {
+        // The active domain's supervisor is reachable but its models
+        // are not serving (crashed/asleep): reflect that in the domain
+        // state so route-intent consumers can react. Automatic
+        // failover still keys on heartbeat staleness / failed state.
         await transitionDomain(
           dependencies.database,
           domain.id,
-          ["degraded"],
-          "ready",
+          ["ready"],
+          "degraded",
         );
+        await appendEvent(dependencies.database, {
+          fleetId: fleet.id,
+          domainId: domain.id,
+          type: "domain.not_ready",
+          payload: { ready: status.ready },
+        });
+      } else if (domain.state === "degraded") {
+        // Recovery is role-aware: a standby's models sleep by design,
+        // so its supervisor being reachable is recovery; the active
+        // domain must actually report ready.
+        const hasRecovered = isActiveDomain ? status.ready : true;
+        if (hasRecovered) {
+          await transitionDomain(
+            dependencies.database,
+            domain.id,
+            ["degraded"],
+            "ready",
+          );
+        }
       }
     } catch (error) {
       if (!(error instanceof SupervisorError)) {
@@ -119,9 +143,10 @@ async function handleStepTimeout(
     // Post-commit cleanup of the old active domain: degrade it and
     // move on. The old active being unhealthy is typically why the
     // failover happened; never fail the operation for it.
-    const oldDomain = fleet.domains.find(
-      (d) => d.id !== operation.targetDomainId,
-    );
+    const oldDomain =
+      operation.sourceDomainId === null
+        ? fleet.domains.find((d) => d.id !== operation.targetDomainId)
+        : fleet.domains.find((d) => d.id === operation.sourceDomainId);
     if (oldDomain) {
       await transitionDomain(
         dependencies.database,
@@ -139,7 +164,13 @@ async function handleStepTimeout(
     const next = nextStep(operation.kind, step);
     await (next === null
       ? completeOperation(dependencies.database, operation.id, step)
-      : advanceStep(dependencies.database, operation.id, step, next));
+      : advanceStep(
+          dependencies.database,
+          operation.id,
+          step,
+          next,
+          dependencies.now(),
+        ));
     return;
   }
   // Guarded on the current step: a concurrent tick that advanced or
@@ -188,6 +219,7 @@ async function advanceInFlightOperation(
       dependencies.database,
       inflight.id,
       firstStep(inflight.kind),
+      dependencies.now(),
     );
   }
   const operation = await getOperation(dependencies.database, inflight.id);
@@ -222,15 +254,27 @@ async function advanceInFlightOperation(
   switch (outcome.status) {
     case "done": {
       const next = nextStep(operation.kind, step);
-      await (next === null
+      // Guarded like the failure path: only the tick whose CAS landed
+      // writes the audit event, so racing ticks (or a done racing a
+      // concurrent timeout-failure) cannot double-log or contradict
+      // the operation's recorded outcome.
+      const hasAdvanced = await (next === null
         ? completeOperation(dependencies.database, operation.id, step)
-        : advanceStep(dependencies.database, operation.id, step, next));
-      await appendEvent(dependencies.database, {
-        fleetId: fleet.id,
-        operationId: operation.id,
-        type: "operation.step.done",
-        payload: { step, next },
-      });
+        : advanceStep(
+            dependencies.database,
+            operation.id,
+            step,
+            next,
+            dependencies.now(),
+          ));
+      if (hasAdvanced) {
+        await appendEvent(dependencies.database, {
+          fleetId: fleet.id,
+          operationId: operation.id,
+          type: "operation.step.done",
+          payload: { step, next },
+        });
+      }
       break;
     }
     case "failed": {
@@ -306,6 +350,7 @@ export async function reconcileFleet(
         fleetId: fleet.id,
         kind: "promote",
         targetDomainId: failover.targetDomainId,
+        sourceDomainId: fleet.activeDomainId,
       });
       if (created.created) {
         await appendEvent(dependencies.database, {

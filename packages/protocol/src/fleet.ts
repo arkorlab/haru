@@ -17,7 +17,18 @@ import { fleetPolicySchema } from "./policy.js";
  * multiple vLLM server processes sharing that GPU.
  */
 export const modelBindingSchema = z.object({
-  name: z.string().min(1),
+  // Lowercase-only: this is the routing key clients put in `model`,
+  // matched exactly by the chat proxy. Requiring lowercase here turns
+  // a client/server casing mismatch (many callers normalise model ids
+  // to lowercase) into a config-time error instead of a silent 404.
+  // The vLLM server behind `servingUrl` must serve the same lowercase
+  // name (e.g. via --served-model-name).
+  name: z
+    .string()
+    .min(1)
+    .refine((value) => value === value.toLowerCase(), {
+      message: "model binding names must be lowercase (routing key)",
+    }),
   servingUrl: z.url(),
 });
 export type ModelBinding = z.infer<typeof modelBindingSchema>;

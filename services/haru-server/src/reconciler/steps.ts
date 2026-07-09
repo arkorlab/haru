@@ -4,7 +4,11 @@ import {
   transitionDomainSlots,
 } from "@haru/db";
 
-import { SupervisorError, supervisorClient } from "../supervisor-client.js";
+import {
+  isSupervisorAuthError,
+  SupervisorError,
+  supervisorClient,
+} from "../supervisor-client.js";
 
 import type { SupervisorClientOptions } from "../supervisor-client.js";
 import type { HaruDatabase, OperationRow } from "@haru/db";
@@ -22,7 +26,13 @@ import type {
  */
 const GPU_FREE_THRESHOLD_RATIO = 0.25;
 
-/** Per-call timeout for one supervisor HTTP request inside a step. */
+/**
+ * Per-call timeout for one nudge-style supervisor HTTP request inside
+ * a step. Long operations (wake, probe) are NOT bounded by this: wake
+ * converges via status polls, and the probe call gets the policy's
+ * probe budget (its result only arrives in the response body, so
+ * aborting early would discard a successful probe).
+ */
 const STEP_CALL_TIMEOUT_MS = 10_000;
 
 export interface StepContext {
@@ -49,9 +59,17 @@ function targetDomain(context: StepContext): DomainSnapshot | undefined {
   );
 }
 
-/** The non-target domain (two-domain slice): the old active during a
- * promote's post-commit cleanup steps. */
-function otherDomain(context: StepContext): DomainSnapshot | undefined {
+/**
+ * The domain a promote's post-commit cleanup steps act on: the active
+ * pointer recorded when the operation was created. The first-non-target
+ * fallback only covers legacy rows without a source pointer (and is
+ * only unambiguous in two-domain fleets).
+ */
+function sourceDomain(context: StepContext): DomainSnapshot | undefined {
+  const sourceId = context.operation.sourceDomainId;
+  if (sourceId !== null) {
+    return context.fleet.domains.find((d) => d.id === sourceId);
+  }
   return context.fleet.domains.find(
     (d) => d.id !== context.operation.targetDomainId,
   );
@@ -60,6 +78,7 @@ function otherDomain(context: StepContext): DomainSnapshot | undefined {
 function supervisorOptions(
   context: StepContext,
   domain: DomainSnapshot,
+  timeoutMs: number = STEP_CALL_TIMEOUT_MS,
 ): SupervisorClientOptions | null {
   if (domain.supervisorUrl === null) {
     return null;
@@ -68,12 +87,32 @@ function supervisorOptions(
     fetchFn: context.fetchFn,
     baseUrl: domain.supervisorUrl,
     token: context.supervisorToken,
-    timeoutMs: STEP_CALL_TIMEOUT_MS,
+    timeoutMs,
   };
 }
 
 function failed(code: string, message: string): StepOutcome {
   return { status: "failed", code, message };
+}
+
+/**
+ * Map a supervisor call failure onto a step outcome. Transient
+ * failures (network, timeout, drifted schema) stay PENDING and are
+ * retried until the step budget expires; 401/403 are permanent
+ * configuration errors and fail immediately with a cause that points
+ * at the token, not at a timeout.
+ */
+function supervisorFailure(error: unknown): StepOutcome {
+  if (isSupervisorAuthError(error)) {
+    return failed(
+      "supervisor_unauthorized",
+      `supervisor rejected the token: ${(error as SupervisorError).message}`,
+    );
+  }
+  if (error instanceof SupervisorError) {
+    return PENDING;
+  }
+  throw error;
 }
 
 async function stopTraining(context: StepContext): Promise<StepOutcome> {
@@ -110,7 +149,12 @@ async function stopTraining(context: StepContext): Promise<StepOutcome> {
     );
     const status = await supervisorClient.status(options);
     const trainingSlots = status.slots.filter((s) => s.kind === "training");
-    const isAllIdle = trainingSlots.every((s) => s.training?.state === "idle");
+    // Guard the vacuous case: the fleet layout says this domain HAS
+    // training slots, so a supervisor reporting none is config drift,
+    // not success. Stay pending until the step budget surfaces it.
+    const isAllIdle =
+      trainingSlots.length > 0 &&
+      trainingSlots.every((s) => s.training?.state === "idle");
     if (!isAllIdle) {
       return PENDING;
     }
@@ -123,10 +167,7 @@ async function stopTraining(context: StepContext): Promise<StepOutcome> {
     );
     return DONE;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 
@@ -144,15 +185,14 @@ async function verifyGpu(context: StepContext): Promise<StepOutcome> {
   }
   try {
     const memory = await supervisorClient.gpuMemory(options);
-    const isReleased = memory.gpus.every(
-      (gpu) => gpu.usedMiB / gpu.totalMiB <= GPU_FREE_THRESHOLD_RATIO,
-    );
+    const isReleased =
+      memory.gpus.length > 0 &&
+      memory.gpus.every(
+        (gpu) => gpu.usedMiB / gpu.totalMiB <= GPU_FREE_THRESHOLD_RATIO,
+      );
     return isReleased ? DONE : PENDING;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 
@@ -177,6 +217,9 @@ async function wakeVllm(context: StepContext): Promise<StepOutcome> {
   );
   try {
     // Idempotent: waking an awake vLLM is a no-op on the supervisor.
+    // The wake call itself may exceed the client timeout for large
+    // models; that is fine because completion is observed via the
+    // status poll below on later nudges.
     await supervisorClient.wake(options);
     const status = await supervisorClient.status(options);
     const models = status.slots
@@ -196,10 +239,7 @@ async function wakeVllm(context: StepContext): Promise<StepOutcome> {
     );
     return DONE;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 
@@ -208,7 +248,15 @@ async function probe(context: StepContext): Promise<StepOutcome> {
   if (!domain) {
     return failed("domain_missing", "target domain not found in fleet");
   }
-  const options = supervisorOptions(context, domain);
+  // The probe endpoint is synchronous (it runs real completions), so
+  // its client timeout must cover the whole probe budget: aborting at
+  // the nudge timeout would discard a slow-but-successful probe and
+  // re-queue a fresh completion on the cold GPU every tick.
+  const options = supervisorOptions(
+    context,
+    domain,
+    context.fleet.policy.probeTimeoutMs,
+  );
   if (!options) {
     return failed(
       "no_supervisor",
@@ -221,11 +269,14 @@ async function probe(context: StepContext): Promise<StepOutcome> {
       context.fleet.policy.probe.prompt,
       context.fleet.policy.probe.maxTokens,
     );
-    if (!result.ok) {
-      const failures = result.results
-        .filter((r) => !r.ok)
-        .map((r) => `${r.model}: ${r.error ?? "failed"}`)
-        .join("; ");
+    const hasResults = result.results.length > 0;
+    if (!result.ok || !hasResults) {
+      const failures = hasResults
+        ? result.results
+            .filter((r) => !r.ok)
+            .map((r) => `${r.model}: ${r.error ?? "failed"}`)
+            .join("; ")
+        : "supervisor reported no probeable models (config drift?)";
       // Routing safety: the fleet pointer has not moved yet, so a
       // failed probe leaves the old active domain serving traffic.
       return failed("probe_failed", `synthetic inference failed: ${failures}`);
@@ -239,10 +290,7 @@ async function probe(context: StepContext): Promise<StepOutcome> {
     );
     return DONE;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 
@@ -257,6 +305,10 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
     context.fleet.id,
     context.fleet.activeDomainId,
     context.operation.targetDomainId,
+    // The CAS also requires this operation to still be running, so a
+    // tick that raced a concurrent timeout-failure cannot flip routing
+    // for an operation already recorded as failed.
+    context.operation.id,
   );
   if (result === null) {
     // CAS lost. A concurrent reconcile tick executing this same
@@ -276,7 +328,7 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
 }
 
 async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
-  const domain = otherDomain(context);
+  const domain = sourceDomain(context);
   if (!domain) {
     return DONE;
   }
@@ -298,7 +350,8 @@ async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
   } catch (error) {
     if (error instanceof SupervisorError) {
       // Best-effort: the reconciler's timeout wrapper converts a
-      // never-succeeding best-effort step into done-with-degradation.
+      // never-succeeding best-effort step into done-with-degradation,
+      // auth errors included (the old active may be torn down).
       return PENDING;
     }
     throw error;
@@ -306,7 +359,7 @@ async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
 }
 
 async function demoteOldTrain(context: StepContext): Promise<StepOutcome> {
-  const domain = otherDomain(context);
+  const domain = sourceDomain(context);
   if (!domain) {
     return DONE;
   }
@@ -354,7 +407,10 @@ async function sleepVllm(context: StepContext): Promise<StepOutcome> {
     const models = status.slots
       .filter((s) => s.kind === "inference")
       .flatMap((s) => s.models ?? []);
-    const isAllAsleep = models.every((m) => m.sleeping === true);
+    // Same vacuous-truth guard as wake: a supervisor reporting zero
+    // models cannot prove anything went to sleep.
+    const isAllAsleep =
+      models.length > 0 && models.every((m) => m.sleeping === true);
     if (!isAllAsleep) {
       return PENDING;
     }
@@ -367,10 +423,7 @@ async function sleepVllm(context: StepContext): Promise<StepOutcome> {
     );
     return DONE;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 
@@ -401,10 +454,7 @@ async function startTraining(context: StepContext): Promise<StepOutcome> {
     );
     return DONE;
   } catch (error) {
-    if (error instanceof SupervisorError) {
-      return PENDING;
-    }
-    throw error;
+    return supervisorFailure(error);
   }
 }
 

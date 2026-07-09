@@ -48,6 +48,8 @@ export async function createOperation(
     fleetId: string;
     kind: OperationKind;
     targetDomainId: string;
+    /** Active pointer observed when the operation was requested. */
+    sourceDomainId?: string | null;
   },
 ): Promise<CreateOperationResult> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -57,6 +59,7 @@ export async function createOperation(
         fleetId: input.fleetId,
         kind: input.kind,
         targetDomainId: input.targetDomainId,
+        sourceDomainId: input.sourceDomainId ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -109,13 +112,17 @@ export async function claimOperation(
   database: HaruDatabase,
   operationId: string,
   firstStep: OperationStep,
+  // App clock, not sql`now()`: the reconciler compares stepStartedAt
+  // against its own injected clock, so mixing in the DB clock would
+  // shift every step-timeout budget by the host/DB skew.
+  at: Date = new Date(),
 ): Promise<boolean> {
   const rows = await database
     .update(operations)
     .set({
       state: "running",
       currentStep: firstStep,
-      stepStartedAt: sql`now()`,
+      stepStartedAt: at,
       attempt: 0,
       updatedAt: sql`now()`,
     })
@@ -134,12 +141,14 @@ export async function advanceStep(
   operationId: string,
   fromStep: OperationStep,
   toStep: OperationStep,
+  /** App clock; see claimOperation. */
+  at: Date = new Date(),
 ): Promise<boolean> {
   const rows = await database
     .update(operations)
     .set({
       currentStep: toStep,
-      stepStartedAt: sql`now()`,
+      stepStartedAt: at,
       attempt: 0,
       updatedAt: sql`now()`,
     })

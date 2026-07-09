@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
@@ -20,7 +22,9 @@ export async function createTestDatabase(): Promise<{
 }> {
   const client = new PGlite();
   const database = drizzle({ client, schema });
-  const migrationsFolder = new URL("../../drizzle", import.meta.url).pathname;
+  const migrationsFolder = fileURLToPath(
+    new URL("../../drizzle", import.meta.url),
+  );
   await migrate(database, { migrationsFolder });
   return {
     db: database as unknown as HaruDatabase,

@@ -37,9 +37,22 @@ export const supervisorSlotConfigSchema = z.discriminatedUnion("kind", [
 ]);
 export type SupervisorSlotConfig = z.infer<typeof supervisorSlotConfigSchema>;
 
-export const supervisorConfigSchema = z.object({
-  slots: z.array(supervisorSlotConfigSchema).min(1),
-});
+export const supervisorConfigSchema = z
+  .object({
+    slots: z.array(supervisorSlotConfigSchema).min(1),
+  })
+  // The supervisor keys training runs by gpuIndex; a duplicate
+  // (kind, gpuIndex) entry would silently overwrite the first one.
+  .refine(
+    (config) => {
+      const keys = config.slots.map((slot) => `${slot.gpuIndex}:${slot.kind}`);
+      return new Set(keys).size === keys.length;
+    },
+    {
+      message: "each (gpuIndex, kind) pair must be unique",
+      path: ["slots"],
+    },
+  );
 export type SupervisorConfig = z.infer<typeof supervisorConfigSchema>;
 
 /** Per-model status as reported by GET /v1/status. */
@@ -76,8 +89,9 @@ export type SupervisorSlotStatus = z.infer<typeof supervisorSlotStatusSchema>;
 export const supervisorStatusSchema = z.object({
   slots: z.array(supervisorSlotStatusSchema),
   /**
-   * True when every inference model is awake and every probe since the
-   * last wake has passed: the domain can take routed traffic.
+   * True when every inference model is reachable and awake. Probe
+   * results are NOT folded in; the promotion flow runs its own
+   * synthetic probe before routing flips.
    */
   ready: z.boolean(),
 });

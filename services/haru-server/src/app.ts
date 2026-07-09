@@ -165,6 +165,9 @@ export function createApp(dependencies: AppDependencies) {
       fleetId: snapshot.id,
       kind,
       targetDomainId,
+      // Recorded so post-commit cleanup steps know the actual old
+      // active, independent of fleet size and iteration order.
+      sourceDomainId: snapshot.activeDomainId,
     });
     const isSameIntent =
       result.operation.kind === kind &&

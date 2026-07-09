@@ -30,6 +30,7 @@ const app = createApp({
     apiToken: environment.HARU_API_TOKEN,
     supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
     defaultFleet: environment.HARU_DEFAULT_FLEET,
+    chatHeaderTimeoutMs: environment.HARU_CHAT_HEADER_TIMEOUT_MS,
   },
 });
 

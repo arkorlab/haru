@@ -136,6 +136,23 @@ Authentication: set `HARU_API_TOKEN` and send
 development only; the server logs a loud warning). The
 server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
 
+### haru-server environment
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Neon/Postgres connection string (required). |
+| `PORT` | Listen port (default 8700). |
+| `HARU_API_TOKEN` | Bearer token for the public API; unset = open (dev only). |
+| `HARU_SUPERVISOR_TOKEN` | Bearer token presented to domain supervisors. |
+| `HARU_DEFAULT_FLEET` | Fleet used by `/v1/chat/completions` without an `X-Haru-Fleet` header. |
+| `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. |
+| `HARU_RECONCILE_INTERVAL_MS` | Enables the background reconcile loop at this interval. **Unset means no loop**: heartbeats, `autoFailover`, and operation progress then only run when something POSTs `/v1/fleets/:id/reconcile` (e.g. external cron). |
+| `HARU_RECONCILE_FLEETS` | Comma-separated fleet slugs the loop reconciles (falls back to `HARU_DEFAULT_FLEET`). |
+
+The supervisor reads `PORT` (default 8701), `HARU_SUPERVISOR_TOKEN`,
+and `HARU_SUPERVISOR_CONFIG` (inline JSON or a file path). The seed
+script reads `DATABASE_URL` and optionally `HARU_FLEET_LAYOUT`.
+
 ### Consumer contract for the chat proxy
 
 - `POST /v1/chat/completions` with a normal OpenAI-style JSON body.
@@ -215,6 +232,29 @@ tsgo-backed `oxlint-tsgolint` binary, independently of both copies.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) ([日本語](CONTRIBUTING.ja.md))
 for development conventions and PR guidelines.
+
+## Known limitations (this slice)
+
+- **Auto-failover triggers on heartbeat staleness or a `failed` domain
+  state only.** An active domain whose vLLM processes die while its
+  supervisor stays reachable is marked `degraded` (visible in route
+  intent eligibility) but is NOT auto-promoted away from; promote it
+  manually or act on route intent externally.
+- **Auto-failover needs a reconcile driver.** Set
+  `HARU_RECONCILE_INTERVAL_MS` (plus `HARU_RECONCILE_FLEETS`) or drive
+  `POST /v1/fleets/:id/reconcile` from external cron; without either,
+  `autoFailover` policy is inert.
+- **Model binding names are lowercase routing keys** and the vLLM
+  server behind each binding must serve the same lowercase name (e.g.
+  `--served-model-name`); the chat proxy matches exactly and forwards
+  the client body verbatim.
+- **GPU memory verification requires `nvidia-smi` numeric output**;
+  MIG-partitioned GPUs reporting `[N/A]` for memory fields are not
+  supported by the `verify_gpu` step yet.
+- **Re-applying a layout never updates existing rows** (fleet policy,
+  display name, existing slot specs): seeding is insert-only by
+  design. Slot states for NEWLY added slots follow the live routing
+  pointer.
 
 ## Intentionally out of scope (for now)
 

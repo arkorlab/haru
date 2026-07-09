@@ -25,6 +25,13 @@ export const operations = pgTable(
     kind: operationKindEnum("kind").notNull(),
     state: operationStateEnum("state").notNull().default("pending"),
     targetDomainId: uuid("target_domain_id").notNull(),
+    /**
+     * The fleet's active pointer at operation-creation time: the "old
+     * active" a promote's post-commit demote steps act on. Without it
+     * the executor would have to guess (first non-target domain),
+     * which is wrong in fleets with more than two domains.
+     */
+    sourceDomainId: uuid("source_domain_id"),
     /** Current OperationStep while running; null before claim/after finish. */
     currentStep: text("current_step"),
     stepStartedAt: timestamp("step_started_at", { withTimezone: true }),

@@ -89,6 +89,46 @@ describe("applyFleetLayout", () => {
     expect(after?.activeDomainId).toBe(beta?.id);
   });
 
+  it("derives new slots' states from the LIVE pointer after a promotion", async () => {
+    await applyFleetLayout(database, exampleLayout());
+    const before = await getFleetSnapshot(database, "default");
+    const alpha = before?.domains.find((d) => d.slug === "alpha");
+    const beta = before?.domains.find((d) => d.slug === "beta");
+
+    // Promotion moved routing to beta.
+    const { switchActive } = await import("./repo/fleets.js");
+    await switchActive(database, before!.id, alpha!.id, beta!.id);
+
+    // Operator extends the ORIGINAL layout (which still declares alpha
+    // active) with one more inference slot per domain and re-applies.
+    const layout = exampleLayout() as {
+      domains: { slug: string; slots: unknown[] }[];
+    };
+    for (const domain of layout.domains) {
+      domain.slots.push({
+        kind: "inference",
+        gpuIndex: 7,
+        models: [
+          {
+            name: "example-chat-added",
+            servingUrl: `https://${domain.slug}-added.test`,
+          },
+        ],
+      });
+    }
+    await applyFleetLayout(database, layout);
+
+    const after = await getFleetSnapshot(database, "default");
+    const addedOn = (slug: string) =>
+      after?.domains
+        .find((d) => d.slug === slug)
+        ?.slots.find((s) => s.gpuIndex === 7);
+    // The ACTUAL active (beta) gets the serving slot; the layout's
+    // stale activeDomainSlug (alpha) must not override live routing.
+    expect(addedOn("beta")?.state).toBe("serving");
+    expect(addedOn("alpha")?.state).toBe("sleeping");
+  });
+
   it("resolves fleets by slug and by id", async () => {
     const { fleetId } = await applyFleetLayout(database, exampleLayout());
     expect((await getFleetSnapshot(database, fleetId))?.id).toBe(fleetId);

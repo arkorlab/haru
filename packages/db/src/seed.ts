@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./client.js";
 import { applyFleetLayout } from "./repo/layout.js";
@@ -21,7 +22,9 @@ function layoutPath(): string {
   if (fromEnvironment !== undefined && fromEnvironment !== "") {
     return fromEnvironment;
   }
-  return new URL("../examples/fleet.example.json", import.meta.url).pathname;
+  return fileURLToPath(
+    new URL("../examples/fleet.example.json", import.meta.url),
+  );
 }
 
 async function main(): Promise<void> {
@@ -37,6 +40,11 @@ async function main(): Promise<void> {
   console.log(
     `seeded fleet ${result.fleetId} (${result.createdFleet ? "created" : "existing"}) with domains:`,
   );
+  if (!result.createdFleet) {
+    console.log(
+      "  note: the fleet already existed; layout policy/displayName changes are NOT applied to existing rows",
+    );
+  }
   for (const domain of result.domains) {
     console.log(`  ${domain.slug}: ${domain.id}`);
   }

@@ -4,7 +4,12 @@ import type { TrainingRunState } from "@haru/protocol";
 export interface ChildHandle {
   pid: number | undefined;
   kill(signal: NodeJS.Signals): boolean;
-  once(event: "exit", listener: () => void): void;
+  /**
+   * `error` fires on spawn failure (ENOENT/EACCES), in which case
+   * `exit` never fires; both must be wired or a spawn failure raises
+   * an unhandled 'error' event that kills the whole process.
+   */
+  once(event: "exit" | "error", listener: () => void): void;
 }
 
 export type SpawnFunction = (
@@ -69,6 +74,12 @@ export class TrainingRun {
     this.child = child;
     this.stateValue = "running";
     child.once("exit", () => {
+      this.onExit(child);
+    });
+    // Spawn failures emit 'error' instead of 'exit'; treat them as an
+    // immediate exit so the run returns to idle instead of reporting
+    // "running" forever with no process behind it.
+    child.once("error", () => {
       this.onExit(child);
     });
     return this.stateValue;

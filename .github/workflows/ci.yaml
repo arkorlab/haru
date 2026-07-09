@@ -19,6 +19,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
+      # Migration drift gate: tests run the committed migrations while
+      # deploys use db:push from the schema files; a schema edit
+      # without a regenerated migration must fail here, not diverge.
+      - run: pnpm db:generate && git diff --exit-code packages/db/drizzle
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint

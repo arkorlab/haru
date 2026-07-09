@@ -1,4 +1,4 @@
-import { errorBody } from "@haru/protocol";
+import { errorBody, joinUrl } from "@haru/protocol";
 
 /** Default bound on the wait for upstream response headers (TTFB). */
 export const DEFAULT_CHAT_HEADER_TIMEOUT_MS = 30_000;
@@ -22,7 +22,9 @@ export async function proxyChatCompletion(
   bodyText: string,
   headerTimeoutMs: number,
 ): Promise<ChatProxyResult> {
-  const url = new URL("/v1/chat/completions", servingUrl).href;
+  // joinUrl preserves any path prefix on servingUrl (deployments
+  // behind path-routing gateways); `new URL("/x", base)` would drop it.
+  const url = joinUrl(servingUrl, "/v1/chat/completions");
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();

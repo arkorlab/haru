@@ -1,5 +1,6 @@
 import {
   gpuMemorySchema,
+  joinUrl,
   probeResponseSchema,
   supervisorStatusSchema,
   type GpuMemory,
@@ -7,12 +8,29 @@ import {
   type SupervisorStatus,
 } from "@haru/protocol";
 
-/** Raised on any supervisor call failure (network, timeout, non-2xx). */
+import type { z } from "zod";
+
+/**
+ * Raised on any supervisor call failure (network, timeout, non-2xx,
+ * schema-invalid response). `status` carries the HTTP status when the
+ * supervisor answered, so callers can distinguish permanent auth
+ * failures (401/403) from transient unreachability.
+ */
 export class SupervisorError extends Error {
-  constructor(message: string) {
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number) {
     super(message);
     this.name = "SupervisorError";
+    this.status = status;
   }
+}
+
+export function isSupervisorAuthError(error: unknown): boolean {
+  return (
+    error instanceof SupervisorError &&
+    (error.status === 401 || error.status === 403)
+  );
 }
 
 export interface SupervisorClientOptions {
@@ -39,18 +57,16 @@ async function call(
     headers.authorization = `Bearer ${options.token}`;
   }
   try {
-    const response = await options.fetchFn(
-      new URL(path, options.baseUrl).href,
-      {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-      },
-    );
+    const response = await options.fetchFn(joinUrl(options.baseUrl, path), {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
     if (!response.ok) {
       throw new SupervisorError(
         `supervisor ${path} returned ${response.status}`,
+        response.status,
       );
     }
     return (await response.json()) as unknown;
@@ -66,13 +82,31 @@ async function call(
 }
 
 /**
+ * Parse a supervisor response body, folding schema violations into
+ * SupervisorError. A drifted supervisor version must surface as "this
+ * supervisor call failed" (which callers treat per-domain), never as a
+ * raw ZodError that aborts a whole reconcile tick.
+ */
+function parseAs<T>(schema: z.ZodType<T>, path: string, body: unknown): T {
+  const result = schema.safeParse(body);
+  if (!result.success) {
+    throw new SupervisorError(
+      `supervisor ${path} returned a schema-invalid body: ${result.error.message}`,
+    );
+  }
+  return result.data;
+}
+
+/**
  * Thin typed client for the haru supervisor's control API. Every
  * method is a single short HTTP call bounded by `timeoutMs`; the
  * reconciler composes them into re-entrant step executors.
  */
 export const supervisorClient = {
   async status(options: SupervisorClientOptions): Promise<SupervisorStatus> {
-    return supervisorStatusSchema.parse(
+    return parseAs(
+      supervisorStatusSchema,
+      "/v1/status",
       await call(options, "GET", "/v1/status"),
     );
   },
@@ -92,14 +126,20 @@ export const supervisorClient = {
     await call(options, "POST", "/v1/vllm/sleep", {});
   },
   async gpuMemory(options: SupervisorClientOptions): Promise<GpuMemory> {
-    return gpuMemorySchema.parse(await call(options, "GET", "/v1/gpu/memory"));
+    return parseAs(
+      gpuMemorySchema,
+      "/v1/gpu/memory",
+      await call(options, "GET", "/v1/gpu/memory"),
+    );
   },
   async probe(
     options: SupervisorClientOptions,
     prompt: string,
     maxTokens: number,
   ): Promise<ProbeResponse> {
-    return probeResponseSchema.parse(
+    return parseAs(
+      probeResponseSchema,
+      "/v1/probe",
       await call(options, "POST", "/v1/probe", { prompt, maxTokens }),
     );
   },

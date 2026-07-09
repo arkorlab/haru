@@ -28,15 +28,25 @@ if (
   );
 }
 
+const EXEC_TIMEOUT_MS = 15_000;
+
 const realExec: ExecFunction = (command, arguments_) =>
   new Promise((resolve) => {
-    execFile(command, [...arguments_], (error, stdout, stderr) => {
-      let code = 0;
-      if (error) {
-        code = typeof error.code === "number" ? error.code : 1;
-      }
-      resolve({ code, stdout, stderr });
-    });
+    // The timeout kills a wedged nvidia-smi (a known failure mode on
+    // sick GPUs/drivers) instead of leaking a pending handler per
+    // verify_gpu retry.
+    execFile(
+      command,
+      [...arguments_],
+      { timeout: EXEC_TIMEOUT_MS },
+      (error, stdout, stderr) => {
+        let code = 0;
+        if (error) {
+          code = typeof error.code === "number" ? error.code : 1;
+        }
+        resolve({ code, stdout, stderr });
+      },
+    );
   });
 
 const realSpawn: SpawnFunction = (command, options) => {
@@ -56,6 +66,9 @@ const realSpawn: SpawnFunction = (command, options) => {
     pid: child.pid,
     kill: (signal) => child.kill(signal),
     once: (event, listener) => {
+      // Forward both 'exit' and 'error': an unlistened ChildProcess
+      // 'error' (e.g. ENOENT for a typo'd command) would otherwise
+      // crash the whole supervisor as an unhandled 'error' event.
       child.once(event, listener);
     },
   };

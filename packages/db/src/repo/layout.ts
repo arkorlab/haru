@@ -63,9 +63,12 @@ export async function applyFleetLayout(
     throw new Error(`fleet ${layout.slug} vanished during layout apply`);
   }
 
+  // Slot initial states must reflect the LIVE routing pointer, not the
+  // layout's declared active: re-applying a layout after a promotion
+  // moved the pointer must not seed "serving" slots on the standby.
+  const liveActiveDomainId = fleetRow.activeDomainId;
   const domainResults: { id: string; slug: string }[] = [];
   for (const domainLayout of layout.domains) {
-    const isActiveDomain = domainLayout.slug === layout.activeDomainSlug;
     const insertedDomains = await database
       .insert(domains)
       .values({
@@ -100,6 +103,10 @@ export async function applyFleetLayout(
     }
     domainResults.push({ id: domainRow.id, slug: domainRow.slug });
 
+    const isActiveDomain =
+      liveActiveDomainId === null
+        ? domainLayout.slug === layout.activeDomainSlug
+        : domainRow.id === liveActiveDomainId;
     for (const slotLayout of domainLayout.slots) {
       const { gpuIndex, ...spec } = slotLayout;
       await database

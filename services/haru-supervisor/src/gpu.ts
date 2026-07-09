@@ -31,11 +31,25 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
     .filter((line) => line !== "")
     .map((line) => {
       const [index, usedMiB, totalMiB] = line.split(",").map((v) => v.trim());
-      return {
+      const parsed = {
         index: Number(index),
         usedMiB: Number(usedMiB),
         totalMiB: Number(totalMiB),
       };
+      if (
+        Number.isNaN(parsed.index) ||
+        Number.isNaN(parsed.usedMiB) ||
+        Number.isNaN(parsed.totalMiB)
+      ) {
+        // MIG instances and some drivers report "[N/A]" for memory
+        // fields; surface the raw line so the operator sees WHY GPU
+        // memory introspection is unavailable on this host instead of
+        // a bare schema error.
+        throw new TypeError(
+          `nvidia-smi reported a non-numeric memory line (unsupported GPU/driver mode?): "${line}"`,
+        );
+      }
+      return parsed;
     });
   return gpuMemorySchema.parse({ gpus });
 }

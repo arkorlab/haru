@@ -9,15 +9,11 @@ export const apiErrorBodySchema = z.object({
 });
 export type ApiErrorBody = z.infer<typeof apiErrorBodySchema>;
 
-export function errorBody(code: string, message: string): ApiErrorBody {
-  return { error: { code, message } };
-}
-
-/** Error codes shared across haru services. */
+/** Error codes shared across haru API surfaces. `errorBody` is typed
+ * against this list so a typo'd code fails to compile. */
 export const ERROR_CODES = {
   unauthorized: "unauthorized",
   fleetNotFound: "fleet_not_found",
-  domainNotFound: "domain_not_found",
   modelNotFound: "model_not_found",
   noActiveDomain: "no_active_domain",
   invalidRequest: "invalid_request",
@@ -27,3 +23,7 @@ export const ERROR_CODES = {
   upstreamTimeout: "upstream_timeout",
 } as const;
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
+
+export function errorBody(code: ErrorCode, message: string): ApiErrorBody {
+  return { error: { code, message } };
+}

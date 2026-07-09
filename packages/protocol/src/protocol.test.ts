@@ -12,6 +12,7 @@ import {
 import { fleetLayoutSchema } from "./layout.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
+import { joinUrl } from "./url.js";
 
 describe("slugSchema", () => {
   it("accepts lowercase alphanumeric slugs with inner hyphens", () => {
@@ -193,6 +194,29 @@ describe("domainRole", () => {
     expect(domainRole({ activeDomainId: "x" }, "x")).toBe("active");
     expect(domainRole({ activeDomainId: "x" }, "y")).toBe("standby");
     expect(domainRole({ activeDomainId: null }, "y")).toBe("standby");
+  });
+});
+
+describe("joinUrl", () => {
+  it("appends to an origin-only base", () => {
+    expect(joinUrl("https://host.example", "/v1/chat/completions")).toBe(
+      "https://host.example/v1/chat/completions",
+    );
+  });
+
+  it("preserves a path prefix on the base URL", () => {
+    expect(joinUrl("https://gw.example/tenant-a", "/v1/status")).toBe(
+      "https://gw.example/tenant-a/v1/status",
+    );
+    expect(joinUrl("https://gw.example/tenant-a/", "/v1/status")).toBe(
+      "https://gw.example/tenant-a/v1/status",
+    );
+  });
+
+  it("keeps port and scheme", () => {
+    expect(joinUrl("http://127.0.0.1:8701", "/healthz")).toBe(
+      "http://127.0.0.1:8701/healthz",
+    );
   });
 });
 
