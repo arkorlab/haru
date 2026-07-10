@@ -5,6 +5,7 @@ import {
   DOMAIN_B_ID,
   domain,
   fleet,
+  trainingSlot,
 } from "./fixtures.test-helper.js";
 import { decideDemotion, decidePromotion } from "./promotion.js";
 
@@ -35,6 +36,19 @@ describe("decidePromotion", () => {
       "00000000-0000-4000-8000-0000000000ff",
     );
     expect(decision.type).toBe("invalid_target");
+  });
+
+  it("rejects a training-only target (nothing to serve after promotion)", () => {
+    const snapshot = fleet({
+      domains: [
+        domain(DOMAIN_A_ID, "alpha"),
+        domain(DOMAIN_B_ID, "beta", { slots: [trainingSlot(DOMAIN_B_ID)] }),
+      ],
+    });
+    expect(decidePromotion(snapshot, DOMAIN_B_ID)).toMatchObject({
+      type: "invalid_target",
+      reason: expect.stringContaining("no inference model bindings") as string,
+    });
   });
 
   it("rejects non-promotable domain states", () => {

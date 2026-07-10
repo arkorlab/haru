@@ -18,13 +18,23 @@ export class VllmAdminError extends Error {
 }
 
 const LOCAL_HOST = "127.0.0.1";
+/** Sleep/wake move model weights and can legitimately take minutes. */
 const ADMIN_CALL_TIMEOUT_MS = 120_000;
+/**
+ * /is_sleeping is an in-memory read polled on every /v1/status
+ * heartbeat: it must never share the sleep/wake budget. Callers
+ * (haru-server heartbeats) give up after ~5s, so a wedged vLLM
+ * holding this fetch for two minutes would accumulate one stuck
+ * local call per reconcile tick.
+ */
+const STATUS_CALL_TIMEOUT_MS = 5000;
 
 async function adminCall(
   fetchFunction: typeof fetch,
   port: number,
   method: "GET" | "POST",
   pathAndQuery: string,
+  timeoutMs: number,
 ): Promise<unknown> {
   try {
     // One timer bounds headers AND the JSON body read (the admin
@@ -33,7 +43,7 @@ async function adminCall(
       fetchFunction,
       joinUrl(`http://${LOCAL_HOST}:${port}`, pathAndQuery),
       { method },
-      ADMIN_CALL_TIMEOUT_MS,
+      timeoutMs,
     );
     if (!response.ok) {
       throw new VllmAdminError(
@@ -59,7 +69,13 @@ export async function sleepServer(
   port: number,
   level: 1 = 1,
 ): Promise<void> {
-  await adminCall(fetchFunction, port, "POST", `/sleep?level=${level}`);
+  await adminCall(
+    fetchFunction,
+    port,
+    "POST",
+    `/sleep?level=${level}`,
+    ADMIN_CALL_TIMEOUT_MS,
+  );
 }
 
 /** Wake a sleeping server (no-op on an awake one). */
@@ -67,7 +83,13 @@ export async function wakeServer(
   fetchFunction: typeof fetch,
   port: number,
 ): Promise<void> {
-  await adminCall(fetchFunction, port, "POST", "/wake_up");
+  await adminCall(
+    fetchFunction,
+    port,
+    "POST",
+    "/wake_up",
+    ADMIN_CALL_TIMEOUT_MS,
+  );
 }
 
 /** Whether the server is currently asleep. */
@@ -75,9 +97,13 @@ export async function isServerSleeping(
   fetchFunction: typeof fetch,
   port: number,
 ): Promise<boolean> {
-  const body = (await adminCall(fetchFunction, port, "GET", "/is_sleeping")) as
-    | { is_sleeping?: unknown }
-    | undefined;
+  const body = (await adminCall(
+    fetchFunction,
+    port,
+    "GET",
+    "/is_sleeping",
+    STATUS_CALL_TIMEOUT_MS,
+  )) as { is_sleeping?: unknown } | undefined;
   const sleeping: unknown = body?.is_sleeping;
   if (typeof sleeping !== "boolean") {
     // An empty or shape-drifted body proves NOTHING about the sleep

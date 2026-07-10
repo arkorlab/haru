@@ -94,3 +94,18 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Intended fix: migrate one seed database per run, then
   `CREATE DATABASE ... TEMPLATE seed` per test (file-level copy skips
   the replay), dropping the seed in a global teardown.
+
+### SkyServe status is scraped from the human CLI table
+
+- Where: `packages/driver-skyserve/src/driver.ts`
+  (`getServiceStatus`).
+- Current: `sky serve status` has no machine-readable output flag
+  (unlike `sky status --output json`), so the driver strips ANSI
+  codes and matches the service's table row against the documented
+  status vocabulary. A table-layout change across SkyPilot releases
+  could break the row match (an unrecognized status already surfaces
+  as a typed error).
+- Why deferred: upstream offers nothing better today, and the
+  reconciler does not drive SkyServe provisioning yet.
+- Intended fix: switch to an output-format flag the moment upstream
+  adds one to `sky serve status` (track the SkyPilot CLI reference).

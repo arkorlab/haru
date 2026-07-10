@@ -2,14 +2,12 @@ import {
   createSkyRunner,
   DEFAULT_SKY_COMMAND_TIMEOUT_MS,
   DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
-  parseStdoutJson,
   SkyCliError,
   withTemporaryYaml,
 } from "@haru/driver-skypilot/exec";
-import { z } from "zod";
 
 import {
-  skyServiceStatusSchema,
+  SERVICE_STATUSES,
   type ServiceLaunchSpec,
   type SkyserveDriver,
   type SkyServiceStatus,
@@ -21,6 +19,13 @@ import type { ExecFunction } from "@haru/driver-skypilot/exec";
 /** Injectable service-YAML writer (an injected writer owns its file's
  * lifecycle). */
 export type WriteServiceFileFunction = (contents: string) => Promise<string>;
+
+/** The CLI colorizes the status cell; tokens are matched on the bare
+ * text. */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replaceAll(/\u{1B}\[[0-9;]*m/gu, "");
+}
 
 export interface SkyserveDriverOptions {
   exec?: ExecFunction;
@@ -75,21 +80,37 @@ export function createSkyserveDriver(
     async getServiceStatus(
       serviceName: string,
     ): Promise<SkyServiceStatus | null> {
+      // `sky serve status` has NO machine-readable output flag (unlike
+      // `sky status --output json`), so this scrapes the human table:
+      // find the service's row (the name is the first column) and pick
+      // the cell matching one of the DOCUMENTED service statuses.
+      // Table layout may drift across releases, but the status
+      // vocabulary is a documented CLI contract; a row with no
+      // recognizable status surfaces as a typed error instead of a
+      // silent null. Switch to an output flag if upstream grows one
+      // (see KNOWN_ISSUES).
       const stdout = await runSky(
-        ["serve", "status", serviceName, "--format", "json"],
+        ["serve", "status", serviceName],
         commandTimeoutMs,
       );
-      const parsed = z
-        .array(skyServiceStatusSchema)
-        .safeParse(parseStdoutJson(stdout, `sky serve status ${serviceName}`));
-      if (!parsed.success) {
+      const rows = stripAnsi(stdout)
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/));
+      const row = rows.find((tokens) => tokens[0] === serviceName);
+      if (!row) {
+        return null;
+      }
+      const status = row.find((token) =>
+        (SERVICE_STATUSES as readonly string[]).includes(token),
+      );
+      if (status === undefined) {
         throw new SkyCliError(
           `sky serve status ${serviceName}`,
           0,
-          `unparseable status output: ${parsed.error.message}`,
+          `no documented status token in service row: ${row.join(" ")}`,
         );
       }
-      return parsed.data.find((s) => s.name === serviceName) ?? null;
+      return { name: serviceName, status };
     },
 
     async teardownService(serviceName: string) {

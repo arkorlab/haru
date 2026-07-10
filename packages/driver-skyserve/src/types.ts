@@ -20,7 +20,24 @@ export interface ServiceLaunchSpec {
   run: string;
 }
 
-/** Tolerant view over `sky serve status --format json` output. */
+/**
+ * Every service status `sky serve status` documents. The status cell
+ * is the only machine-relevant token in the CLI's human table (the
+ * command has no JSON output flag), so the driver matches row tokens
+ * against this pinned vocabulary.
+ */
+export const SERVICE_STATUSES = [
+  "CONTROLLER_INIT",
+  "REPLICA_INIT",
+  "CONTROLLER_FAILED",
+  "READY",
+  "SHUTTING_DOWN",
+  "FAILED",
+  "FAILED_CLEANUP",
+  "NO_REPLICAS",
+] as const;
+
+/** Name + documented status scraped from `sky serve status` output. */
 export const skyServiceStatusSchema = z.looseObject({
   name: z.string(),
   status: z.string(),

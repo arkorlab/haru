@@ -8,11 +8,11 @@ import type { SlotKind, SlotState } from "@haru/protocol";
  * (from, to) pair against them, and the reconciler derives shared
  * from-lists via `statesWithEdgeTo`.
  *
- * Inference: starting -> serving -> sleeping -> waking -> probing ->
- * serving is the promotion path. Recovery/cleanup edges: failed ->
- * waking (wake retry after a failed promotion) and starting | waking |
- * probing -> sleeping (demote cleanup can catch a slot anywhere on the
- * wake path).
+ * Inference: sleeping -> waking -> probing -> serving is the
+ * promotion path; starting -> serving covers a provisioning boot.
+ * Recovery/cleanup edges: failed -> waking (wake retry after a failed
+ * promotion) and starting | waking | probing -> sleeping (demote
+ * cleanup can catch a slot anywhere on the wake path).
  *
  * Training: idle -> training -> stopping -> idle. Stopping covers the
  * SIGTERM grace window and the SIGKILL escalation. training -> idle

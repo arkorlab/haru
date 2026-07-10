@@ -200,8 +200,8 @@ pnpm db:push
 #    (packages/db/examples/fleet.example.json), or pass your own:
 pnpm db:seed            # or: pnpm db:seed -- --config my-fleet.json
 
-# 3. Start the server.
-HARU_DEFAULT_FLEET=default pnpm --filter @haru/server dev
+# 3. Start the server (turbo builds workspace deps first).
+HARU_DEFAULT_FLEET=default pnpm dev --filter=@haru/server
 
 # 4. Talk to it.
 curl -s localhost:8700/v1/fleets/default/route-intent

@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
 import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
-import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
+import {
+  failPromotionTargetSlots,
+  transitionDomainSlots,
+  transitionSlot,
+} from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
@@ -239,5 +243,72 @@ describe("slot transitions", () => {
         "waking",
       ),
     ).toBe(0);
+  });
+});
+
+describe("failPromotionTargetSlots", () => {
+  // Simulate a promotion that already drove beta's inference slots
+  // onto the wake path before failing.
+  const wakeBetaSlots = () =>
+    transitionDomainSlots(
+      database,
+      beta().id,
+      "inference",
+      ["sleeping"],
+      "waking",
+    );
+
+  const betaInferenceStates = async () => {
+    const after = await getFleetSnapshot(database, "default");
+    return after?.domains
+      .find((d) => d.slug === "beta")
+      ?.slots.filter((s) => s.kind === "inference")
+      .map((s) => s.state);
+  };
+
+  it("fails the wake-path slots when the fleet is idle", async () => {
+    await wakeBetaSlots();
+    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
+      2,
+    );
+    expect(await betaInferenceStates()).toEqual(["failed", "failed"]);
+  });
+
+  it("no-ops while another operation is in flight (immediate retry owns the slots)", async () => {
+    await wakeBetaSlots();
+    const { createOperation } = await import("./repo/operations.js");
+    await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
+      0,
+    );
+    expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
+  });
+
+  it("no-ops once the routing pointer committed to the target", async () => {
+    await wakeBetaSlots();
+    await transitionDomainSlots(
+      database,
+      beta().id,
+      "inference",
+      ["waking"],
+      "probing",
+    );
+    await transitionDomainSlots(
+      database,
+      beta().id,
+      "inference",
+      ["probing"],
+      "serving",
+    );
+    await switchActive(database, fleet.id, alpha().id, beta().id);
+    // The target IS live traffic now: nothing may be failed.
+    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
+      0,
+    );
+    expect(await betaInferenceStates()).toEqual(["serving", "serving"]);
   });
 });

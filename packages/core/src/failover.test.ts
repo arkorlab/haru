@@ -8,6 +8,7 @@ import {
   domain,
   fleet,
   inferenceSlot,
+  trainingSlot,
 } from "./fixtures.test-helper.js";
 
 const NOW_MS = Date.parse("2026-01-01T00:10:00.000Z");
@@ -117,6 +118,17 @@ describe("detectFailover", () => {
     });
     // A dead active serves nothing; any attempt beats none.
     expect(detectFailover(snapshot, NOW_MS)?.targetDomainId).toBe(DOMAIN_B_ID);
+  });
+
+  it("never falls back to a training-only standby (promotion cannot succeed)", () => {
+    const snapshot = fleet({
+      policy: autoFailoverPolicy,
+      domains: [
+        domain(DOMAIN_A_ID, "alpha", { state: "failed" }),
+        domain(DOMAIN_B_ID, "beta", { slots: [trainingSlot(DOMAIN_B_ID)] }),
+      ],
+    });
+    expect(detectFailover(snapshot, NOW_MS)).toBeNull();
   });
 
   it("prefers a ready standby over a degraded one (ranking)", () => {

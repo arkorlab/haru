@@ -207,8 +207,8 @@ pnpm db:push
 #    (packages/db/examples/fleet.example.json)。自前のものも指定可:
 pnpm db:seed            # または: pnpm db:seed -- --config my-fleet.json
 
-# 3. サーバーを起動。
-HARU_DEFAULT_FLEET=default pnpm --filter @haru/server dev
+# 3. サーバーを起動 (turbo がワークスペース依存を先にビルド)。
+HARU_DEFAULT_FLEET=default pnpm dev --filter=@haru/server
 
 # 4. 話しかける。
 curl -s localhost:8700/v1/fleets/default/route-intent

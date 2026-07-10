@@ -322,6 +322,16 @@ async function wakeVllm(context: StepContext): Promise<StepOutcome> {
     context,
     { role: "target" },
     async (domain, options) => {
+      // decidePromotion and detectFailover both reject bindingless
+      // targets, but the layout can change under an in-flight
+      // operation: fail fast instead of polling an unsatisfiable
+      // all-models-awake proof until the wake budget expires.
+      if (hasNoInferenceSlots(domain)) {
+        return failed(
+          "no_inference_bindings",
+          `domain ${domain.slug} has no inference slots to wake`,
+        );
+      }
       const wakeable = statesWithEdgeTo("inference", "waking");
       if (hasSlotIn(domain, "inference", wakeable)) {
         await transitionDomainSlots(

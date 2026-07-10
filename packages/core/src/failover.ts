@@ -8,6 +8,18 @@ import type {
 } from "@haru/protocol";
 
 /**
+ * Whether the domain binds at least one inference model. A domain
+ * without any can never complete a promotion (nothing to wake or
+ * probe, nothing to route to afterwards): decidePromotion rejects
+ * such targets and detectFailover never picks them.
+ */
+export function hasInferenceBindings(domain: DomainSnapshot): boolean {
+  return domain.slots.some(
+    (s) => s.spec.kind === "inference" && s.spec.models.length > 0,
+  );
+}
+
+/**
  * Whether a standby could plausibly complete a promotion right now:
  * promotable state, a supervisor to drive, at least one inference
  * binding to probe (a bindingless target fails the probe step), and a
@@ -28,10 +40,7 @@ function isViableFailoverTarget(
   if (domain.supervisorUrl === null) {
     return false;
   }
-  const hasInferenceBindings = domain.slots.some(
-    (s) => s.spec.kind === "inference" && s.spec.models.length > 0,
-  );
-  if (!hasInferenceBindings) {
+  if (!hasInferenceBindings(domain)) {
     return false;
   }
   // A failed inference slot means the heartbeat observed the standby's
@@ -133,15 +142,19 @@ export function detectFailover(
   }
 
   // Prefer the first VIABLE standby of the shared ranking: picking a
-  // promotable-state dud (no supervisor, no bindings, unreachable)
-  // fails the promotion before routing moves and gets re-picked every
-  // tick, starving a viable lower-ranked standby indefinitely. When
-  // nothing is provably viable, fall back to promotable state (a dead
-  // active serves nothing, so any attempt beats none).
+  // promotable-state dud (no supervisor, unreachable) fails the
+  // promotion before routing moves and gets re-picked every tick,
+  // starving a viable lower-ranked standby indefinitely. When nothing
+  // is provably viable, fall back to promotable state (a dead active
+  // serves nothing, so any attempt beats none) - but never to a domain
+  // with no inference bindings, whose promotion cannot succeed at all.
   const ranked = rankStandbys(fleet);
   const standby =
     ranked.find((d) => isViableFailoverTarget(d, fleet.policy, nowMs)) ??
-    ranked.find((d) => PROMOTABLE_DOMAIN_STATES.includes(d.state));
+    ranked.find(
+      (d) =>
+        PROMOTABLE_DOMAIN_STATES.includes(d.state) && hasInferenceBindings(d),
+    );
   if (!standby) {
     return null;
   }

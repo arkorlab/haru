@@ -1,4 +1,5 @@
 import { PROMOTABLE_DOMAIN_STATES } from "./domain-state.js";
+import { hasInferenceBindings } from "./failover.js";
 
 import type { FleetSnapshot } from "@haru/protocol";
 
@@ -31,6 +32,15 @@ export function decidePromotion(
     return {
       type: "invalid_target",
       reason: `domain ${domain.slug} is ${domain.state}; only ready or degraded domains can be promoted`,
+    };
+  }
+  // A training-only domain can NEVER complete a promotion (nothing to
+  // wake or probe, nothing to route to afterwards); rejecting up front
+  // beats burning the whole wake budget on a doomed operation.
+  if (!hasInferenceBindings(domain)) {
+    return {
+      type: "invalid_target",
+      reason: `domain ${domain.slug} has no inference model bindings; promoting it would leave nothing to serve`,
     };
   }
   return { type: "create", targetDomainId };

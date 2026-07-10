@@ -16,6 +16,9 @@
       "outputs": ["dist/**"]
     },
     "dev": {
+      // Workspace packages export dist/ only: a clean checkout must
+      // build deps before tsx watch can resolve them.
+      "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
     },

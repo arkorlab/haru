@@ -19,8 +19,8 @@ pnpm db:generate    # drizzle-kit generate -> committed under packages/db/drizzl
 pnpm db:push        # apply schema to $DATABASE_URL (Neon)
 pnpm db:seed        # seed a fleet from a layout JSON (--config path or HARU_FLEET_LAYOUT)
 
-pnpm --filter @haru/server dev       # tsx watch (control API + reconciler + chat proxy)
-pnpm --filter @haru/supervisor dev   # tsx watch (GPU-host agent)
+pnpm dev --filter=@haru/server       # via turbo (^build deps first), then tsx watch
+pnpm dev --filter=@haru/supervisor   # GPU-host agent; same ^build-then-watch shape
 ```
 
 Run a single test file: `pnpm --filter <pkg> exec vitest run src/foo.test.ts`

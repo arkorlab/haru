@@ -72,8 +72,10 @@ export function createSkypilotDriver(
     async getDomainStatus(
       clusterName: string,
     ): Promise<SkyClusterStatus | null> {
+      // `-o/--output json` is the documented output-format flag on
+      // `sky status` (there is no `--format`).
       const stdout = await runSky(
-        ["status", clusterName, "--format", "json"],
+        ["status", clusterName, "--output", "json"],
         commandTimeoutMs,
       );
       const parsed = z

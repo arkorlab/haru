@@ -21,7 +21,7 @@ export interface DomainLaunchSpec {
   run: string;
 }
 
-/** Tolerant view over `sky status --format json` output. */
+/** Tolerant view over `sky status --output json` output. */
 export const skyClusterStatusSchema = z.looseObject({
   name: z.string(),
   status: z.string(),

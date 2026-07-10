@@ -34,7 +34,7 @@ export const DEFAULT_SKY_LAUNCH_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_SKY_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
- * Parse a `sky ... --format json` stdout, wrapping non-JSON output
+ * Parse a `sky ... --output json` stdout, wrapping non-JSON output
  * (empty string, warning banners, truncation) in a typed SkyCliError
  * instead of letting a raw SyntaxError escape the driver boundary.
  */

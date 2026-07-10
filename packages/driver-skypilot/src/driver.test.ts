@@ -134,7 +134,7 @@ describe("createSkypilotDriver", () => {
     expect(calls[0]?.args).toEqual([
       "status",
       "haru-default-alpha",
-      "--format",
+      "--output",
       "json",
     ]);
   });

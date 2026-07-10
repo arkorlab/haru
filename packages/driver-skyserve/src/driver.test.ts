@@ -85,25 +85,46 @@ describe("createSkyserveDriver", () => {
     expect(calls[0]?.timeoutMs).toBe(2500);
   });
 
-  it("parses service status and maps failures to SkyCliError", async () => {
-    const { exec } = recordingExec({
-      status: {
-        code: 0,
-        stdout: JSON.stringify([
-          { name: "haru-default-serve", status: "READY", replicas: 2 },
-        ]),
-        stderr: "",
-      },
+  it("scrapes the documented status from the human table", async () => {
+    // `sky serve status` has no JSON flag; the driver matches the
+    // documented status vocabulary in the service's (colorized) row.
+    const table = [
+      "\u{1B}[36m\u{1B}[1mServices\u{1B}[0m",
+      "NAME                VERSION  UPTIME  STATUS  REPLICAS  ENDPOINT",
+      "haru-default-serve  1        4m 16s  \u{1B}[32mREADY\u{1B}[0m   2/2       3.84.15.251:30001",
+    ].join("\n");
+    const { exec, calls } = recordingExec({
+      status: { code: 0, stdout: table, stderr: "" },
     });
     const driver = createSkyserveDriver({ exec });
     const status = await driver.getServiceStatus("haru-default-serve");
-    expect(status?.status).toBe("READY");
+    expect(status).toEqual({ name: "haru-default-serve", status: "READY" });
+    expect(calls[0]?.args).toEqual(["serve", "status", "haru-default-serve"]);
 
+    // No row for the service: it does not exist.
+    expect(await driver.getServiceStatus("ghost")).toBeNull();
+  });
+
+  it("maps status failures to SkyCliError", async () => {
     const failing = createSkyserveDriver({
       exec: () =>
         Promise.resolve({ code: 1, stdout: "", stderr: "not logged in" }),
     });
     await expect(failing.getServiceStatus("x")).rejects.toThrow(SkyCliError);
+
+    // A row exists but carries no documented status token (upstream
+    // renamed a status): surface it, never silently report "absent".
+    const drifted = createSkyserveDriver({
+      exec: () =>
+        Promise.resolve({
+          code: 0,
+          stdout: "svc-a  1  4m  SOME_NEW_STATE  1/1  1.2.3.4:1",
+          stderr: "",
+        }),
+    });
+    await expect(drifted.getServiceStatus("svc-a")).rejects.toThrow(
+      /no documented status token/,
+    );
   });
 
   it("tears down with confirmation", async () => {

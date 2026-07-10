@@ -13,6 +13,7 @@ import {
   completeOperation,
   createOperation,
   failOperation,
+  failPromotionTargetSlots,
   getFleetRoutePointer,
   getFleetSnapshot,
   getInFlightOperation,
@@ -21,7 +22,6 @@ import {
   markDomainSeen,
   toOperationSnapshot,
   transitionDomain,
-  transitionDomainSlots,
   transitionSlot,
 } from "@haru/db";
 import { operationStepSchema } from "@haru/protocol";
@@ -316,8 +316,11 @@ async function pollHeartbeats(
  * non-active domain, and its recorded state must demand a fresh
  * wake+probe cycle before it is trusted again. Demotes are excluded:
  * their target's serving slots reflect a sleep that genuinely did not
- * happen. Narrower than the table's predecessors of failed on purpose
- * (sleeping slots were never touched by the promotion).
+ * happen.
+ *
+ * Both safety checks (routing pointer not at the target; no newer
+ * in-flight operation racing this cleanup) ride INSIDE the repo's
+ * single UPDATE statement - see failPromotionTargetSlots.
  */
 async function markFailedPromotionSlots(
   database: HaruDatabase,
@@ -326,21 +329,10 @@ async function markFailedPromotionSlots(
   if (operation.kind !== "promote") {
     return;
   }
-  // Fresh pointer read (the tick's snapshot may predate a concurrent
-  // CAS): when the promotion's routing commit actually landed, the
-  // target IS the active domain and marking its serving slots failed
-  // would take down live traffic. Only switch_active moves the
-  // pointer, so pointer === target proves the commit.
-  const pointer = await getFleetRoutePointer(database, operation.fleetId);
-  if (pointer?.activeDomainId === operation.targetDomainId) {
-    return;
-  }
-  await transitionDomainSlots(
+  await failPromotionTargetSlots(
     database,
+    operation.fleetId,
     operation.targetDomainId,
-    "inference",
-    ["waking", "probing", "serving"],
-    "failed",
   );
 }
 

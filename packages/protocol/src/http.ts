@@ -125,6 +125,13 @@ export async function readJsonBody(
  * malformed non-empty JSON is reported as such so the route can 400.
  * Without the distinction, a truncated targeted body (e.g. one meant
  * to carry a gpuIndex) would silently parse as "target everything".
+ *
+ * A failed body READ maps to the same `ok: false`. That is deliberate,
+ * not a conflation: `source` is an INBOUND request, so its stream can
+ * only fail because the client aborted or truncated the upload - a
+ * client-error class where 400 is the right status (and an aborted
+ * client never sees the response anyway). There is no server-side
+ * "network error" case to report as 5xx here.
  */
 export async function readOptionalJsonBody(
   source: { text: () => Promise<string> },

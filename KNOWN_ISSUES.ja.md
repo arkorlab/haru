@@ -89,3 +89,18 @@
 - 意図する修正: 実行ごとに seed DB を 1 回 migrate し、テストごとに
   `CREATE DATABASE ... TEMPLATE seed` (ファイルコピーで再実行を
   スキップ)。seed はグローバル teardown で drop。
+
+### SkyServe のステータスは人間向け CLI テーブルからスクレイプしている
+
+- 場所: `packages/driver-skyserve/src/driver.ts`
+  (`getServiceStatus`)。
+- 現状: `sky serve status` には機械可読な出力フラグがない
+  (`sky status --output json` と違い)。そのためドライバーは ANSI
+  コードを除去し、サービスのテーブル行をドキュメント化された
+  ステータス語彙と照合している。SkyPilot リリース間のテーブル
+  レイアウト変更で行マッチが壊れる可能性がある (未知のステータスは
+  すでに型付きエラーとして表面化する)。
+- 先送りの理由: 現時点で上流にこれより良い手段がなく、reconciler は
+  まだ SkyServe のプロビジョニングを駆動していない。
+- 意図する修正: 上流が `sky serve status` に出力フォーマットフラグを
+  追加した時点で切り替える (SkyPilot CLI リファレンスを追跡)。
