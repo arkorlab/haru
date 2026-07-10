@@ -75,7 +75,13 @@ export function rankStandbys(fleet: FleetSnapshot): DomainSnapshot[] {
       if (seenA !== seenB) {
         return seenB - seenA;
       }
-      return a.slug.localeCompare(b.slug);
+      // Codepoint order, NOT localeCompare: the tiebreak must rank the
+      // same on every replica regardless of the process's ICU locale
+      // (replicas race the one-in-flight-operation index on this pick).
+      if (a.slug === b.slug) {
+        return 0;
+      }
+      return a.slug < b.slug ? -1 : 1;
     });
 }
 

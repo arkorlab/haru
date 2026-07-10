@@ -147,6 +147,22 @@ describe("detectDegradedEscalation", () => {
     expect(detectDegradedEscalation(snapshot, NOW_MS)).toBeNull();
   });
 
+  it("does nothing while no standby is promotable", () => {
+    // Escalating would 503 the active's remaining healthy models with
+    // nobody to fail over to.
+    const snapshot = fleet({
+      policy: autoFailoverPolicy,
+      domains: [
+        domain(DOMAIN_A_ID, "alpha", {
+          state: "degraded",
+          stateUpdatedAt: PAST_GRACE,
+        }),
+        domain(DOMAIN_B_ID, "beta", { state: "provisioning" }),
+      ],
+    });
+    expect(detectDegradedEscalation(snapshot, NOW_MS)).toBeNull();
+  });
+
   it("never escalates a degraded standby", () => {
     const snapshot = fleet({
       policy: autoFailoverPolicy,

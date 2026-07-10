@@ -13,6 +13,7 @@ import {
   completeOperation,
   createOperation,
   failOperation,
+  getFleetRoutePointer,
   getFleetSnapshot,
   getInFlightOperation,
   getOperation,
@@ -25,7 +26,7 @@ import { operationStepSchema } from "@haru/protocol";
 
 import { SupervisorError, supervisorClient } from "../supervisor-client.js";
 
-import { executeStep, type StepOutcome } from "./steps.js";
+import { executeStep, resolveSourceDomain, type StepOutcome } from "./steps.js";
 
 import type { HaruDatabase, OperationRow } from "@haru/db";
 import type {
@@ -43,8 +44,6 @@ export interface ReconcilerDependencies {
   fetchFn: typeof fetch;
   now: () => Date;
   supervisorToken: string | undefined;
-  /** Called after a winning switch_active CAS (cache invalidation). */
-  onRouteChange?: (fleetId: string) => void;
 }
 
 export interface ReconcileResult {
@@ -79,18 +78,29 @@ async function pollOneDomain(
     await markDomainSeen(dependencies.database, domain.id, at);
     domain.lastSeenAt = at.toISOString();
     if (domain.state === "provisioning") {
+      // Role-aware like the recovery rung below: an ACTIVE domain
+      // finishing provisioning with its models down must surface as
+      // degraded (and start the escalation clock), not as ready.
+      const to = isActiveDomain && !status.ready ? "degraded" : "ready";
       return await transitionDomain(
         dependencies.database,
         domain.id,
         ["provisioning"],
-        "ready",
+        to,
         at,
       );
     }
     if (domain.state === "failed") {
-      // A reachable supervisor on a failed domain (typically escalated
-      // away from during failover) rejoins as degraded; the branches
-      // below recover it to ready on later ticks.
+      // Role-aware rejoin: a failed STANDBY (typically escalated away
+      // from during failover) rejoins as degraded on reachability and
+      // recovers to ready on later ticks. A failed domain that is
+      // still the ACTIVE pointer must also report ready, otherwise the
+      // rejoin would reset the escalation clock every tick and throttle
+      // failover retries to one per grace period.
+      const canRejoin = isActiveDomain ? status.ready : true;
+      if (!canRejoin) {
+        return false;
+      }
       return await transitionDomain(
         dependencies.database,
         domain.id,
@@ -204,6 +214,15 @@ async function markFailedPromotionSlots(
   if (operation.kind !== "promote") {
     return;
   }
+  // Fresh pointer read (the tick's snapshot may predate a concurrent
+  // CAS): when the promotion's routing commit actually landed, the
+  // target IS the active domain and marking its serving slots failed
+  // would take down live traffic. Only switch_active moves the
+  // pointer, so pointer === target proves the commit.
+  const pointer = await getFleetRoutePointer(database, operation.fleetId);
+  if (pointer?.activeDomainId === operation.targetDomainId) {
+    return;
+  }
   await transitionDomainSlots(
     database,
     operation.targetDomainId,
@@ -214,27 +233,43 @@ async function markFailedPromotionSlots(
 }
 
 /**
- * How one nudge resolved. Executor outcomes and step timeouts both
- * map into this, so there is exactly one CAS-then-audit path.
+ * How one nudge resolved: an executor outcome as-is, or the extra
+ * timeout-only variant (advance past a best-effort step, degrading the
+ * old domain). One vocabulary, one CAS-then-audit path.
  */
-type StepResolution =
-  | { kind: "advance" }
-  | { kind: "advance_degrade_source" }
-  | { kind: "fail"; code: string; message: string }
-  | { kind: "pending" };
+type StepResolution = StepOutcome | { status: "advance_degrade_source" };
 
-function outcomeToResolution(outcome: StepOutcome): StepResolution {
-  switch (outcome.status) {
-    case "done": {
-      return { kind: "advance" };
-    }
-    case "pending": {
-      return { kind: "pending" };
-    }
-    case "failed": {
-      return { kind: "fail", code: outcome.code, message: outcome.message };
+/**
+ * Resolve a step that exceeded its policy budget. Best-effort steps
+ * advance (degrading the old domain); everything else fails - EXCEPT a
+ * timed-out switch_active whose routing CAS actually committed (crash
+ * or stall between the pointer CAS and the step advance). The timeout
+ * short-circuit skips the executor's idempotent re-run check, so this
+ * re-reads the pointer: failing that operation would let
+ * markFailedPromotionSlots treat the NEW active as a failed promotion
+ * target, and converging to done also runs the post-commit cleanup
+ * steps the old active still needs.
+ */
+async function resolveStepTimeout(
+  dependencies: ReconcilerDependencies,
+  fleet: FleetSnapshot,
+  operation: OperationRow,
+  step: OperationStep,
+): Promise<StepResolution> {
+  if (isBestEffortStep(step)) {
+    return { status: "advance_degrade_source" };
+  }
+  if (step === "switch_active") {
+    const pointer = await getFleetRoutePointer(dependencies.database, fleet.id);
+    if (pointer?.activeDomainId === operation.targetDomainId) {
+      return { status: "done" };
     }
   }
+  return {
+    status: "failed",
+    code: "step_timeout",
+    message: `step ${step} exceeded its timeout`,
+  };
 }
 
 /**
@@ -253,13 +288,14 @@ async function applyStepResolution(
   step: OperationStep,
   resolution: StepResolution,
 ): Promise<OperationRow | null> {
-  switch (resolution.kind) {
+  switch (resolution.status) {
     case "pending": {
       // Budgets are wall-clock and executors are re-entrant: a pending
-      // nudge writes nothing and the next tick simply retries.
+      // nudge writes nothing to the operation row and the next tick
+      // simply retries.
       return operation;
     }
-    case "fail": {
+    case "failed": {
       const failedRow = await failOperation(
         dependencies.database,
         operation.id,
@@ -278,7 +314,7 @@ async function applyStepResolution(
       });
       return failedRow;
     }
-    case "advance":
+    case "done":
     case "advance_degrade_source": {
       const next = nextStep(operation.kind, step);
       const advancedRow = await (next === null
@@ -293,15 +329,12 @@ async function applyStepResolution(
       if (!advancedRow) {
         return null;
       }
-      if (resolution.kind === "advance_degrade_source") {
+      if (resolution.status === "advance_degrade_source") {
         // Post-commit cleanup of the old active domain timed out:
         // degrade it and move on. The old active being unhealthy is
         // typically why the failover happened; never fail the
         // operation for it.
-        const oldDomain =
-          operation.sourceDomainId === null
-            ? fleet.domains.find((d) => d.id !== operation.targetDomainId)
-            : fleet.domains.find((d) => d.id === operation.sourceDomainId);
+        const oldDomain = resolveSourceDomain(fleet, operation);
         if (oldDomain) {
           await transitionDomain(
             dependencies.database,
@@ -363,31 +396,20 @@ async function advanceInFlightOperation(
 
   const elapsedMs =
     dependencies.now().getTime() - operation.stepStartedAt.getTime();
-  let resolution: StepResolution;
-  if (elapsedMs > stepTimeoutMs(fleet.policy, step)) {
-    resolution = isBestEffortStep(step)
-      ? { kind: "advance_degrade_source" }
-      : {
-          kind: "fail",
-          code: "step_timeout",
-          message: `step ${step} exceeded its timeout`,
-        };
-  } else {
-    resolution = outcomeToResolution(
-      await executeStep(
-        {
-          database: dependencies.database,
-          fetchFn: dependencies.fetchFn,
-          now: dependencies.now,
-          fleet,
-          operation,
-          supervisorToken: dependencies.supervisorToken,
-          onRouteChange: dependencies.onRouteChange,
-        },
-        step,
-      ),
-    );
-  }
+  const resolution: StepResolution =
+    elapsedMs > stepTimeoutMs(fleet.policy, step)
+      ? await resolveStepTimeout(dependencies, fleet, operation, step)
+      : await executeStep(
+          {
+            database: dependencies.database,
+            fetchFn: dependencies.fetchFn,
+            now: dependencies.now,
+            fleet,
+            operation,
+            supervisorToken: dependencies.supervisorToken,
+          },
+          step,
+        );
 
   const applied = await applyStepResolution(
     dependencies,

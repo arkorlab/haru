@@ -1,5 +1,5 @@
 import {
-  fetchWithTimeout,
+  fetchJsonWithTimeout,
   gpuMemorySchema,
   joinUrl,
   probeResponseSchema,
@@ -54,7 +54,10 @@ async function call(
     headers.authorization = `Bearer ${options.token}`;
   }
   try {
-    const response = await fetchWithTimeout(
+    // One timer bounds headers AND the JSON body read: a supervisor
+    // that answers headers then stalls the body must not hang the
+    // reconcile tick past timeoutMs.
+    const { response, body: responseBody } = await fetchJsonWithTimeout(
       options.fetchFn,
       joinUrl(options.baseUrl, path),
       {
@@ -70,7 +73,7 @@ async function call(
         response.status,
       );
     }
-    return (await response.json()) as unknown;
+    return responseBody;
   } catch (error) {
     if (error instanceof SupervisorError) {
       throw error;

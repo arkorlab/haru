@@ -145,7 +145,7 @@ server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
 | `HARU_API_TOKEN` | Bearer token for the public API; unset = open (dev only). |
 | `HARU_SUPERVISOR_TOKEN` | Bearer token presented to domain supervisors. |
 | `HARU_DEFAULT_FLEET` | Fleet used by `/v1/chat/completions` without an `X-Haru-Fleet` header. |
-| `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. |
+| `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. Values above ~300000 are capped by Node fetch's own headersTimeout (see KNOWN_ISSUES). |
 | `HARU_SNAPSHOT_CACHE_TTL_MS` | Fleet snapshot cache TTL on the chat hot path (default 2000). Routing-pointer moves surface immediately regardless (every request revalidates against the fleet's route revision); this only bounds slot-state staleness. |
 | `HARU_RECONCILE_INTERVAL_MS` | Enables the background reconcile loop at this interval. **Unset means no loop**: heartbeats, `autoFailover`, and operation progress then only run when something POSTs `/v1/fleets/:id/reconcile` (e.g. external cron). |
 | `HARU_RECONCILE_FLEETS` | Comma-separated fleet slugs the loop reconciles (falls back to `HARU_DEFAULT_FLEET`). |
@@ -237,8 +237,7 @@ for development conventions and PR guidelines.
 ## Known limitations (this slice)
 
 Contributor-facing deferred work is tracked with file references and
-intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) (currently
-empty: the initial-slice backlog has been worked off).
+intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 - **Auto-failover needs a reconcile driver.** Set
   `HARU_RECONCILE_INTERVAL_MS` (plus `HARU_RECONCILE_FLEETS`) or drive

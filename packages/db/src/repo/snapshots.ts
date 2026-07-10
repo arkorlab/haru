@@ -38,22 +38,47 @@ async function findFleetRow(database: HaruDatabase, reference: string) {
   return bySlug[0];
 }
 
+export interface FleetRoutePointer {
+  id: string;
+  routeRevision: number;
+  activeDomainId: string | null;
+}
+
+const ROUTE_POINTER_COLUMNS = {
+  id: fleets.id,
+  routeRevision: fleets.routeRevision,
+  activeDomainId: fleets.activeDomainId,
+};
+
 /**
- * Narrow routing-pointer lookup for the chat hot path: resolves a
- * fleet reference to its id + current route revision without loading
- * domains/slots. The snapshot cache keys on the id and revalidates on
- * the revision, so pointer moves surface immediately while the heavy
- * snapshot stays cached.
+ * Narrow routing-pointer lookup for the chat hot path (and for
+ * post-failure cleanup that must know whether a promotion actually
+ * committed): resolves a fleet reference to its id + current route
+ * revision + active pointer WITHOUT loading domains/slots or the full
+ * fleet row. This runs on every chat request, so it selects exactly
+ * these three columns. Same id-first/slug-fallback rule as
+ * findFleetRow.
  */
-export async function getFleetRouteRevision(
+export async function getFleetRoutePointer(
   database: HaruDatabase,
   reference: string,
-): Promise<{ id: string; slug: string; routeRevision: number } | null> {
-  const fleet = await findFleetRow(database, reference);
-  if (!fleet) {
-    return null;
+): Promise<FleetRoutePointer | null> {
+  if (UUID_RE.test(reference)) {
+    const byId = await database
+      .select(ROUTE_POINTER_COLUMNS)
+      .from(fleets)
+      .where(eq(fleets.id, reference))
+      .limit(1);
+    if (byId[0]) {
+      return byId[0];
+    }
   }
-  return { id: fleet.id, slug: fleet.slug, routeRevision: fleet.routeRevision };
+  const bySlug = await database
+    .select(ROUTE_POINTER_COLUMNS)
+    .from(fleets)
+    .where(eq(fleets.slug, reference))
+    .limit(1);
+  return bySlug[0] ?? null;
 }
 
 /**

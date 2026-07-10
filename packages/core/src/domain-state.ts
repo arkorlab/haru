@@ -19,7 +19,10 @@ export class InvalidTransitionError extends Error {
  * single place the allowed edges are written down.
  */
 const DOMAIN_TRANSITIONS: Record<DomainState, readonly DomainState[]> = {
-  provisioning: ["ready", "failed", "stopping"],
+  // provisioning -> degraded: an ACTIVE domain finishing provisioning
+  // with its models down must not surface as ready for a tick (that
+  // would also delay the degraded-escalation clock).
+  provisioning: ["ready", "degraded", "failed", "stopping"],
   ready: ["degraded", "failed", "stopping"],
   degraded: ["ready", "failed", "stopping"],
   // failed -> degraded: an escalated-away active whose supervisor

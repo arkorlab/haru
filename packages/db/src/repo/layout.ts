@@ -3,7 +3,7 @@ import {
   type FleetLayout,
   type SlotState,
 } from "@haru/protocol";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { domains, fleets, slots } from "../schema/index.js";
 
@@ -124,7 +124,9 @@ export async function applyFleetLayout(
 
   // Point the fleet at its initial active domain only when no pointer
   // exists yet: applying a layout never steals routing from a live
-  // fleet (that is what promote is for).
+  // fleet (that is what promote is for). The revision bumps like every
+  // other pointer move so revision-revalidating consumers (the chat
+  // snapshot cache, external route-intent watchers) see it.
   if (layout.activeDomainSlug !== undefined) {
     const active = domainResults.find(
       (d) => d.slug === layout.activeDomainSlug,
@@ -132,7 +134,10 @@ export async function applyFleetLayout(
     if (active) {
       await database
         .update(fleets)
-        .set({ activeDomainId: active.id })
+        .set({
+          activeDomainId: active.id,
+          routeRevision: sql`${fleets.routeRevision} + 1`,
+        })
         .where(and(eq(fleets.id, fleetRow.id), isNull(fleets.activeDomainId)));
     }
   }

@@ -4,10 +4,38 @@
  * supervisor's protocol-only dependency rule holds.
  */
 
+function timeoutSignal(
+  timeoutMs: number,
+  extraSignal: AbortSignal | undefined,
+  initSignal: AbortSignal | null | undefined,
+): { signal: AbortSignal; timer: ReturnType<typeof setTimeout> } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(
+      new DOMException(`no response within ${timeoutMs}ms`, "TimeoutError"),
+    );
+  }, timeoutMs);
+  const signals = [controller.signal];
+  if (extraSignal) {
+    signals.push(extraSignal);
+  }
+  // A signal the caller put in `init` (the standard fetch idiom) must
+  // compose, not be silently discarded.
+  if (initSignal) {
+    signals.push(initSignal);
+  }
+  return {
+    signal: signals.length === 1 ? controller.signal : AbortSignal.any(signals),
+    timer,
+  };
+}
+
 /**
  * fetch with a wall-clock bound until the response HEADERS arrive.
  * The returned Response's body is NOT bounded: the timer is cleared as
- * soon as fetch resolves, so streaming bodies are never cut.
+ * soon as fetch resolves, so streaming bodies are never cut. Callers
+ * that consume a small JSON body and need the WHOLE call bounded must
+ * use `fetchJsonWithTimeout` instead.
  *
  * The internal timer aborts with a DOMException named "TimeoutError"
  * so callers can distinguish "we gave up" (map to 504) from an
@@ -22,15 +50,7 @@ export async function fetchWithTimeout(
   timeoutMs: number,
   extraSignal?: AbortSignal,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(
-      new DOMException(`no response within ${timeoutMs}ms`, "TimeoutError"),
-    );
-  }, timeoutMs);
-  const signal = extraSignal
-    ? AbortSignal.any([controller.signal, extraSignal])
-    : controller.signal;
+  const { signal, timer } = timeoutSignal(timeoutMs, extraSignal, init.signal);
   try {
     return await fetchFunction(input, { ...init, signal });
   } finally {
@@ -39,18 +59,44 @@ export async function fetchWithTimeout(
 }
 
 /**
- * Parse a request body as JSON, mapping malformed/absent JSON to the
+ * fetch a small JSON control response with ONE timer bounding both the
+ * header wait AND the body read: a peer that returns headers and then
+ * stalls the body must not hang the caller past its budget. On a
+ * non-2xx response the body is left unread (`body: undefined`) so the
+ * caller can map the status itself.
+ */
+export async function fetchJsonWithTimeout(
+  fetchFunction: typeof fetch,
+  input: string | URL | Request,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<{ response: Response; body: unknown }> {
+  const { signal, timer } = timeoutSignal(timeoutMs, undefined, init.signal);
+  try {
+    const response = await fetchFunction(input, { ...init, signal });
+    if (!response.ok) {
+      return { response, body: undefined };
+    }
+    return { response, body: (await response.json()) as unknown };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Parse a JSON request body from anything exposing `json()` (a web
+ * Request, or Hono's `c.req`), mapping malformed/absent JSON to the
  * given fallback. The fallback is load-bearing and differs per caller:
  * haru-server passes `null` (its request schemas have required fields
  * and must reject an empty body), while the supervisor passes `{}`
  * (its schemas are all-optional so a body-less POST is valid).
  */
 export async function readJsonBody(
-  c: { req: { json: () => Promise<unknown> } },
+  source: { json: () => Promise<unknown> },
   fallback: unknown,
 ): Promise<unknown> {
   try {
-    return await c.req.json();
+    return await source.json();
   } catch {
     return fallback;
   }

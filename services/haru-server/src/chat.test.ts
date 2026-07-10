@@ -208,11 +208,19 @@ describe("POST /v1/chat/completions", () => {
     let wasUpstreamAborted = false;
     const hangingFetch: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => {
+        const abort = () => {
           wasUpstreamAborted = true;
-          const reason: unknown = init.signal?.reason;
+          const reason: unknown = init?.signal?.reason;
           reject(reason instanceof Error ? reason : new Error("aborted"));
-        });
+        };
+        // A signal aborted before fetch was reached never fires the
+        // event; without this check a lost timing race would hang the
+        // test until its timeout instead of asserting.
+        if (init?.signal?.aborted) {
+          abort();
+          return;
+        }
+        init?.signal?.addEventListener("abort", abort);
       });
     // Long TTFB budget: only the client signal can cut this request.
     const app = chatApp({

@@ -185,7 +185,9 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   }
 
   app.post("/v1/vllm/sleep", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c, {}));
+    const parsed = vllmTargetRequestSchema.safeParse(
+      await readJsonBody(c.req, {}),
+    );
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -210,7 +212,9 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/vllm/wake", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(await readJsonBody(c, {}));
+    const parsed = vllmTargetRequestSchema.safeParse(
+      await readJsonBody(c.req, {}),
+    );
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -241,7 +245,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
 
   app.post("/v1/training/stop", async (c) => {
     const parsed = trainingStopRequestSchema.safeParse(
-      await readJsonBody(c, {}),
+      await readJsonBody(c.req, {}),
     );
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
@@ -284,7 +288,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/probe", async (c) => {
-    const parsed = probeRequestSchema.safeParse(await readJsonBody(c, {}));
+    const parsed = probeRequestSchema.safeParse(await readJsonBody(c.req, {}));
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }

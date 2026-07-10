@@ -36,6 +36,16 @@ export function detectDegradedEscalation(
   if (degradedForMs <= fleet.policy.degradedGraceMs) {
     return null;
   }
+  // Only escalate when failover can actually act: with no promotable
+  // standby, flipping the active to failed would 503 ALL its traffic
+  // (including still-healthy models) for nothing. Degraded keeps
+  // serving; escalation waits until a standby is ready to take over.
+  const hasPromotableStandby = rankStandbys(fleet).some((d) =>
+    PROMOTABLE_DOMAIN_STATES.includes(d.state),
+  );
+  if (!hasPromotableStandby) {
+    return null;
+  }
   return {
     domainId: active.id,
     reason: `active domain ${active.slug} degraded for ${String(degradedForMs)}ms (grace ${String(fleet.policy.degradedGraceMs)}ms)`,

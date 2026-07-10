@@ -45,8 +45,6 @@ export interface StepContext {
   fleet: FleetSnapshot;
   operation: OperationRow;
   supervisorToken: string | undefined;
-  /** Called after a winning switch_active CAS (cache invalidation). */
-  onRouteChange?: (fleetId: string) => void;
 }
 
 export type StepOutcome =
@@ -67,16 +65,22 @@ function targetDomain(context: StepContext): DomainSnapshot | undefined {
  * The domain a promote's post-commit cleanup steps act on: the active
  * pointer recorded when the operation was created. The first-non-target
  * fallback only covers legacy rows without a source pointer (and is
- * only unambiguous in two-domain fleets).
+ * only unambiguous in two-domain fleets). Shared with the reconciler's
+ * best-effort timeout path so both resolve the same domain.
  */
-function sourceDomain(context: StepContext): DomainSnapshot | undefined {
-  const sourceId = context.operation.sourceDomainId;
+export function resolveSourceDomain(
+  fleet: FleetSnapshot,
+  operation: OperationRow,
+): DomainSnapshot | undefined {
+  const sourceId = operation.sourceDomainId;
   if (sourceId !== null) {
-    return context.fleet.domains.find((d) => d.id === sourceId);
+    return fleet.domains.find((d) => d.id === sourceId);
   }
-  return context.fleet.domains.find(
-    (d) => d.id !== context.operation.targetDomainId,
-  );
+  return fleet.domains.find((d) => d.id !== operation.targetDomainId);
+}
+
+function sourceDomain(context: StepContext): DomainSnapshot | undefined {
+  return resolveSourceDomain(context.fleet, context.operation);
 }
 
 function failed(code: string, message: string): StepOutcome {
@@ -372,7 +376,6 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
     // done instead of failing a promotion that actually landed.
     const fresh = await getFleetSnapshot(context.database, context.fleet.id);
     if (fresh?.activeDomainId === context.operation.targetDomainId) {
-      context.onRouteChange?.(context.fleet.id);
       return DONE;
     }
     return failed(
@@ -380,7 +383,6 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
       "active pointer moved concurrently; refusing to overwrite",
     );
   }
-  context.onRouteChange?.(context.fleet.id);
   return DONE;
 }
 

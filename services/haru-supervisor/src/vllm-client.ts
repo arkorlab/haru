@@ -8,7 +8,7 @@
  * host is through the supervisor's authenticated control API.
  */
 
-import { fetchWithTimeout } from "@haru/protocol";
+import { fetchJsonWithTimeout } from "@haru/protocol";
 
 export class VllmAdminError extends Error {
   constructor(message: string) {
@@ -25,9 +25,11 @@ async function adminCall(
   port: number,
   method: "GET" | "POST",
   pathAndQuery: string,
-): Promise<Response> {
+): Promise<unknown> {
   try {
-    const response = await fetchWithTimeout(
+    // One timer bounds headers AND the JSON body read (the admin
+    // endpoints all answer tiny JSON bodies).
+    const { response, body } = await fetchJsonWithTimeout(
       fetchFunction,
       `http://${LOCAL_HOST}:${port}${pathAndQuery}`,
       { method },
@@ -38,7 +40,7 @@ async function adminCall(
         `vLLM :${port} ${pathAndQuery} returned ${response.status}`,
       );
     }
-    return response;
+    return body;
   } catch (error) {
     if (error instanceof VllmAdminError) {
       throw error;
@@ -73,7 +75,11 @@ export async function isServerSleeping(
   fetchFunction: typeof fetch,
   port: number,
 ): Promise<boolean> {
-  const response = await adminCall(fetchFunction, port, "GET", "/is_sleeping");
-  const body = (await response.json()) as { is_sleeping?: unknown };
+  const body = (await adminCall(
+    fetchFunction,
+    port,
+    "GET",
+    "/is_sleeping",
+  )) as { is_sleeping?: unknown };
   return body.is_sleeping === true;
 }

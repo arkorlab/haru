@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
 import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
-import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
+import { transitionDomainSlots } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
@@ -100,28 +100,38 @@ describe("transitionDomain", () => {
 });
 
 describe("slot transitions", () => {
-  it("transitionSlot is guarded by the expected state", async () => {
-    const servingSlot = alpha().slots.find(
-      (s) => s.kind === "inference" && s.state === "serving",
-    )!;
+  it("is guarded by the expected state (zero rows once consumed)", async () => {
     expect(
-      await transitionSlot(
+      await transitionDomainSlots(
         database,
-        servingSlot.id,
+        alpha().id,
         "inference",
         ["serving"],
         "sleeping",
       ),
-    ).toBe(true);
+    ).toBe(2);
     expect(
-      await transitionSlot(
+      await transitionDomainSlots(
         database,
-        servingSlot.id,
+        alpha().id,
         "inference",
         ["serving"],
         "sleeping",
       ),
-    ).toBe(false);
+    ).toBe(0);
+  });
+
+  it("rejects from-lists that violate the core slot state table", async () => {
+    // sleeping -> serving skips the wake path and is not an edge.
+    await expect(
+      transitionDomainSlots(
+        database,
+        beta().id,
+        "inference",
+        ["sleeping"],
+        "serving",
+      ),
+    ).rejects.toThrow(/invalid inference slot transition/);
   });
 
   it("transitionDomainSlots moves every matching slot at once", async () => {

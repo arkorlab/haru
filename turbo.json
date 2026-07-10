@@ -5,6 +5,11 @@
     "oxlint.config.ts",
     "tsconfig.base.json"
   ],
+  // Turbo 2 strict env mode strips undeclared vars from task
+  // processes; without this entry the test-postgres CI lane would
+  // silently fall back to PGlite. globalEnv (not passThroughEnv) so
+  // the two lanes never share a task cache entry.
+  "globalEnv": ["HARU_TEST_DATABASE_URL"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

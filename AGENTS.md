@@ -83,7 +83,9 @@ Dependency graph (enforce it when adding imports):
   Executor outcomes and step timeouts both map into one `StepResolution`
   applied by a single CAS-then-audit path (`applyStepResolution`); only the
   tick whose advance/complete/fail CAS lands degrades domains, cleans up
-  slots, and writes audit events. A `pending` nudge writes NOTHING to the DB.
+  slots, and writes audit events. A `pending` nudge writes nothing to the
+  OPERATION row (executors may still issue their guarded slot mirror CAS on
+  the way to pending).
   `stepStartedAt` and `domains.stateUpdatedAt` are written with the injected
   app clock (not `sql\`now()\``) because step timeouts and the degraded
   escalation compare against `dependencies.now()` - keep it that way or

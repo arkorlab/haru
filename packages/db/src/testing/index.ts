@@ -70,28 +70,55 @@ async function createPostgresTestDatabase(
     await import("drizzle-orm/node-postgres/migrator");
 
   const databaseName = `haru_test_${randomBytes(8).toString("hex")}`;
-  const admin = new pg.Client({ connectionString: adminUrl });
-  await admin.connect();
-  // Generated identifier (hex only), no injection surface.
-  await admin.query(`CREATE DATABASE ${databaseName}`);
-  await admin.end();
+
+  async function runAsAdmin(statement: string): Promise<void> {
+    const admin = new pg.Client({ connectionString: adminUrl });
+    await admin.connect();
+    try {
+      await admin.query(statement);
+    } finally {
+      await admin.end();
+    }
+  }
+
+  // Generated identifier (hex only), no injection surface. WITH
+  // (FORCE) needs PG 13+; the CI lane pins postgres:17.
+  const dropDatabase = () =>
+    runAsAdmin(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+
+  await runAsAdmin(`CREATE DATABASE ${databaseName}`);
 
   const testUrl = new URL(adminUrl);
   testUrl.pathname = `/${databaseName}`;
   const pool = new pg.Pool({ connectionString: testUrl.href });
-  const database = drizzleNodePostgres({ client: pool, schema });
-  await migrateNodePostgres(database, { migrationsFolder });
-
-  return {
-    db: database as unknown as HaruDatabase,
-    close: async () => {
+  try {
+    const database = drizzleNodePostgres({ client: pool, schema });
+    await migrateNodePostgres(database, { migrationsFolder });
+    return {
+      db: database as unknown as HaruDatabase,
+      close: async () => {
+        try {
+          await pool.end();
+        } finally {
+          await dropDatabase();
+        }
+      },
+    };
+  } catch (error) {
+    // A failed migrate must not orphan the created database or leak
+    // the pool's connections (there is no reaper for haru_test_*).
+    try {
       await pool.end();
-      const cleanup = new pg.Client({ connectionString: adminUrl });
-      await cleanup.connect();
-      await cleanup.query(`DROP DATABASE ${databaseName} WITH (FORCE)`);
-      await cleanup.end();
-    },
-  };
+    } catch {
+      // Best-effort cleanup; the original error is what matters.
+    }
+    try {
+      await dropDatabase();
+    } catch {
+      // Best-effort cleanup; the original error is what matters.
+    }
+    throw error;
+  }
 }
 
 /**

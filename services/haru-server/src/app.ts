@@ -9,7 +9,7 @@ import {
 import {
   appendEvent,
   createOperation,
-  getFleetRouteRevision,
+  getFleetRoutePointer,
   getFleetSnapshot,
   toOperationSnapshot,
 } from "@haru/db";
@@ -74,9 +74,8 @@ export function createApp(dependencies: AppDependencies) {
   // bounded. Keyed by fleet id (slug and UUID references share one
   // entry) and revalidated per request against the fleet's route
   // revision (one narrow SELECT), so an active-pointer move surfaces
-  // immediately; the TTL only bounds non-routing staleness (slot
-  // states). The reconciler additionally drops the entry after a
-  // winning switch_active in this process.
+  // immediately no matter which process moved it; the TTL only bounds
+  // non-routing staleness (slot states).
   const snapshotCache = new Map<string, SnapshotCacheEntry>();
 
   const reconcilerDependencies = {
@@ -84,15 +83,12 @@ export function createApp(dependencies: AppDependencies) {
     fetchFn: fetchFunction,
     now,
     supervisorToken: config.supervisorToken,
-    onRouteChange: (fleetId: string) => {
-      snapshotCache.delete(fleetId);
-    },
   };
 
   async function cachedSnapshot(
     reference: string,
   ): Promise<FleetSnapshot | null> {
-    const pointer = await getFleetRouteRevision(database, reference);
+    const pointer = await getFleetRoutePointer(database, reference);
     if (!pointer) {
       return null;
     }
@@ -219,7 +215,7 @@ export function createApp(dependencies: AppDependencies) {
   }
 
   app.post("/v1/fleets/:fleetId/promote", async (c) => {
-    const body: unknown = await readJsonBody(c, null);
+    const body: unknown = await readJsonBody(c.req, null);
     const parsed = promoteRequestSchema.safeParse(body);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
@@ -233,7 +229,7 @@ export function createApp(dependencies: AppDependencies) {
   });
 
   app.post("/v1/fleets/:fleetId/demote", async (c) => {
-    const body: unknown = await readJsonBody(c, null);
+    const body: unknown = await readJsonBody(c.req, null);
     const parsed = demoteRequestSchema.safeParse(body);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);

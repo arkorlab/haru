@@ -1,4 +1,4 @@
-import { fetchWithTimeout, type ProbeResult } from "@haru/protocol";
+import { fetchJsonWithTimeout, type ProbeResult } from "@haru/protocol";
 
 /** Fallback when the caller does not send a probe budget. */
 export const DEFAULT_PROBE_CALL_TIMEOUT_MS = 60_000;
@@ -21,7 +21,9 @@ export async function probeModel(
 ): Promise<ProbeResult> {
   const startedAt = now();
   try {
-    const response = await fetchWithTimeout(
+    // One timer bounds headers AND the JSON body read, so a woken vLLM
+    // that stalls mid-response cannot hang the probe past its budget.
+    const { response, body } = await fetchJsonWithTimeout(
       fetchFunction,
       `http://127.0.0.1:${model.port}/v1/chat/completions`,
       {
@@ -45,8 +47,9 @@ export async function probeModel(
         error: `upstream returned ${response.status}`,
       };
     }
-    const body = (await response.json()) as { choices?: unknown[] };
-    const hasChoices = Array.isArray(body.choices) && body.choices.length > 0;
+    const completion = body as { choices?: unknown[] };
+    const hasChoices =
+      Array.isArray(completion.choices) && completion.choices.length > 0;
     if (!hasChoices) {
       return {
         model: model.name,

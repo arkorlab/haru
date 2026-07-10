@@ -104,7 +104,8 @@ describe("GET /v1/fleets/:fleetId/route-intent", () => {
     expect(intent.active?.eligible).toBe(true);
     expect(intent.standbys.map((s) => s.domainSlug)).toEqual(["beta"]);
     expect(intent.standbys[0]?.weight).toBe(0);
-    expect(intent.revision).toBe(1);
+    // Seed bumps the revision when it sets the initial pointer.
+    expect(intent.revision).toBe(2);
   });
 });
 
@@ -119,7 +120,7 @@ describe("POST /v1/fleets/:fleetId/promote", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       status: "already_active",
-      routeRevision: 1,
+      routeRevision: 2,
     });
   });
 

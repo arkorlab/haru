@@ -12,6 +12,7 @@ const ALL: readonly DomainState[] = domainStateSchema.options;
 /** The full allowed-edge set, asserted exhaustively below. */
 const ALLOWED: ReadonlySet<string> = new Set([
   "provisioning>ready",
+  "provisioning>degraded",
   "provisioning>failed",
   "provisioning>stopping",
   "ready>degraded",

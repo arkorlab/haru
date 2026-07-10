@@ -124,7 +124,8 @@ describe("full promotion flow", () => {
     const intent = routeIntentSchema.parse(await intentResponse.json());
     expect(intent.active?.domainSlug).toBe("beta");
     expect(intent.active?.eligible).toBe(true);
-    expect(intent.revision).toBe(2);
+    // Seed set the pointer at revision 2; the promotion bumps to 3.
+    expect(intent.revision).toBe(3);
 
     // DB slot states mirror the physical states.
     const after = await getFleetSnapshot(database, "default");
@@ -170,7 +171,7 @@ describe("full promotion flow", () => {
     const intentResponse = await app.request("/v1/fleets/default/route-intent");
     const intent = routeIntentSchema.parse(await intentResponse.json());
     expect(intent.active?.domainSlug).toBe("alpha");
-    expect(intent.revision).toBe(1);
+    expect(intent.revision).toBe(2);
 
     // The half-woken standby inference slots are marked failed.
     const after = await getFleetSnapshot(database, "default");
@@ -341,10 +342,12 @@ describe("full promotion flow", () => {
     const gated: typeof fetch = async (input, init) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const response = await base(input, init);
-      inFlight -= 1;
-      return response;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return await base(input, init);
+      } finally {
+        inFlight -= 1;
+      }
     };
     const app = createApp({
       database,
@@ -378,13 +381,17 @@ describe("full promotion flow", () => {
   });
 
   it("a demote whose training never starts stays pending until the step budget fails it", async () => {
-    await seed({ startTrainingTimeoutMs: 500 });
+    await seed({ startTrainingTimeoutMs: 60_000 });
     betaSupervisor.sleeping = false;
     betaSupervisor.training = "idle";
     // /v1/training/start answers 200 but the run never leaves idle
     // (e.g. the training command fails to spawn).
     betaSupervisor.trainingStartIgnored = true;
-    const app = makeApp();
+    // Injected clock: step budgets compare stepStartedAt (written with
+    // this same clock) against now(), so advancing the variable is a
+    // deterministic time warp with no real sleeps or CI-load flakes.
+    let nowMs = Date.now();
+    const app = makeApp(() => new Date(nowMs));
 
     await app.request("/v1/fleets/default/demote", {
       method: "POST",
@@ -403,7 +410,7 @@ describe("full promotion flow", () => {
 
     // Past the budget the operation fails instead of reporting a
     // demote that never actually started training.
-    await new Promise((resolve) => setTimeout(resolve, 550));
+    nowMs += 60_001;
     const result = await reconcileUntilSettled(app);
     const operation = result.operation as {
       state: string;

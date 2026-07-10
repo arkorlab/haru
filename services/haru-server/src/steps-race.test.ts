@@ -70,6 +70,35 @@ afterEach(async () => {
 const domainId = (slug: string) =>
   staleFleet.domains.find((d) => d.slug === slug)!.id;
 
+/** Walk a domain's inference slots along the legal wake path
+ * (sleeping -> waking -> probing -> serving), as a promotion would. */
+async function walkWakePathToServing(
+  haruDatabase: HaruDatabase,
+  targetDomainId: string,
+): Promise<void> {
+  await transitionDomainSlots(
+    haruDatabase,
+    targetDomainId,
+    "inference",
+    ["sleeping"],
+    "waking",
+  );
+  await transitionDomainSlots(
+    haruDatabase,
+    targetDomainId,
+    "inference",
+    ["waking"],
+    "probing",
+  );
+  await transitionDomainSlots(
+    haruDatabase,
+    targetDomainId,
+    "inference",
+    ["probing"],
+    "serving",
+  );
+}
+
 async function claimedPromotion(targetSlug: string): Promise<OperationRow> {
   const { operation } = await createOperation(database, {
     fleetId: staleFleet.id,
@@ -147,28 +176,7 @@ describe("switch_active under concurrent ticks", () => {
       "switch_active",
       new Date(Date.now() - 60_000),
     );
-    // Walk the legal wake path the promotion would have taken.
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["sleeping"],
-      "waking",
-    );
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["waking"],
-      "probing",
-    );
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["probing"],
-      "serving",
-    );
+    await walkWakePathToServing(database, domainId("beta"));
 
     const result = await reconcileFleet(
       {
@@ -202,28 +210,7 @@ describe("switch_active under concurrent ticks", () => {
       "sleep_vllm",
       new Date(Date.now() - 600_000),
     );
-    // Walk the legal wake path the promotion would have taken.
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["sleeping"],
-      "waking",
-    );
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["waking"],
-      "probing",
-    );
-    await transitionDomainSlots(
-      database,
-      domainId("beta"),
-      "inference",
-      ["probing"],
-      "serving",
-    );
+    await walkWakePathToServing(database, domainId("beta"));
 
     const result = await reconcileFleet(
       {
@@ -237,6 +224,54 @@ describe("switch_active under concurrent ticks", () => {
     expect(result?.operation?.state).toBe("failed");
 
     const after = await getFleetSnapshot(database, "default");
+    const betaSlots = after?.domains
+      .find((d) => d.slug === "beta")!
+      .slots.filter((s) => s.kind === "inference");
+    expect(betaSlots?.every((s) => s.state === "serving")).toBe(true);
+  });
+
+  it("converges a timed-out switch_active to done when the pointer already moved (crash between CAS and advance)", async () => {
+    const { operation } = await createOperation(database, {
+      fleetId: staleFleet.id,
+      kind: "promote",
+      targetDomainId: domainId("beta"),
+      sourceDomainId: domainId("alpha"),
+    });
+    // Claimed past the switch_active budget, as after a crash/stall.
+    await claimOperation(
+      database,
+      operation.id,
+      "switch_active",
+      new Date(Date.now() - 60_000),
+    );
+    await walkWakePathToServing(database, domainId("beta"));
+    // The routing CAS landed before the crash: beta IS active now.
+    const moved = await switchActive(
+      database,
+      staleFleet.id,
+      domainId("alpha"),
+      domainId("beta"),
+      operation.id,
+    );
+    expect(moved).not.toBeNull();
+
+    const result = await reconcileFleet(
+      {
+        database,
+        fetchFn: fetch,
+        now: () => new Date(),
+        supervisorToken: undefined,
+      },
+      "default",
+    );
+    // The timeout must NOT fail the operation (that would let the
+    // failure cleanup mark the NEW active's serving slots failed and
+    // take down live traffic); it converges through the remaining
+    // best-effort cleanup steps instead.
+    expect(result?.operation?.state).not.toBe("failed");
+
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(domainId("beta"));
     const betaSlots = after?.domains
       .find((d) => d.slug === "beta")!
       .slots.filter((s) => s.kind === "inference");

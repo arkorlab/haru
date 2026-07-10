@@ -187,9 +187,12 @@ describe("vLLM sleep/wake control", () => {
     const gatedFetch: typeof fetch = async () => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      inFlight -= 1;
-      return Response.json({ status: "ok" });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return Response.json({ status: "ok" });
+      } finally {
+        inFlight -= 1;
+      }
     };
     const app = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),

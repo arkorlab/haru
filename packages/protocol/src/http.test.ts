@@ -53,11 +53,19 @@ describe("fetchWithTimeout", () => {
 });
 
 describe("readJsonBody", () => {
-  const failing = { req: { json: () => Promise.reject(new Error("bad")) } };
+  const failing = { json: () => Promise.reject(new Error("bad")) };
 
   it("returns the parsed body when valid", async () => {
-    const c = { req: { json: () => Promise.resolve({ a: 1 }) } };
-    expect(await readJsonBody(c, null)).toEqual({ a: 1 });
+    const source = { json: () => Promise.resolve({ a: 1 }) };
+    expect(await readJsonBody(source, null)).toEqual({ a: 1 });
+  });
+
+  it("accepts a web-standard Request", async () => {
+    const request = new Request("https://x.test", {
+      method: "POST",
+      body: JSON.stringify({ a: 1 }),
+    });
+    expect(await readJsonBody(request, null)).toEqual({ a: 1 });
   });
 
   it("maps malformed JSON to the caller's explicit fallback", async () => {

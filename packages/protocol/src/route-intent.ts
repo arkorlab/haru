@@ -1,16 +1,16 @@
 import { z } from "zod";
 
 import { slugSchema } from "./enums.js";
+import { modelBindingSchema } from "./fleet.js";
 
 /**
- * One routed model on a target: the routing key plus whether traffic
- * for it can be served right now (its slot is serving on a routable
- * domain). Per-model eligibility lets a partially degraded domain keep
- * serving its healthy models, matching the chat proxy's behavior.
+ * One routed model on a target: the model binding (routing key +
+ * serving URL, including its lowercase-name refine) plus whether
+ * traffic for it can be served right now (its slot is serving on a
+ * routable domain). Per-model eligibility lets a partially degraded
+ * domain keep serving its healthy models, matching the chat proxy.
  */
-export const routeModelSchema = z.object({
-  name: z.string().min(1),
-  servingUrl: z.url(),
+export const routeModelSchema = modelBindingSchema.extend({
   eligible: z.boolean(),
 });
 export type RouteModel = z.infer<typeof routeModelSchema>;
