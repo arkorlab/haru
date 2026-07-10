@@ -63,20 +63,22 @@ function targetDomain(context: StepContext): DomainSnapshot | undefined {
 
 /**
  * The domain a promote's post-commit cleanup steps act on: the active
- * pointer recorded when the operation was created. The first-non-target
- * fallback only covers legacy rows without a source pointer (and is
- * only unambiguous in two-domain fleets). Shared with the reconciler's
- * best-effort timeout path so both resolve the same domain.
+ * pointer recorded when the operation was created. A null source means
+ * NO active existed at creation (headless promote), so there is no old
+ * active to sleep or hand training to; guessing (e.g. first non-target
+ * domain) would put a never-active domain to sleep. Shared with the
+ * reconciler's best-effort timeout path so both resolve the same
+ * domain.
  */
 export function resolveSourceDomain(
   fleet: FleetSnapshot,
   operation: OperationRow,
 ): DomainSnapshot | undefined {
   const sourceId = operation.sourceDomainId;
-  if (sourceId !== null) {
-    return fleet.domains.find((d) => d.id === sourceId);
+  if (sourceId === null) {
+    return undefined;
   }
-  return fleet.domains.find((d) => d.id !== operation.targetDomainId);
+  return fleet.domains.find((d) => d.id === sourceId);
 }
 
 function sourceDomain(context: StepContext): DomainSnapshot | undefined {

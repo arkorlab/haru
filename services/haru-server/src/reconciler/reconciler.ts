@@ -362,12 +362,13 @@ async function applyStepResolution(
   }
 }
 
-/** Advance the fleet's in-flight operation by at most one step nudge. */
+/** Advance the fleet's in-flight operation by at most one step nudge.
+ * The caller passes the in-flight row it already resolved this tick. */
 async function advanceInFlightOperation(
   dependencies: ReconcilerDependencies,
   fleet: FleetSnapshot,
+  inflight: OperationRow | null,
 ): Promise<OperationRow | null> {
-  const inflight = await getInFlightOperation(dependencies.database, fleet.id);
   if (!inflight) {
     return null;
   }
@@ -456,44 +457,50 @@ export async function reconcileFleet(
     fleet = reloaded;
   }
 
-  const escalation = detectDegradedEscalation(
-    fleet,
-    dependencies.now().getTime(),
-  );
-  if (escalation) {
-    const didEscalate = await transitionDomain(
-      dependencies.database,
-      escalation.domainId,
-      ["degraded"],
-      "failed",
-      dependencies.now(),
+  // Resolve the in-flight operation ONCE per tick. Escalation and
+  // auto-failover only act while the one-in-flight slot is free:
+  // flipping the active to failed while an unrelated operation blocks
+  // the promote would 503 traffic with no failover to show for it.
+  let inflight = await getInFlightOperation(dependencies.database, fleet.id);
+  if (!inflight) {
+    const escalation = detectDegradedEscalation(
+      fleet,
+      dependencies.now().getTime(),
     );
-    if (didEscalate) {
-      await appendEvent(dependencies.database, {
-        fleetId: fleet.id,
-        domainId: escalation.domainId,
-        type: "domain.degraded.escalated",
-        payload: {
-          reason: escalation.reason,
-          degradedGraceMs: fleet.policy.degradedGraceMs,
-        },
-      });
-      // Patch the in-memory snapshot so detectFailover sees the failed
-      // active in this same tick (no extra reload).
-      const escalated = fleet.domains.find((d) => d.id === escalation.domainId);
-      if (escalated) {
-        escalated.state = "failed";
+    if (escalation) {
+      const didEscalate = await transitionDomain(
+        dependencies.database,
+        escalation.domainId,
+        ["degraded"],
+        "failed",
+        dependencies.now(),
+      );
+      if (didEscalate) {
+        await appendEvent(dependencies.database, {
+          fleetId: fleet.id,
+          domainId: escalation.domainId,
+          type: "domain.degraded.escalated",
+          payload: {
+            reason: escalation.reason,
+            degradedGraceMs: fleet.policy.degradedGraceMs,
+          },
+        });
+        // Patch the in-memory snapshot so detectFailover sees the
+        // failed active in this same tick (no extra reload). Patch
+        // BOTH fields the transition wrote, so any same-tick reader
+        // of stateUpdatedAt sees a consistent snapshot.
+        const escalated = fleet.domains.find(
+          (d) => d.id === escalation.domainId,
+        );
+        if (escalated) {
+          escalated.state = "failed";
+          escalated.stateUpdatedAt = dependencies.now().toISOString();
+        }
       }
     }
-  }
 
-  const failover = detectFailover(fleet, dependencies.now().getTime());
-  if (failover) {
-    const existing = await getInFlightOperation(
-      dependencies.database,
-      fleet.id,
-    );
-    if (!existing) {
+    const failover = detectFailover(fleet, dependencies.now().getTime());
+    if (failover) {
       const created = await createOperation(dependencies.database, {
         fleetId: fleet.id,
         kind: "promote",
@@ -508,10 +515,15 @@ export async function reconcileFleet(
           payload: { reason: failover.reason },
         });
       }
+      inflight = created.operation;
     }
   }
 
-  const operation = await advanceInFlightOperation(dependencies, fleet);
+  const operation = await advanceInFlightOperation(
+    dependencies,
+    fleet,
+    inflight,
+  );
   return {
     fleetId: fleet.id,
     operation: operation ? toOperationSnapshot(operation) : null,

@@ -172,6 +172,23 @@ describe("vLLM sleep/wake control", () => {
     expect(state.sleeping.get(9001)).toBe(true);
   });
 
+  it("400s a malformed targeted body instead of sleeping everything", async () => {
+    const state = freshState();
+    state.sleeping.set(9001, false);
+    state.sleeping.set(9002, false);
+    const app = makeApp({ state });
+    const response = await app.request("/v1/vllm/sleep", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Truncated body that was meant to carry a gpuIndex.
+      body: '{"gpuIndex":',
+    });
+    expect(response.status).toBe(400);
+    // No admin call went out: the wide default did not kick in.
+    expect(state.calls.filter((c) => c.includes("/sleep"))).toHaveLength(0);
+    expect(state.sleeping.get(9001)).toBe(false);
+  });
+
   it("wake is idempotent (waking an awake server is a no-op 200)", async () => {
     const state = freshState();
     state.sleeping.set(9001, false);

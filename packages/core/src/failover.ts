@@ -1,7 +1,44 @@
 import { PROMOTABLE_DOMAIN_STATES } from "./domain-state.js";
 import { rankStandbys } from "./route-intent.js";
 
-import type { FleetSnapshot } from "@haru/protocol";
+import type {
+  DomainSnapshot,
+  FleetPolicy,
+  FleetSnapshot,
+} from "@haru/protocol";
+
+/**
+ * Whether a standby could plausibly complete a promotion right now:
+ * promotable state, a supervisor to drive, at least one inference
+ * binding to probe (a bindingless target fails the probe step), and a
+ * fresh heartbeat (an unreachable supervisor cannot execute a single
+ * step). Used to gate the degraded ESCALATION, which sacrifices the
+ * active's remaining healthy models on the bet that failover
+ * succeeds; detectFailover itself keeps the looser state-only pick
+ * because a stale/failed active serves nothing anyway.
+ */
+function isViableFailoverTarget(
+  domain: DomainSnapshot,
+  policy: FleetPolicy,
+  nowMs: number,
+): boolean {
+  if (!PROMOTABLE_DOMAIN_STATES.includes(domain.state)) {
+    return false;
+  }
+  if (domain.supervisorUrl === null) {
+    return false;
+  }
+  const hasInferenceBindings = domain.slots.some(
+    (s) => s.spec.kind === "inference" && s.spec.models.length > 0,
+  );
+  if (!hasInferenceBindings) {
+    return false;
+  }
+  return (
+    domain.lastSeenAt !== null &&
+    nowMs - Date.parse(domain.lastSeenAt) <= policy.heartbeatStaleMs
+  );
+}
 
 export interface FailoverIntent {
   targetDomainId: string;
@@ -36,14 +73,14 @@ export function detectDegradedEscalation(
   if (degradedForMs <= fleet.policy.degradedGraceMs) {
     return null;
   }
-  // Only escalate when failover can actually act: with no promotable
+  // Only escalate when failover can plausibly SUCCEED: with no viable
   // standby, flipping the active to failed would 503 ALL its traffic
   // (including still-healthy models) for nothing. Degraded keeps
   // serving; escalation waits until a standby is ready to take over.
-  const hasPromotableStandby = rankStandbys(fleet).some((d) =>
-    PROMOTABLE_DOMAIN_STATES.includes(d.state),
+  const hasViableStandby = rankStandbys(fleet).some((d) =>
+    isViableFailoverTarget(d, fleet.policy, nowMs),
   );
-  if (!hasPromotableStandby) {
+  if (!hasViableStandby) {
     return null;
   }
   return {

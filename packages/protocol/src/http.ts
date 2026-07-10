@@ -86,10 +86,10 @@ export async function fetchJsonWithTimeout(
 /**
  * Parse a JSON request body from anything exposing `json()` (a web
  * Request, or Hono's `c.req`), mapping malformed/absent JSON to the
- * given fallback. The fallback is load-bearing and differs per caller:
- * haru-server passes `null` (its request schemas have required fields
- * and must reject an empty body), while the supervisor passes `{}`
- * (its schemas are all-optional so a body-less POST is valid).
+ * given fallback. Only suitable when the fallback FAILS downstream
+ * validation (haru-server passes `null` and its request schemas have
+ * required fields): for all-optional schemas use
+ * `readOptionalJsonBody`, which distinguishes empty from malformed.
  */
 export async function readJsonBody(
   source: { json: () => Promise<unknown> },
@@ -99,5 +99,32 @@ export async function readJsonBody(
     return await source.json();
   } catch {
     return fallback;
+  }
+}
+
+/**
+ * Parse an OPTIONAL JSON request body: a genuinely empty body yields
+ * `emptyFallback` (all-optional schemas accept body-less POSTs), but
+ * malformed non-empty JSON is reported as such so the route can 400.
+ * Without the distinction, a truncated targeted body (e.g. one meant
+ * to carry a gpuIndex) would silently parse as "target everything".
+ */
+export async function readOptionalJsonBody(
+  source: { text: () => Promise<string> },
+  emptyFallback: unknown,
+): Promise<{ ok: true; value: unknown } | { ok: false }> {
+  let text: string;
+  try {
+    text = await source.text();
+  } catch {
+    return { ok: false };
+  }
+  if (text.trim() === "") {
+    return { ok: true, value: emptyFallback };
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) as unknown };
+  } catch {
+    return { ok: false };
   }
 }

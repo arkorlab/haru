@@ -26,9 +26,9 @@ export const operations = pgTable(
     targetDomainId: uuid("target_domain_id").notNull(),
     /**
      * The fleet's active pointer at operation-creation time: the "old
-     * active" a promote's post-commit demote steps act on. Without it
-     * the executor would have to guess (first non-target domain),
-     * which is wrong in fleets with more than two domains.
+     * active" a promote's post-commit demote steps act on. Null means
+     * no active existed (headless promote) and the cleanup steps
+     * deliberately no-op instead of guessing a domain.
      */
     sourceDomainId: uuid("source_domain_id"),
     /** Current OperationStep while running; null before claim/after finish. */

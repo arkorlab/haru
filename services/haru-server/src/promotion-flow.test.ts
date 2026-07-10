@@ -329,6 +329,67 @@ describe("full promotion flow", () => {
     );
   });
 
+  it("defers escalation while another operation holds the in-flight slot", async () => {
+    await seed({ autoFailover: true, degradedGraceMs: 100 });
+    // Active alpha is reachable but its models are down.
+    alphaSupervisor.sleeping = true;
+    // Beta starts awake so a demote has work to do; making it
+    // unreachable right after the request pins the demote in flight.
+    betaSupervisor.sleeping = false;
+    betaSupervisor.training = "idle";
+    const app = makeApp();
+
+    await reconcileOnce(app);
+    betaSupervisor.reachable = false;
+    const demote = await app.request("/v1/fleets/default/demote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+    expect(demote.status).toBe(202);
+
+    // Past the grace, but the demote still holds the one-in-flight
+    // slot: the active must NOT be flipped to failed (that would 503
+    // its healthy traffic with no failover able to start).
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const tick = await reconcileOnce(app);
+    expect((tick.operation as { kind: string }).kind).toBe("demote");
+    const snapshot = await getFleetSnapshot(database, "default");
+    expect(snapshot?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "degraded",
+    );
+  });
+
+  it("a headless promote never touches other domains as a guessed old active", async () => {
+    // No activeDomainSlug: the fleet starts with a null pointer, so
+    // the promote records no source domain and the post-commit
+    // cleanup steps must no-op instead of demoting a bystander.
+    const layout = testLayout() as { activeDomainSlug?: string };
+    delete layout.activeDomainSlug;
+    await applyFleetLayout(database, layout);
+    const snapshot = await getFleetSnapshot(database, "default");
+    if (!snapshot) throw new Error("seed failed");
+    fleet = snapshot;
+    // With a null pointer the layout seeds every domain sleeping.
+    betaSupervisor.training = "running";
+    const app = makeApp();
+
+    const promote = await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+    expect(promote.status).toBe(202);
+    const result = await reconcileUntilSettled(app);
+    expect((result.operation as { state: string }).state).toBe("succeeded");
+
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(beta().id);
+    // Alpha was never active: no sleep or training handoff hit it.
+    expect(alphaSupervisor.calls).not.toContain("POST /v1/vllm/sleep");
+    expect(alphaSupervisor.calls).not.toContain("POST /v1/training/start");
+  });
+
   it("polls domain heartbeats concurrently", async () => {
     await seed();
     let inFlight = 0;

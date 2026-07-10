@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchWithTimeout, readJsonBody } from "./http.js";
+import {
+  fetchWithTimeout,
+  readJsonBody,
+  readOptionalJsonBody,
+} from "./http.js";
 
 /** A fetch that never answers and rejects with the abort reason. */
 const hangingFetch: typeof fetch = (_input, init) =>
@@ -71,5 +75,35 @@ describe("readJsonBody", () => {
   it("maps malformed JSON to the caller's explicit fallback", async () => {
     expect(await readJsonBody(failing, null)).toBeNull();
     expect(await readJsonBody(failing, {})).toEqual({});
+  });
+});
+
+describe("readOptionalJsonBody", () => {
+  const source = (text: string) => ({ text: () => Promise.resolve(text) });
+
+  it("yields the empty fallback only for a genuinely empty body", async () => {
+    expect(await readOptionalJsonBody(source(""), {})).toEqual({
+      ok: true,
+      value: {},
+    });
+    expect(await readOptionalJsonBody(source("  \n"), {})).toEqual({
+      ok: true,
+      value: {},
+    });
+  });
+
+  it("parses a valid body", async () => {
+    expect(await readOptionalJsonBody(source('{"gpuIndex":1}'), {})).toEqual({
+      ok: true,
+      value: { gpuIndex: 1 },
+    });
+  });
+
+  it("reports malformed non-empty JSON instead of defaulting", async () => {
+    // A truncated targeted body must 400, never silently widen to
+    // "target everything".
+    expect(await readOptionalJsonBody(source('{"gpuIndex":'), {})).toEqual({
+      ok: false,
+    });
   });
 });

@@ -113,7 +113,9 @@ describe("detectDegradedEscalation", () => {
       policy: autoFailoverPolicy,
       domains: [
         domain(DOMAIN_A_ID, "alpha", { state: "degraded", stateUpdatedAt }),
-        domain(DOMAIN_B_ID, "beta"),
+        // A viable failover target: promotable, supervised, bound
+        // models, and a fresh heartbeat.
+        domain(DOMAIN_B_ID, "beta", { lastSeenAt: FRESH }),
       ],
     });
   const PAST_GRACE = new Date(NOW_MS - graceMs - 1000).toISOString();
@@ -147,20 +149,38 @@ describe("detectDegradedEscalation", () => {
     expect(detectDegradedEscalation(snapshot, NOW_MS)).toBeNull();
   });
 
-  it("does nothing while no standby is promotable", () => {
+  it("does nothing while no standby is a VIABLE failover target", () => {
     // Escalating would 503 the active's remaining healthy models with
-    // nobody to fail over to.
-    const snapshot = fleet({
-      policy: autoFailoverPolicy,
-      domains: [
-        domain(DOMAIN_A_ID, "alpha", {
-          state: "degraded",
-          stateUpdatedAt: PAST_GRACE,
-        }),
-        domain(DOMAIN_B_ID, "beta", { state: "provisioning" }),
-      ],
-    });
-    expect(detectDegradedEscalation(snapshot, NOW_MS)).toBeNull();
+    // nobody able to take over. Viability = promotable state AND a
+    // supervisor URL AND inference bindings AND a fresh heartbeat.
+    const nonViableStandbys = [
+      // Not promotable.
+      domain(DOMAIN_B_ID, "beta", {
+        state: "provisioning",
+        lastSeenAt: FRESH,
+      }),
+      // Unreachable supervisor (stale heartbeat / never seen).
+      domain(DOMAIN_B_ID, "beta", { lastSeenAt: STALE }),
+      domain(DOMAIN_B_ID, "beta", { lastSeenAt: null }),
+      // No supervisor to drive the promotion.
+      domain(DOMAIN_B_ID, "beta", {
+        supervisorUrl: null,
+        lastSeenAt: FRESH,
+      }),
+    ];
+    for (const standby of nonViableStandbys) {
+      const snapshot = fleet({
+        policy: autoFailoverPolicy,
+        domains: [
+          domain(DOMAIN_A_ID, "alpha", {
+            state: "degraded",
+            stateUpdatedAt: PAST_GRACE,
+          }),
+          standby,
+        ],
+      });
+      expect(detectDegradedEscalation(snapshot, NOW_MS)).toBeNull();
+    }
   });
 
   it("never escalates a degraded standby", () => {

@@ -2,7 +2,7 @@ import {
   isBearerTokenValid,
   errorBody,
   probeRequestSchema,
-  readJsonBody,
+  readOptionalJsonBody,
   trainingStopRequestSchema,
   vllmTargetRequestSchema,
   type ReadyResponse,
@@ -185,9 +185,13 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   }
 
   app.post("/v1/vllm/sleep", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(
-      await readJsonBody(c.req, {}),
-    );
+    // Empty body = "target everything" (all fields optional), but a
+    // MALFORMED body must 400 rather than silently widen the target.
+    const body = await readOptionalJsonBody(c.req, {});
+    if (!body.ok) {
+      return c.json(errorBody("invalid_request", "malformed JSON body"), 400);
+    }
+    const parsed = vllmTargetRequestSchema.safeParse(body.value);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -212,9 +216,13 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/vllm/wake", async (c) => {
-    const parsed = vllmTargetRequestSchema.safeParse(
-      await readJsonBody(c.req, {}),
-    );
+    // Empty body = "target everything" (all fields optional), but a
+    // MALFORMED body must 400 rather than silently widen the target.
+    const body = await readOptionalJsonBody(c.req, {});
+    if (!body.ok) {
+      return c.json(errorBody("invalid_request", "malformed JSON body"), 400);
+    }
+    const parsed = vllmTargetRequestSchema.safeParse(body.value);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -244,9 +252,13 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/training/stop", async (c) => {
-    const parsed = trainingStopRequestSchema.safeParse(
-      await readJsonBody(c.req, {}),
-    );
+    // Empty body = "target everything" (all fields optional), but a
+    // MALFORMED body must 400 rather than silently widen the target.
+    const body = await readOptionalJsonBody(c.req, {});
+    if (!body.ok) {
+      return c.json(errorBody("invalid_request", "malformed JSON body"), 400);
+    }
+    const parsed = trainingStopRequestSchema.safeParse(body.value);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
@@ -288,7 +300,13 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/probe", async (c) => {
-    const parsed = probeRequestSchema.safeParse(await readJsonBody(c.req, {}));
+    // Empty body = "target everything" (all fields optional), but a
+    // MALFORMED body must 400 rather than silently widen the target.
+    const body = await readOptionalJsonBody(c.req, {});
+    if (!body.ok) {
+      return c.json(errorBody("invalid_request", "malformed JSON body"), 400);
+    }
+    const parsed = probeRequestSchema.safeParse(body.value);
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }

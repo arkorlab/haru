@@ -19,11 +19,22 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
+      # Build BEFORE the drift gate: drizzle-kit loads the schema,
+      # whose runtime imports resolve to workspace dist/ files.
+      - run: pnpm build
       # Migration drift gate: tests run the committed migrations while
       # deploys use db:push from the schema files; a schema edit
       # without a regenerated migration must fail here, not diverge.
-      - run: pnpm db:generate && git diff --exit-code packages/db/drizzle
-      - run: pnpm build
+      # drizzle-kit exits 0 even when generate errors (verified), so
+      # the gate also greps its output for failures.
+      - name: Migration drift gate
+        run: |
+          pnpm db:generate 2>&1 | tee /tmp/db-generate.log
+          if grep -qE "MODULE_NOT_FOUND|^Error" /tmp/db-generate.log; then
+            echo "drizzle-kit generate reported an error (it exits 0 on failures)"
+            exit 1
+          fi
+          git diff --exit-code packages/db/drizzle
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
