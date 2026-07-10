@@ -1,7 +1,7 @@
 import { assertSlotTransition } from "@haru/core";
-import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
 
-import { fleets, operations, slots } from "../schema/index.js";
+import { domains, fleets, operations, slots } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 import type { SlotKind, SlotState } from "@haru/protocol";
@@ -107,6 +107,14 @@ export async function failPromotionTargetSlots(
   targetDomainId: string,
 ): Promise<number> {
   assertFromList("inference", FAILED_PROMOTION_SLOT_STATES, "failed");
+  // The fleet-scoped guards below are only meaningful when the target
+  // actually belongs to that fleet: with a mismatched pair both
+  // NOT EXISTS checks would vacuously pass and fail ANOTHER fleet's
+  // slots.
+  const targetBelongsToFleet = database
+    .select({ one: sql`1` })
+    .from(domains)
+    .where(and(eq(domains.id, targetDomainId), eq(domains.fleetId, fleetId)));
   const pointerAtTarget = database
     .select({ one: sql`1` })
     .from(fleets)
@@ -130,6 +138,7 @@ export async function failPromotionTargetSlots(
         eq(slots.domainId, targetDomainId),
         eq(slots.kind, "inference"),
         inArray(slots.state, [...FAILED_PROMOTION_SLOT_STATES]),
+        exists(targetBelongsToFleet),
         notExists(pointerAtTarget),
         notExists(inflightOperation),
       ),

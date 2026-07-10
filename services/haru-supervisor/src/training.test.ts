@@ -9,10 +9,15 @@ import {
 interface FakeChild extends ChildHandle {
   signals: NodeJS.Signals[];
   exit: () => void;
+  /** Spawn failure: fires the 'error' listener, never 'exit'. */
+  fail: () => void;
 }
 
 function fakeChild(pid: number): FakeChild {
-  let exitListener: (() => void) | undefined;
+  // Per-event listeners: TrainingRun registers BOTH 'exit' and
+  // 'error', so a single slot would silently overwrite the first and
+  // mask a regression where the two handlers diverge.
+  const listeners = new Map<"exit" | "error", () => void>();
   const child: FakeChild = {
     pid,
     signals: [],
@@ -20,11 +25,14 @@ function fakeChild(pid: number): FakeChild {
       child.signals.push(signal);
       return true;
     },
-    once(_event, listener) {
-      exitListener = listener;
+    once(event, listener) {
+      listeners.set(event, listener);
     },
     exit() {
-      exitListener?.();
+      listeners.get("exit")?.();
+    },
+    fail() {
+      listeners.get("error")?.();
     },
   };
   return child;
@@ -102,6 +110,17 @@ describe("TrainingRun", () => {
     expect(training.state).toBe("idle");
     vi.advanceTimersByTime(60_000);
     expect(children[0]?.signals).toEqual(["SIGTERM"]);
+  });
+
+  it("a spawn failure ('error', no 'exit') drops the run back to idle", () => {
+    const training = run();
+    training.start();
+    expect(training.state).toBe("running");
+    children[0]?.fail();
+    expect(training.state).toBe("idle");
+    // The run stays restartable after the failure.
+    expect(training.start()).toBe("running");
+    expect(children).toHaveLength(2);
   });
 
   it("stop is idempotent when idle and while stopping", () => {

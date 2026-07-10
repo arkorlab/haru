@@ -14,27 +14,38 @@ import type {
  * such targets and detectFailover never picks them.
  */
 export function hasInferenceBindings(domain: DomainSnapshot): boolean {
+  // Gate on the slot row's kind (like every other slot predicate);
+  // the spec.kind check is the type narrowing for `models`.
   return domain.slots.some(
-    (s) => s.spec.kind === "inference" && s.spec.models.length > 0,
+    (s) =>
+      s.kind === "inference" &&
+      s.spec.kind === "inference" &&
+      s.spec.models.length > 0,
   );
 }
 
 /**
  * Whether a standby could plausibly complete a promotion right now:
- * promotable state, a supervisor to drive, at least one inference
- * binding to probe (a bindingless target fails the probe step), and a
- * fresh heartbeat (an unreachable supervisor cannot execute a single
- * step). Used to gate the degraded ESCALATION, which sacrifices the
- * active's remaining healthy models on the bet that failover
- * succeeds; detectFailover itself keeps the looser state-only pick
- * because a stale/failed active serves nothing anyway.
+ * ready state, a supervisor to drive, at least one inference binding
+ * to probe (a bindingless target fails the probe step), and a fresh
+ * heartbeat (an unreachable supervisor cannot execute a single step).
+ * Used to gate the degraded ESCALATION, which sacrifices the active's
+ * remaining healthy models on the bet that failover succeeds;
+ * detectFailover itself keeps the looser state-based fallback because
+ * a stale/failed active serves nothing anyway.
+ *
+ * Ready is required, not merely promotable: a DEGRADED standby is
+ * degraded precisely because its most recent heartbeat failed, while
+ * lastSeenAt still records the last SUCCESS - the freshness check
+ * alone would keep treating that just-unreachable supervisor as
+ * viable for a whole heartbeatStaleMs window.
  */
 function isViableFailoverTarget(
   domain: DomainSnapshot,
   policy: FleetPolicy,
   nowMs: number,
 ): boolean {
-  if (!PROMOTABLE_DOMAIN_STATES.includes(domain.state)) {
+  if (domain.state !== "ready") {
     return false;
   }
   if (domain.supervisorUrl === null) {

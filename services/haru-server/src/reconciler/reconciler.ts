@@ -70,10 +70,14 @@ export interface ReconcileResult {
  *
  * ACTIVE: serving <-> failed on whether every layout-bound model
  * reports awake (a crashed model must stop being routed to; recovery
- * restores it). STANDBY: sleeping -> failed when a layout-bound model
- * is unreachable (sleeping: null) - waking that standby would stall,
- * so it must not count as a viable failover target - and failed ->
- * sleeping once every model reports back asleep.
+ * restores it). STANDBY: sleeping -> failed unless every layout-bound
+ * model reports asleep - unreachable (sleeping: null), omitted (config
+ * drift), and unexpectedly AWAKE models all leave the standby posture
+ * unproven. An unreachable model would stall the wake step; an awake
+ * one holds the VRAM verify_gpu expects released, wedging a promotion
+ * AFTER the escalation already sacrificed the active. Either way the
+ * slot must not count toward failover viability. failed -> sleeping
+ * once every model reports back asleep.
  */
 async function syncInferenceSlotHealth(
   dependencies: ReconcilerDependencies,
@@ -126,14 +130,10 @@ async function syncInferenceSlotHealth(
       }
       continue;
     }
-    const isUnreachable = configured.some((m) => {
-      const value = reportedSleeping.get(m.name);
-      return value === null || value === undefined;
-    });
     const isAsleep = configured.every(
       (m) => reportedSleeping.get(m.name) === true,
     );
-    if (slot.state === "sleeping" && isUnreachable) {
+    if (slot.state === "sleeping" && !isAsleep) {
       const didFail = await transitionSlot(
         dependencies.database,
         slot.id,
@@ -410,6 +410,13 @@ async function applyStepResolution(
         operation.id,
         { step, code: resolution.code, message: resolution.message },
         step,
+        // A promote failing at switch_active must never land once the
+        // routing CAS committed (the pointer read that motivated the
+        // failure may predate the commit); the guard rides inside the
+        // UPDATE so the blocked tick simply re-reads and converges.
+        operation.kind === "promote" && step === "switch_active"
+          ? "target_not_routed"
+          : undefined,
       );
       if (!failedRow) {
         return null;

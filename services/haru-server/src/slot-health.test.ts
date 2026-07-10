@@ -224,6 +224,24 @@ describe("active slot-health sync", () => {
     expect(await standbyStates()).toEqual(["sleeping"]);
   });
 
+  it("fails a sleeping standby slot that reports unexpectedly awake", async () => {
+    // An awake standby vLLM holds the VRAM verify_gpu expects freed:
+    // counting it as a viable failover target would sacrifice the
+    // active to a promotion that wedges. The posture is unproven, so
+    // the slot goes failed until the models report back asleep.
+    await reconcileWith(
+      new Map(HEALTHY_ALPHA),
+      new Map([["example-chat-small", false]]),
+    );
+    expect(await standbyStates()).toEqual(["failed"]);
+
+    await reconcileWith(
+      new Map(HEALTHY_ALPHA),
+      new Map([["example-chat-small", true]]),
+    );
+    expect(await standbyStates()).toEqual(["sleeping"]);
+  });
+
   it("treats a configured model the supervisor omits as unhealthy", async () => {
     // The supervisor reports gpu0's model awake but has dropped gpu1's
     // configured model entirely (config drift): the omitted slot must

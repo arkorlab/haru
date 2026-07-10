@@ -202,6 +202,10 @@ describe("detectDegradedEscalation", () => {
       // Unreachable supervisor (stale heartbeat / never seen).
       domain(DOMAIN_B_ID, "beta", { lastSeenAt: STALE }),
       domain(DOMAIN_B_ID, "beta", { lastSeenAt: null }),
+      // Degraded = its most recent heartbeat FAILED; lastSeenAt still
+      // records the last success, so freshness alone would misread a
+      // just-unreachable standby as viable.
+      domain(DOMAIN_B_ID, "beta", { state: "degraded", lastSeenAt: FRESH }),
       // No supervisor to drive the promotion.
       domain(DOMAIN_B_ID, "beta", {
         supervisorUrl: null,

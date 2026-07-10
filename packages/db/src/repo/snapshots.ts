@@ -106,6 +106,8 @@ export async function getFleetSnapshot(
     .where(inArray(slots.domainId, fleetDomainIds))
     .orderBy(slots.gpuIndex, slots.kind);
   const [domainRows, slotRows] = await Promise.all([domainsQuery, slotsQuery]);
+  // Group once instead of filtering the full slot list per domain.
+  const slotsByDomain = Map.groupBy(slotRows, (s) => s.domainId);
 
   return fleetSnapshotSchema.parse({
     id: fleet.id,
@@ -125,16 +127,14 @@ export async function getFleetSnapshot(
       servingBaseUrl: d.servingBaseUrl,
       lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
       stateUpdatedAt: d.stateUpdatedAt.toISOString(),
-      slots: slotRows
-        .filter((s) => s.domainId === d.id)
-        .map((s) => ({
-          id: s.id,
-          domainId: s.domainId,
-          gpuIndex: s.gpuIndex,
-          kind: s.kind,
-          state: s.state,
-          spec: s.spec,
-        })),
+      slots: (slotsByDomain.get(d.id) ?? []).map((s) => ({
+        id: s.id,
+        domainId: s.domainId,
+        gpuIndex: s.gpuIndex,
+        kind: s.kind,
+        state: s.state,
+        spec: s.spec,
+      })),
     })),
   });
 }

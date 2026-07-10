@@ -1,3 +1,4 @@
+import { fleetLayoutSchema } from "@haru/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
@@ -102,6 +103,51 @@ describe("switchActive", () => {
         operation.id,
       ),
     ).toBeNull();
+  });
+
+  it("target_not_routed blocks a failure once routing committed to the target", async () => {
+    const {
+      createOperation,
+      claimOperation,
+      completeOperation,
+      failOperation,
+    } = await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "switch_active");
+    // The executor's routing CAS lands first...
+    await switchActive(database, fleet.id, alpha().id, beta().id, operation.id);
+    // ...so a racing timeout tick's guarded failure matches zero rows
+    // instead of recording a committed promotion as failed.
+    expect(
+      await failOperation(
+        database,
+        operation.id,
+        { step: "switch_active", code: "step_timeout", message: "raced" },
+        "switch_active",
+        "target_not_routed",
+      ),
+    ).toBeNull();
+    await completeOperation(database, operation.id, "switch_active");
+
+    // With the pointer elsewhere the same guarded failure lands.
+    const second = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: alpha().id,
+    });
+    await claimOperation(database, second.operation.id, "switch_active");
+    const failedRow = await failOperation(
+      database,
+      second.operation.id,
+      { step: "switch_active", code: "step_timeout", message: "real" },
+      "switch_active",
+      "target_not_routed",
+    );
+    expect(failedRow?.state).toBe("failed");
   });
 
   it("two concurrent switches produce exactly one winner", async () => {
@@ -283,6 +329,22 @@ describe("failPromotionTargetSlots", () => {
       targetDomainId: beta().id,
     });
     expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
+      0,
+    );
+    expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
+  });
+
+  it("never touches slots when the target belongs to a different fleet", async () => {
+    await wakeBetaSlots();
+    await applyFleetLayout(database, {
+      ...fleetLayoutSchema.parse(loadExampleFleetLayout()),
+      slug: "other",
+    });
+    const other = await getFleetSnapshot(database, "other");
+    if (!other) throw new Error("second fleet seed failed");
+    // A mismatched (fleetId, targetDomainId) pair must not let the
+    // fleet-scoped guards pass vacuously and fail default's slots.
+    expect(await failPromotionTargetSlots(database, other.id, beta().id)).toBe(
       0,
     );
     expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
