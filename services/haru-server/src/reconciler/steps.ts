@@ -76,7 +76,12 @@ export function resolveSourceDomain(
   operation: OperationRow,
 ): DomainSnapshot | undefined {
   const sourceId = operation.sourceDomainId;
-  if (sourceId === null) {
+  if (sourceId === null || sourceId === operation.targetDomainId) {
+    // null: no active existed at creation (headless promote).
+    // === target: a duplicate promote created AFTER a previous one
+    // completed captured the now-active target as its own source;
+    // switch_active no-ops for it, and "cleaning up" that source
+    // would sleep the live route.
     return undefined;
   }
   return fleet.domains.find((d) => d.id === sourceId);
@@ -174,6 +179,11 @@ async function withSupervisor(
 
 const hasNoTrainingSlots = (domain: DomainSnapshot): boolean =>
   domain.slots.every((s) => s.kind !== "training");
+
+/** A valid training-only domain has nothing to sleep or wake; sleep
+ * steps must no-op instead of waiting forever for an inference proof. */
+const hasNoInferenceSlots = (domain: DomainSnapshot): boolean =>
+  domain.slots.every((s) => s.kind !== "inference");
 
 /**
  * Whether EVERY inference model the layout binds to this domain is
@@ -448,7 +458,7 @@ async function switchActive(context: StepContext): Promise<StepOutcome> {
 async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
   return withSupervisor(
     context,
-    { role: "source" },
+    { role: "source", isNoop: hasNoInferenceSlots },
     async (domain, options) => {
       // Level 1 sleep: weights offload to CPU RAM, KV cache dropped.
       await supervisorClient.sleep(options);
@@ -517,7 +527,7 @@ async function sleepVllm(context: StepContext): Promise<StepOutcome> {
   }
   return withSupervisor(
     context,
-    { role: "target" },
+    { role: "target", isNoop: hasNoInferenceSlots },
     async (domain, options) => {
       await supervisorClient.sleep(options);
       const status = await supervisorClient.status(options);

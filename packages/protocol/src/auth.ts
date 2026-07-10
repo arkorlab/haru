@@ -23,7 +23,10 @@ export function isBearerTokenValid(
   if (expectedToken === undefined || expectedToken === "") {
     return true;
   }
-  const header = authorizationHeader ?? "";
-  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
+  // The auth scheme is case-insensitive per RFC 9110 ("bearer x" is
+  // as valid as "Bearer x"); the credential itself is not. A bearer
+  // credential is a single b64token (no interior whitespace).
+  const match = /^bearer +(\S+)$/i.exec(authorizationHeader ?? "");
+  const presented = match?.[1] ?? "";
   return presented !== "" && isSameSecret(presented, expectedToken);
 }

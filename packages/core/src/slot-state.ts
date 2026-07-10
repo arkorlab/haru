@@ -26,10 +26,11 @@ const INFERENCE_TRANSITIONS: Partial<Record<SlotState, readonly SlotState[]>> =
     sleeping: ["waking", "failed", "stopped"],
     waking: ["probing", "sleeping", "failed", "stopped"],
     probing: ["serving", "sleeping", "failed", "stopped"],
-    // failed -> serving: heartbeat-observed recovery on the ACTIVE
-    // domain (the slot's models report awake again); promotions use
-    // the failed -> waking path instead.
-    failed: ["serving", "waking", "starting", "stopped"],
+    // failed -> serving / failed -> sleeping: heartbeat-observed
+    // recovery (an active slot's models report awake again; a standby
+    // slot's models report back asleep); promotions use the
+    // failed -> waking path instead.
+    failed: ["serving", "sleeping", "waking", "starting", "stopped"],
     stopped: ["starting"],
   };
 

@@ -306,6 +306,27 @@ describe("POST /v1/probe", () => {
     ).toHaveLength(2);
   });
 
+  it("rejects a completion without generated content", async () => {
+    const shapelessFetch: typeof fetch = (input) => {
+      const url = new URL(requestTargetUrl(input));
+      if (url.pathname === "/v1/chat/completions") {
+        // Non-empty choices but nothing generated: not proof of life.
+        return Promise.resolve(Response.json({ choices: [{}] }));
+      }
+      return Promise.reject(new TypeError(`unrouted ${url.href}`));
+    };
+    const app = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: shapelessFetch,
+      spawnFn: noopSpawn,
+    });
+    const response = await app.request("/v1/probe", { method: "POST" });
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.results[0].error).toContain("no generated content");
+  });
+
   it("reports a failing model with its error", async () => {
     const state = freshState();
     state.probeOk = false;

@@ -7,6 +7,7 @@ import {
   DOMAIN_B_ID,
   domain,
   fleet,
+  inferenceSlot,
 } from "./fixtures.test-helper.js";
 
 const NOW_MS = Date.parse("2026-01-01T00:10:00.000Z");
@@ -193,6 +194,12 @@ describe("detectDegradedEscalation", () => {
       domain(DOMAIN_B_ID, "beta", {
         supervisorUrl: null,
         lastSeenAt: FRESH,
+      }),
+      // Local vLLM observed unreachable (heartbeat marked the standby
+      // slot failed): waking it would stall.
+      domain(DOMAIN_B_ID, "beta", {
+        lastSeenAt: FRESH,
+        slots: [inferenceSlot(DOMAIN_B_ID, { state: "failed" })],
       }),
     ];
     for (const standby of nonViableStandbys) {

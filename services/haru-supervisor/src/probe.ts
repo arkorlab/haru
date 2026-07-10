@@ -51,15 +51,24 @@ export async function probeModel(
         error: `upstream returned ${response.status}`,
       };
     }
-    const completion = (body ?? {}) as { choices?: unknown[] };
-    const hasChoices =
-      Array.isArray(completion.choices) && completion.choices.length > 0;
-    if (!hasChoices) {
+    const completion = (body ?? {}) as {
+      choices?: { message?: { content?: unknown } }[];
+    };
+    // Proof of generation, not just of shape: a malformed
+    // {choices: [{}]} must not pass a probe that gates routing.
+    const hasGeneratedContent =
+      Array.isArray(completion.choices) &&
+      completion.choices.some(
+        (choice) =>
+          typeof choice.message?.content === "string" &&
+          choice.message.content.length > 0,
+      );
+    if (!hasGeneratedContent) {
       return {
         model: model.name,
         ok: false,
         latencyMs,
-        error: "completion returned no choices",
+        error: "completion returned no generated content",
       };
     }
     return { model: model.name, ok: true, latencyMs };

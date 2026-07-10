@@ -17,6 +17,7 @@ import type { FleetSnapshot, SupervisorSlotStatus } from "@haru/protocol";
  */
 
 const SUPERVISOR = "https://alpha-supervisor.test";
+const STANDBY_SUPERVISOR = "https://beta-supervisor.test";
 
 const TWO_SLOT_LAYOUT = {
   slug: "default",
@@ -49,22 +50,59 @@ const TWO_SLOT_LAYOUT = {
         },
       ],
     },
+    {
+      slug: "beta",
+      provider: "static",
+      placement: {
+        cloud: "aws",
+        region: "us-west-2",
+        accelerator: "TEST-GPU",
+      },
+      supervisorUrl: STANDBY_SUPERVISOR,
+      servingBaseUrl: "https://beta-serving.test",
+      slots: [
+        {
+          kind: "inference",
+          gpuIndex: 0,
+          models: [
+            { name: "example-chat-small", servingUrl: "https://c.test" },
+          ],
+        },
+      ],
+    },
   ],
 };
 
-/** Per-(gpuIndex, model) sleeping flags; delete an entry to simulate a
- * drifted supervisor omitting a configured model. */
-type ReportedModels = Map<string, boolean>;
+/** Per-model reported sleeping flags (null = local vLLM unreachable);
+ * delete an entry to simulate a drifted supervisor omitting it. */
+type ReportedModels = Map<string, boolean | null>;
 
-function statusFetch(reported: ReportedModels): typeof fetch {
+function statusFetch(
+  alphaReported: ReportedModels,
+  betaReported: ReportedModels = new Map([["example-chat-small", true]]),
+): typeof fetch {
   return (input) => {
     const url = new URL(requestTargetUrl(input));
     if (url.pathname !== "/v1/status") {
       return Promise.reject(new TypeError(`unrouted ${url.href}`));
     }
+    if (url.origin === STANDBY_SUPERVISOR) {
+      const sleeping = betaReported.get("example-chat-small");
+      const slots: SupervisorSlotStatus[] = [
+        {
+          gpuIndex: 0,
+          kind: "inference",
+          models:
+            sleeping === undefined
+              ? []
+              : [{ name: "example-chat-small", port: 9100, sleeping }],
+        },
+      ];
+      return Promise.resolve(Response.json({ slots, ready: false }));
+    }
     const slots: SupervisorSlotStatus[] = [0, 1].map((gpuIndex) => {
       const name = gpuIndex === 0 ? "example-chat-small" : "example-chat-large";
-      const sleeping = reported.get(name);
+      const sleeping = alphaReported.get(name);
       return {
         gpuIndex,
         kind: "inference",
@@ -74,9 +112,9 @@ function statusFetch(reported: ReportedModels): typeof fetch {
             : [{ name, port: 9000 + gpuIndex, sleeping }],
       };
     });
-    const isAllAwake = reported.values().every((s) => !s);
+    const isAllAwake = alphaReported.values().every((s) => s === false);
     return Promise.resolve(
-      Response.json({ slots, ready: reported.size === 2 && isAllAwake }),
+      Response.json({ slots, ready: alphaReported.size === 2 && isAllAwake }),
     );
   };
 }
@@ -97,16 +135,32 @@ afterEach(async () => {
   await close();
 });
 
-async function reconcileWith(reported: ReportedModels): Promise<void> {
+async function reconcileWith(
+  reported: ReportedModels,
+  betaReported?: ReportedModels,
+): Promise<void> {
   await reconcileFleet(
     {
       database,
-      fetchFn: statusFetch(reported),
+      fetchFn: statusFetch(reported, betaReported),
       now: () => new Date(),
       supervisorToken: undefined,
     },
     fleet.id,
   );
+}
+
+const HEALTHY_ALPHA: [string, boolean | null][] = [
+  ["example-chat-small", false],
+  ["example-chat-large", false],
+];
+
+async function standbyStates(): Promise<string[]> {
+  const snapshot = await getFleetSnapshot(database, "default");
+  const beta = snapshot?.domains.find((d) => d.slug === "beta");
+  return (beta?.slots ?? [])
+    .filter((s) => s.kind === "inference")
+    .map((s) => s.state);
 }
 
 async function inferenceStates(): Promise<Map<number, string>> {
@@ -148,6 +202,26 @@ describe("active slot-health sync", () => {
         [1, "serving"],
       ]),
     );
+  });
+
+  it("marks an unreachable standby vLLM failed and recovers it when it reports back asleep", async () => {
+    // The standby's supervisor answers, but its local vLLM is dead
+    // (sleeping: null): the sleeping slot must go failed so the
+    // degraded-escalation viability gate stops counting this standby
+    // as a failover target.
+    await reconcileWith(
+      new Map(HEALTHY_ALPHA),
+      new Map([["example-chat-small", null]]),
+    );
+    expect(await standbyStates()).toEqual(["failed"]);
+
+    // The local vLLM comes back asleep: the slot rejoins the standby
+    // posture.
+    await reconcileWith(
+      new Map(HEALTHY_ALPHA),
+      new Map([["example-chat-small", true]]),
+    );
+    expect(await standbyStates()).toEqual(["sleeping"]);
   });
 
   it("treats a configured model the supervisor omits as unhealthy", async () => {

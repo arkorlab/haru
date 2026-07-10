@@ -65,6 +65,23 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Intended fix: an internal snapshot loader that accepts the
   already-fetched fleet row.
 
+### A failed promotion leaves the target out of standby posture
+
+- Where: `services/haru-server/src/reconciler/reconciler.ts`
+  (`applyStepResolution` failure path, `markFailedPromotionSlots`).
+- Current: a promote that stopped the target's training and then
+  failed before `switch_active` (e.g. `probe_failed`) marks the
+  target's inference slots failed and finishes. Nothing automatically
+  puts the target back into standby posture (vLLM asleep + training
+  running); a manual `POST /v1/fleets/:id/demote` of the target
+  restores it.
+- Why deferred: an automatic restore is a small operation of its own
+  (sleep + start training with proofs); bolting it onto the failure
+  path would run long supervisor calls outside the step machinery.
+- Intended fix: enqueue a demote of the failed target after the
+  operation fails (reusing the existing demote steps), or an operator
+  runbook note until then.
+
 ### Postgres test lane replays migrations per test
 
 - Where: `packages/db/src/testing/index.ts`

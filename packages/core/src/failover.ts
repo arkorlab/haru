@@ -34,6 +34,16 @@ function isViableFailoverTarget(
   if (!hasInferenceBindings) {
     return false;
   }
+  // A failed inference slot means the heartbeat observed the standby's
+  // local vLLM unreachable (or a promotion left it dirty): waking it
+  // will stall, so escalating the active on this target's account
+  // would trade healthy traffic for a doomed promotion.
+  const hasFailedInferenceSlot = domain.slots.some(
+    (s) => s.kind === "inference" && s.state === "failed",
+  );
+  if (hasFailedInferenceSlot) {
+    return false;
+  }
   return (
     domain.lastSeenAt !== null &&
     nowMs - Date.parse(domain.lastSeenAt) <= policy.heartbeatStaleMs

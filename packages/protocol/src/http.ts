@@ -75,6 +75,15 @@ export async function fetchJsonWithTimeout(
   try {
     const response = await fetchFunction(input, { ...init, signal });
     if (!response.ok) {
+      // Release the connection: callers only use the status on
+      // failures, and an unconsumed body would hold the socket until
+      // GC (repeated errors, e.g. every heartbeat 401ing, would
+      // exhaust the pool).
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Releasing best-effort; the status is what matters.
+      }
       return { response, body: undefined };
     }
     // Read as text first: some control endpoints (e.g. vLLM's

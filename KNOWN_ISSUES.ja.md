@@ -62,6 +62,21 @@
 - 意図する修正: 取得済み fleet 行を受け取る内部スナップショット
   ローダー。
 
+### 失敗した昇格はターゲットを standby 姿勢に戻さない
+
+- 場所: `services/haru-server/src/reconciler/reconciler.ts`
+  (`applyStepResolution` の失敗パス、`markFailedPromotionSlots`)。
+- 現状: ターゲットの学習を停止した後、`switch_active` 前に失敗した
+  promote (例: `probe_failed`) は、ターゲットの inference スロットを
+  failed にして終了する。standby 姿勢 (vLLM sleep + 学習稼働) へ
+  自動では戻らない。手動で `POST /v1/fleets/:id/demote` を叩けば
+  復旧する。
+- 先送りの理由: 自動復旧はそれ自体が小さなオペレーション (証明付き
+  sleep + 学習開始) であり、失敗パスに直付けするとステップ機構の
+  外で長い supervisor 呼び出しを走らせることになる。
+- 意図する修正: 操作失敗後に対象への demote をキューする (既存の
+  demote ステップを再利用)。それまでは運用手順書に記載。
+
 ### Postgres テストレーンはテストごとにマイグレーションを再実行する
 
 - 場所: `packages/db/src/testing/index.ts`

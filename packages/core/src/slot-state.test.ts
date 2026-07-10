@@ -31,6 +31,7 @@ const INFERENCE_ALLOWED: ReadonlySet<string> = new Set([
   "probing>failed",
   "probing>stopped",
   "failed>serving",
+  "failed>sleeping",
   "failed>waking",
   "failed>starting",
   "failed>stopped",
@@ -111,6 +112,7 @@ describe("slot state machine", () => {
       "serving",
       "waking",
       "probing",
+      "failed",
     ]);
     expect(statesWithEdgeTo("training", "stopping")).toEqual(["training"]);
     expect(statesWithEdgeTo("training", "training")).toEqual([

@@ -1,4 +1,4 @@
-import { applyFleetLayout, getFleetSnapshot } from "@haru/db";
+import { applyFleetLayout, createOperation, getFleetSnapshot } from "@haru/db";
 import { createTestDatabase } from "@haru/db/testing";
 import { routeIntentSchema } from "@haru/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -331,6 +331,34 @@ describe("full promotion flow", () => {
     expect(["degraded", "ready"]).toContain(
       after?.domains.find((d) => d.slug === "alpha")?.state,
     );
+  });
+
+  it("a duplicate promote that captured source === target never touches the live route", async () => {
+    await seed();
+    const app = makeApp();
+    const alpha = fleet.domains.find((d) => d.slug === "alpha")!;
+    // Simulate the TOCTOU: an operation inserted AFTER alpha already
+    // became active records alpha as both source and target (the API
+    // path would 200 already_active, but a racing insert can land).
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: alpha.id,
+    });
+    expect(operation.sourceDomainId).toBe(alpha.id);
+
+    const result = await reconcileUntilSettled(app);
+    expect((result.operation as { state: string }).state).toBe("succeeded");
+    // The live route was never slept and no training handoff hit it.
+    expect(alphaSupervisor.calls).not.toContain("POST /v1/vllm/sleep");
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(alpha.id);
+    expect(
+      after?.domains
+        .find((d) => d.slug === "alpha")!
+        .slots.filter((s) => s.kind === "inference")
+        .every((s) => s.state === "serving"),
+    ).toBe(true);
   });
 
   it("an unproven old-active sleep skips the training handoff", async () => {

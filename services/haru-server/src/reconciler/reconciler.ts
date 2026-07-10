@@ -61,19 +61,25 @@ export interface ReconcileResult {
  * math stays correct on non-reloading ticks.
  */
 /**
- * Mirror the ACTIVE domain's per-slot inference health from the
- * supervisor status. Heartbeats are the only reconciler of slot state
- * outside operations: without this, a crashed/asleep model keeps its
- * DB slot "serving" and chat + route intent keep routing to a dead
- * server. Per-slot CAS on purpose: one dead GPU must not drag its
- * healthy siblings along. Standbys are exempt (their models sleep by
- * design), and only the serving <-> failed pair is touched: slots on
- * a promotion's wake path belong to the operation's executors.
+ * Mirror a domain's per-slot inference health from the supervisor
+ * status. Heartbeats are the only reconciler of slot state outside
+ * operations. Per-slot CAS on purpose: one dead GPU must not drag its
+ * healthy siblings along, and only steady-state pairs are touched
+ * (slots on a promotion's wake path belong to the operation's
+ * executors).
+ *
+ * ACTIVE: serving <-> failed on whether every layout-bound model
+ * reports awake (a crashed model must stop being routed to; recovery
+ * restores it). STANDBY: sleeping -> failed when a layout-bound model
+ * is unreachable (sleeping: null) - waking that standby would stall,
+ * so it must not count as a viable failover target - and failed ->
+ * sleeping once every model reports back asleep.
  */
-async function syncActiveInferenceSlots(
+async function syncInferenceSlotHealth(
   dependencies: ReconcilerDependencies,
   domain: DomainSnapshot,
   status: SupervisorStatus,
+  isActiveDomain: boolean,
 ): Promise<boolean> {
   let didChangeState = false;
   for (const slot of domain.slots) {
@@ -86,32 +92,65 @@ async function syncActiveInferenceSlots(
     const reportedSleeping = new Map(
       (reported?.models ?? []).map((m) => [m.name, m.sleeping]),
     );
-    // Healthy = every model the LAYOUT binds to this slot is reported
-    // awake. A drifted supervisor omitting a configured model proves
-    // nothing about it, so the slot must not stay serving.
-    const isHealthy = slot.spec.models.every(
-      (m) => reportedSleeping.get(m.name) === false,
+    // Judged against the models the LAYOUT binds to the slot: a
+    // drifted supervisor omitting a configured model proves nothing
+    // about it. No ||= shortcuts anywhere below: EVERY slot must get
+    // its CAS this tick, not just the first one that changed.
+    const configured = slot.spec.models;
+    if (isActiveDomain) {
+      const isAwake = configured.every(
+        (m) => reportedSleeping.get(m.name) === false,
+      );
+      if (slot.state === "serving" && !isAwake) {
+        const didFail = await transitionSlot(
+          dependencies.database,
+          slot.id,
+          "inference",
+          ["serving"],
+          "failed",
+        );
+        if (didFail) {
+          didChangeState = true;
+        }
+      } else if (slot.state === "failed" && isAwake) {
+        const didRecover = await transitionSlot(
+          dependencies.database,
+          slot.id,
+          "inference",
+          ["failed"],
+          "serving",
+        );
+        if (didRecover) {
+          didChangeState = true;
+        }
+      }
+      continue;
+    }
+    const isUnreachable = configured.some((m) => {
+      const value = reportedSleeping.get(m.name);
+      return value === null || value === undefined;
+    });
+    const isAsleep = configured.every(
+      (m) => reportedSleeping.get(m.name) === true,
     );
-    if (slot.state === "serving" && !isHealthy) {
-      // No ||= shortcuts here: EVERY slot must get its CAS this tick,
-      // not just the first one that changed.
+    if (slot.state === "sleeping" && isUnreachable) {
       const didFail = await transitionSlot(
         dependencies.database,
         slot.id,
         "inference",
-        ["serving"],
+        ["sleeping"],
         "failed",
       );
       if (didFail) {
         didChangeState = true;
       }
-    } else if (slot.state === "failed" && isHealthy) {
+    } else if (slot.state === "failed" && isAsleep) {
       const didRecover = await transitionSlot(
         dependencies.database,
         slot.id,
         "inference",
         ["failed"],
-        "serving",
+        "sleeping",
       );
       if (didRecover) {
         didChangeState = true;
@@ -141,9 +180,12 @@ async function pollOneDomain(
     const status = await supervisorClient.status(options);
     await markDomainSeen(dependencies.database, domain.id, at);
     domain.lastSeenAt = at.toISOString();
-    const didSyncSlots = isActiveDomain
-      ? await syncActiveInferenceSlots(dependencies, domain, status)
-      : false;
+    const didSyncSlots = await syncInferenceSlotHealth(
+      dependencies,
+      domain,
+      status,
+      isActiveDomain,
+    );
     if (domain.state === "provisioning") {
       // Role-aware like the recovery rung below: an ACTIVE domain
       // finishing provisioning with its models down must surface as
