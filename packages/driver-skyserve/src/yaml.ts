@@ -16,8 +16,7 @@ export function renderSkyServiceYaml(spec: ServiceLaunchSpec): string {
       replicas: spec.replicas,
     },
     resources: {
-      ...placementToResources(spec.placement, []),
-      ports: [spec.servicePort],
+      ...placementToResources(spec.placement, [spec.servicePort]),
     },
     ...(Object.keys(spec.envs).length > 0 && { envs: { ...spec.envs } }),
     setup: spec.setup,

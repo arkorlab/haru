@@ -113,10 +113,15 @@ async function claimedPromotion(targetSlug: string): Promise<OperationRow> {
   return claimed;
 }
 
+/** Steps under test never reach the network; a rejecting mock makes
+ * that expectation explicit (guideline: inject all I/O in tests). */
+const rejectingFetch: typeof fetch = () =>
+  Promise.reject(new TypeError("unexpected fetch in a DB-only step test"));
+
 function contextFor(operation: OperationRow) {
   return {
     database,
-    fetchFn: fetch,
+    fetchFn: rejectingFetch,
     now: () => new Date(),
     // Deliberately stale: loaded before the concurrent pointer move.
     fleet: staleFleet,
@@ -183,7 +188,7 @@ describe("switch_active under concurrent ticks", () => {
     const result = await reconcileFleet(
       {
         database,
-        fetchFn: fetch,
+        fetchFn: rejectingFetch,
         now: () => new Date(),
         supervisorToken: undefined,
       },
@@ -217,7 +222,7 @@ describe("switch_active under concurrent ticks", () => {
     const result = await reconcileFleet(
       {
         database,
-        fetchFn: fetch,
+        fetchFn: rejectingFetch,
         now: () => new Date(),
         supervisorToken: undefined,
       },
@@ -237,7 +242,6 @@ describe("switch_active under concurrent ticks", () => {
       fleetId: staleFleet.id,
       kind: "promote",
       targetDomainId: domainId("beta"),
-      sourceDomainId: domainId("alpha"),
     });
     // Claimed past the switch_active budget, as after a crash/stall.
     await claimOperation(
@@ -260,7 +264,7 @@ describe("switch_active under concurrent ticks", () => {
     const result = await reconcileFleet(
       {
         database,
-        fetchFn: fetch,
+        fetchFn: rejectingFetch,
         now: () => new Date(),
         supervisorToken: undefined,
       },
@@ -278,6 +282,26 @@ describe("switch_active under concurrent ticks", () => {
       .find((d) => d.slug === "beta")!
       .slots.filter((s) => s.kind === "inference");
     expect(betaSlots?.every((s) => s.state === "serving")).toBe(true);
+  });
+
+  it("verify_gpu is a no-op for a domain without training slots", async () => {
+    // THREE_DOMAIN_LAYOUT declares no training slots (and no
+    // supervisor URLs): there is no freed VRAM to verify, so the step
+    // must complete instead of failing on the missing supervisor or
+    // judging unrelated GPUs.
+    const operation = await claimedPromotion("beta");
+    const outcome = await executeStep(
+      {
+        database,
+        fetchFn: rejectingFetch,
+        now: () => new Date(),
+        fleet: staleFleet,
+        operation,
+        supervisorToken: undefined,
+      },
+      "verify_gpu",
+    );
+    expect(outcome).toEqual({ status: "done" });
   });
 
   it("a demote whose target became active refuses to sleep it", async () => {
@@ -301,7 +325,7 @@ describe("switch_active under concurrent ticks", () => {
     const outcome = await executeStep(
       {
         database,
-        fetchFn: fetch,
+        fetchFn: rejectingFetch,
         now: () => new Date(),
         fleet: fresh,
         operation,

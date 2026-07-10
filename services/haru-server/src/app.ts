@@ -177,13 +177,13 @@ export function createApp(dependencies: AppDependencies) {
         body: errorBody("invalid_target", decision.reason),
       };
     }
+    // The old-active pointer (sourceDomainId) is captured atomically
+    // inside the insert; passing this handler's snapshot value could
+    // record a stale active if another operation just completed.
     const result = await createOperation(database, {
       fleetId: snapshot.id,
       kind,
       targetDomainId,
-      // Recorded so post-commit cleanup steps know the actual old
-      // active, independent of fleet size and iteration order.
-      sourceDomainId: snapshot.activeDomainId,
     });
     const isSameIntent =
       result.operation.kind === kind &&

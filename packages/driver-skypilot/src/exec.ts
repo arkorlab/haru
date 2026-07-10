@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -72,17 +72,23 @@ export function createSkyRunner(exec: ExecFunction = defaultExec): SkyRunner {
 }
 
 /**
- * Write rendered YAML into a fresh temp directory and return its path,
- * somewhere the `sky` binary can read it. Injectable at the driver
- * level for tests.
+ * Write rendered YAML into a fresh temp directory, run `use` with the
+ * file path, and remove the directory afterwards (including on error):
+ * a long-running control plane repeatedly launching domains must not
+ * accumulate temp directories.
  */
-export async function writeTemporaryYaml(
+export async function withTemporaryYaml<T>(
   directoryPrefix: string,
   fileName: string,
   contents: string,
-): Promise<string> {
+  use: (filePath: string) => Promise<T>,
+): Promise<T> {
   const directory = await mkdtemp(path.join(tmpdir(), directoryPrefix));
-  const filePath = path.join(directory, fileName);
-  await writeFile(filePath, contents, "utf8");
-  return filePath;
+  try {
+    const filePath = path.join(directory, fileName);
+    await writeFile(filePath, contents, "utf8");
+    return await use(filePath);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }

@@ -4,7 +4,7 @@ import {
   DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
   parseStdoutJson,
   SkyCliError,
-  writeTemporaryYaml,
+  withTemporaryYaml,
 } from "@haru/driver-skypilot/exec";
 import { z } from "zod";
 
@@ -18,10 +18,9 @@ import { renderSkyServiceYaml } from "./yaml.js";
 
 import type { ExecFunction } from "@haru/driver-skypilot/exec";
 
+/** Injectable service-YAML writer (an injected writer owns its file's
+ * lifecycle). */
 export type WriteServiceFileFunction = (contents: string) => Promise<string>;
-
-const defaultWriteServiceFile: WriteServiceFileFunction = (contents) =>
-  writeTemporaryYaml("haru-skyserve-", "service.yaml", contents);
 
 export interface SkyserveDriverOptions {
   exec?: ExecFunction;
@@ -39,7 +38,7 @@ export function createSkyserveDriver(
   options: SkyserveDriverOptions = {},
 ): SkyserveDriver {
   const runSky = createSkyRunner(options.exec);
-  const writeServiceFile = options.writeServiceFile ?? defaultWriteServiceFile;
+  const writeServiceFile = options.writeServiceFile;
   const launchTimeoutMs =
     options.launchTimeoutMs ?? DEFAULT_SKY_LAUNCH_TIMEOUT_MS;
   const commandTimeoutMs =
@@ -47,18 +46,29 @@ export function createSkyserveDriver(
 
   return {
     async launchService(spec: ServiceLaunchSpec) {
-      const servicePath = await writeServiceFile(renderSkyServiceYaml(spec));
-      await runSky(
-        [
-          "serve",
-          "up",
-          "--service-name",
-          spec.serviceName,
-          "--yes",
-          servicePath,
-        ],
-        launchTimeoutMs,
-      );
+      const launch = (servicePath: string) =>
+        runSky(
+          [
+            "serve",
+            "up",
+            "--service-name",
+            spec.serviceName,
+            "--yes",
+            servicePath,
+          ],
+          launchTimeoutMs,
+        );
+      // Default path scopes the YAML's temp directory to the sky call.
+      if (writeServiceFile) {
+        await launch(await writeServiceFile(renderSkyServiceYaml(spec)));
+      } else {
+        await withTemporaryYaml(
+          "haru-skyserve-",
+          "service.yaml",
+          renderSkyServiceYaml(spec),
+          launch,
+        );
+      }
       return { serviceName: spec.serviceName };
     },
 

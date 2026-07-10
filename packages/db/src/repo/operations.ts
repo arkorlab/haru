@@ -7,7 +7,7 @@ import {
 } from "@haru/protocol";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { operations } from "../schema/index.js";
+import { fleets, operations } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 
@@ -47,8 +47,6 @@ export async function createOperation(
     fleetId: string;
     kind: OperationKind;
     targetDomainId: string;
-    /** Active pointer observed when the operation was requested. */
-    sourceDomainId?: string | null;
   },
 ): Promise<CreateOperationResult> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -58,7 +56,12 @@ export async function createOperation(
         fleetId: input.fleetId,
         kind: input.kind,
         targetDomainId: input.targetDomainId,
-        sourceDomainId: input.sourceDomainId ?? null,
+        // Captured INSIDE the insert statement, not from the caller's
+        // snapshot: an operation completing between the caller's read
+        // and this insert winning the one-in-flight slot could move
+        // the pointer, and post-commit cleanup would then act on a
+        // stale "old active".
+        sourceDomainId: sql`(select ${fleets.activeDomainId} from ${fleets} where ${fleets.id} = ${input.fleetId})`,
       })
       .onConflictDoNothing()
       .returning();

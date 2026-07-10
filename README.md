@@ -132,9 +132,11 @@ pnpm db:seed       # seed a fleet from a declarative layout JSON
 | `POST /v1/chat/completions` | OpenAI-compatible streaming proxy to the active domain (fleet chosen by `X-Haru-Fleet` header or `HARU_DEFAULT_FLEET`). |
 
 Authentication: set `HARU_API_TOKEN` and send
-`Authorization: Bearer <token>`. Unset means unauthenticated (local
-development only; the server logs a loud warning). The
-server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
+`Authorization: Bearer <token>`. Unset means unauthenticated: the
+server logs a loud warning and binds to 127.0.0.1 only (local
+development mode; the same rule applies to the supervisor without
+`HARU_SUPERVISOR_TOKEN`). The server-to-supervisor plane uses a
+separate `HARU_SUPERVISOR_TOKEN`.
 
 ### haru-server environment
 
@@ -142,7 +144,7 @@ server-to-supervisor plane uses a separate `HARU_SUPERVISOR_TOKEN`.
 | --- | --- |
 | `DATABASE_URL` | Neon/Postgres connection string (required). |
 | `PORT` | Listen port (default 8700). |
-| `HARU_API_TOKEN` | Bearer token for the public API; unset = open (dev only). |
+| `HARU_API_TOKEN` | Bearer token for the public API; unset = open AND the server binds to 127.0.0.1 only (dev only). |
 | `HARU_SUPERVISOR_TOKEN` | Bearer token presented to domain supervisors. |
 | `HARU_DEFAULT_FLEET` | Fleet used by `/v1/chat/completions` without an `X-Haru-Fleet` header. |
 | `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. Values above ~300000 are capped by Node fetch's own headersTimeout (see KNOWN_ISSUES). |

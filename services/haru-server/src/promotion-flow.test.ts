@@ -333,6 +333,63 @@ describe("full promotion flow", () => {
     );
   });
 
+  it("an unproven old-active sleep skips the training handoff", async () => {
+    await seed();
+    // Alpha acknowledges /v1/vllm/sleep but its models never report
+    // asleep: demote_old_sleep must stay pending, and its timeout must
+    // complete the operation WITHOUT starting training on GPUs whose
+    // VRAM release was never proven.
+    alphaSupervisor.sleepIgnored = true;
+    let nowMs = Date.now();
+    const app = makeApp(() => new Date(nowMs));
+
+    await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+
+    // Walk the promotion to the pending demote_old_sleep nudges.
+    let currentStep: string | null = null;
+    for (let tick = 0; tick < 8; tick += 1) {
+      const result = await reconcileOnce(app);
+      currentStep = (result.operation as { currentStep: string | null })
+        .currentStep;
+      if (currentStep === "demote_old_sleep") {
+        break;
+      }
+    }
+    expect(currentStep).toBe("demote_old_sleep");
+    // One more nudge actually executes the step: the sleep call goes
+    // out, but the unproven result keeps it pending.
+    const nudged = await reconcileOnce(app);
+    expect(
+      (nudged.operation as { currentStep: string | null }).currentStep,
+    ).toBe("demote_old_sleep");
+    expect(alphaSupervisor.calls).toContain("POST /v1/vllm/sleep");
+
+    // Past the best-effort budget the operation completes at the sleep
+    // step: no training handoff, no slots recorded asleep.
+    nowMs += 60_001;
+    const result = await reconcileUntilSettled(app);
+    expect((result.operation as { state: string }).state).toBe("succeeded");
+    expect(alphaSupervisor.calls).not.toContain("POST /v1/training/start");
+
+    const after = await getFleetSnapshot(database, "default");
+    const alphaAfter = after?.domains.find((d) => d.slug === "alpha");
+    expect(alphaAfter?.state).toBe("degraded");
+    expect(
+      alphaAfter?.slots
+        .filter((s) => s.kind === "inference")
+        .every((s) => s.state === "serving"),
+    ).toBe(true);
+    expect(
+      alphaAfter?.slots
+        .filter((s) => s.kind === "training")
+        .every((s) => s.state === "idle"),
+    ).toBe(true);
+  });
+
   it("defers escalation while another operation holds the in-flight slot", async () => {
     await seed({ autoFailover: true, degradedGraceMs: 60_000 });
     // Active alpha is reachable but its models are down.

@@ -18,13 +18,13 @@ const environmentSchema = z.object({
 const environment = environmentSchema.parse(process.env);
 const config = loadSupervisorConfig(environment.HARU_SUPERVISOR_CONFIG);
 
-if (
-  environment.HARU_SUPERVISOR_TOKEN === undefined ||
-  environment.HARU_SUPERVISOR_TOKEN === ""
-) {
+const isAuthenticated =
+  environment.HARU_SUPERVISOR_TOKEN !== undefined &&
+  environment.HARU_SUPERVISOR_TOKEN !== "";
+if (!isAuthenticated) {
   console.warn(
-    "HARU_SUPERVISOR_TOKEN is not set: the control API is UNAUTHENTICATED. " +
-      "This is acceptable for local development only.",
+    "HARU_SUPERVISOR_TOKEN is not set: the control API is UNAUTHENTICATED " +
+      "and will bind to 127.0.0.1 only (local development mode).",
   );
 }
 
@@ -68,6 +68,15 @@ const app = createSupervisorApp({
   spawnFn: realSpawn,
 });
 
-serve({ fetch: app.fetch, port: environment.PORT }, (info) => {
-  console.log(`haru-supervisor listening on :${info.port}`);
-});
+serve(
+  {
+    fetch: app.fetch,
+    port: environment.PORT,
+    // An unauthenticated control plane (sleep/wake/kill-training)
+    // must never listen beyond loopback.
+    hostname: isAuthenticated ? "0.0.0.0" : "127.0.0.1",
+  },
+  (info) => {
+    console.log(`haru-supervisor listening on ${info.address}:${info.port}`);
+  },
+);

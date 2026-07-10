@@ -55,6 +55,51 @@ describe("switchActive", () => {
     expect(after?.routeRevision).toBe(fleet.routeRevision);
   });
 
+  it("requireRunningOperationId gates the pointer commit on the operation state", async () => {
+    const { createOperation, claimOperation, failOperation } =
+      await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    // Pending (not yet claimed) does not satisfy the running guard.
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        alpha().id,
+        beta().id,
+        operation.id,
+      ),
+    ).toBeNull();
+    await claimOperation(database, operation.id, "switch_active");
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        alpha().id,
+        beta().id,
+        operation.id,
+      ),
+    ).toEqual({ routeRevision: fleet.routeRevision + 1 });
+    // A terminal operation can never commit routing.
+    await failOperation(database, operation.id, {
+      step: "switch_active",
+      code: "test",
+      message: "done",
+    });
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        beta().id,
+        alpha().id,
+        operation.id,
+      ),
+    ).toBeNull();
+  });
+
   it("two concurrent switches produce exactly one winner", async () => {
     const [a, b] = await Promise.all([
       switchActive(database, fleet.id, alpha().id, beta().id),

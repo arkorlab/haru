@@ -91,6 +91,33 @@ describe("detectFailover", () => {
     expect(detectFailover(snapshot, NOW_MS)).toBeNull();
   });
 
+  it("prefers a viable standby over a higher-ranked dud", () => {
+    const GAMMA_ID = "00000000-0000-4000-8000-00000000000c";
+    const snapshot = fleet({
+      policy: autoFailoverPolicy,
+      domains: [
+        domain(DOMAIN_A_ID, "alpha", { state: "failed" }),
+        // beta ranks first (slug) but has no supervisor to drive the
+        // promotion; repeatedly picking it would starve gamma forever.
+        domain(DOMAIN_B_ID, "beta", { supervisorUrl: null }),
+        domain(GAMMA_ID, "gamma", { lastSeenAt: FRESH }),
+      ],
+    });
+    expect(detectFailover(snapshot, NOW_MS)?.targetDomainId).toBe(GAMMA_ID);
+  });
+
+  it("falls back to a promotable-state standby when nothing is viable", () => {
+    const snapshot = fleet({
+      policy: autoFailoverPolicy,
+      domains: [
+        domain(DOMAIN_A_ID, "alpha", { state: "failed" }),
+        domain(DOMAIN_B_ID, "beta", { supervisorUrl: null }),
+      ],
+    });
+    // A dead active serves nothing; any attempt beats none.
+    expect(detectFailover(snapshot, NOW_MS)?.targetDomainId).toBe(DOMAIN_B_ID);
+  });
+
   it("prefers a ready standby over a degraded one (ranking)", () => {
     const GAMMA_ID = "00000000-0000-4000-8000-00000000000c";
     const snapshot = fleet({

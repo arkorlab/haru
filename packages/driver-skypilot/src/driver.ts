@@ -6,7 +6,7 @@ import {
   DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
   parseStdoutJson,
   SkyCliError,
-  writeTemporaryYaml,
+  withTemporaryYaml,
   type ExecFunction,
 } from "./exec.js";
 import {
@@ -17,11 +17,9 @@ import {
 } from "./types.js";
 import { renderSkyTaskYaml } from "./yaml.js";
 
-/** Writes rendered task YAML somewhere `sky` can read it; injectable. */
+/** Writes rendered task YAML somewhere `sky` can read it; injectable
+ * (an injected writer owns its file's lifecycle). */
 export type WriteTaskFileFunction = (contents: string) => Promise<string>;
-
-const defaultWriteTaskFile: WriteTaskFileFunction = (contents) =>
-  writeTemporaryYaml("haru-sky-", "task.yaml", contents);
 
 export interface SkypilotDriverOptions {
   exec?: ExecFunction;
@@ -42,7 +40,7 @@ export function createSkypilotDriver(
   options: SkypilotDriverOptions = {},
 ): SkypilotDriver {
   const runSky = createSkyRunner(options.exec);
-  const writeTaskFile = options.writeTaskFile ?? defaultWriteTaskFile;
+  const writeTaskFile = options.writeTaskFile;
   const launchTimeoutMs =
     options.launchTimeoutMs ?? DEFAULT_SKY_LAUNCH_TIMEOUT_MS;
   const commandTimeoutMs =
@@ -50,11 +48,24 @@ export function createSkypilotDriver(
 
   return {
     async launchDomain(spec: DomainLaunchSpec) {
-      const taskPath = await writeTaskFile(renderSkyTaskYaml(spec));
-      await runSky(
-        ["launch", "--cluster", spec.clusterName, "--yes", taskPath],
-        launchTimeoutMs,
-      );
+      const launch = (taskPath: string) =>
+        runSky(
+          ["launch", "--cluster", spec.clusterName, "--yes", taskPath],
+          launchTimeoutMs,
+        );
+      // The default path scopes the rendered YAML to the sky call and
+      // removes its temp directory afterwards; an injected writer owns
+      // its file's lifecycle itself.
+      if (writeTaskFile) {
+        await launch(await writeTaskFile(renderSkyTaskYaml(spec)));
+      } else {
+        await withTemporaryYaml(
+          "haru-sky-",
+          "task.yaml",
+          renderSkyTaskYaml(spec),
+          launch,
+        );
+      }
       return { clusterName: spec.clusterName };
     },
 

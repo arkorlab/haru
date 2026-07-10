@@ -14,13 +14,12 @@ try {
 const environment = loadServerEnvironment(process.env);
 const database = createDatabase(environment.DATABASE_URL);
 
-if (
-  environment.HARU_API_TOKEN === undefined ||
-  environment.HARU_API_TOKEN === ""
-) {
+const isAuthenticated =
+  environment.HARU_API_TOKEN !== undefined && environment.HARU_API_TOKEN !== "";
+if (!isAuthenticated) {
   console.warn(
-    "HARU_API_TOKEN is not set: the API is UNAUTHENTICATED. " +
-      "This is acceptable for local development only.",
+    "HARU_API_TOKEN is not set: the API is UNAUTHENTICATED and will " +
+      "bind to 127.0.0.1 only (local development mode).",
   );
 }
 
@@ -58,7 +57,7 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
     now: () => new Date(),
     supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
   };
-  setInterval(() => {
+  const reconcileTimer = setInterval(() => {
     void (async () => {
       for (const reference of fleetReferences) {
         try {
@@ -69,8 +68,21 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
       }
     })();
   }, environment.HARU_RECONCILE_INTERVAL_MS);
+  // Stop scheduling new ticks on shutdown; an in-flight tick settles
+  // on its own (every write is a re-entrant CAS).
+  process.on("SIGTERM", () => {
+    clearInterval(reconcileTimer);
+  });
 }
 
-serve({ fetch: app.fetch, port: environment.PORT }, (info) => {
-  console.log(`haru-server listening on :${info.port}`);
-});
+serve(
+  {
+    fetch: app.fetch,
+    port: environment.PORT,
+    // Never expose the unauthenticated surface beyond loopback.
+    hostname: isAuthenticated ? "0.0.0.0" : "127.0.0.1",
+  },
+  (info) => {
+    console.log(`haru-server listening on ${info.address}:${info.port}`);
+  },
+);

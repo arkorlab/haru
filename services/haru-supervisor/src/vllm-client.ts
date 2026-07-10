@@ -8,7 +8,7 @@
  * host is through the supervisor's authenticated control API.
  */
 
-import { fetchJsonWithTimeout } from "@haru/protocol";
+import { fetchJsonWithTimeout, joinUrl } from "@haru/protocol";
 
 export class VllmAdminError extends Error {
   constructor(message: string) {
@@ -31,7 +31,7 @@ async function adminCall(
     // endpoints all answer tiny JSON bodies).
     const { response, body } = await fetchJsonWithTimeout(
       fetchFunction,
-      `http://${LOCAL_HOST}:${port}${pathAndQuery}`,
+      joinUrl(`http://${LOCAL_HOST}:${port}`, pathAndQuery),
       { method },
       ADMIN_CALL_TIMEOUT_MS,
     );

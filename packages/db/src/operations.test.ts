@@ -99,6 +99,22 @@ describe("createOperation", () => {
   });
 });
 
+describe("createOperation source capture", () => {
+  it("records the active pointer AT INSERT TIME, not the caller's snapshot", async () => {
+    const { switchActive } = await import("./repo/fleets.js");
+    const alpha = fleet.domains.find((d) => d.slug === "alpha")!;
+    // The pointer moves after the caller's snapshot (this test's
+    // `fleet`) was read; the insert must capture the live value.
+    await switchActive(database, fleet.id, alpha.id, beta().id);
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: alpha.id,
+    });
+    expect(operation.sourceDomainId).toBe(beta().id);
+  });
+});
+
 describe("operation lifecycle CAS", () => {
   it("claim moves pending -> running once", async () => {
     const { operation } = await createOperation(database, {

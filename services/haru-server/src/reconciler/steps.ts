@@ -176,6 +176,33 @@ const hasNoTrainingSlots = (domain: DomainSnapshot): boolean =>
   domain.slots.every((s) => s.kind !== "training");
 
 /**
+ * Whether EVERY inference model the layout binds to this domain is
+ * reported by the supervisor with the given sleeping flag. Matching
+ * the LAYOUT's bindings (not just the reported subset) stops a
+ * drifted supervisor that omits a model from vacuously passing a
+ * wake or sleep check.
+ */
+function isEveryConfiguredInferenceModel(
+  domain: DomainSnapshot,
+  status: SupervisorStatus,
+  isSleeping: boolean,
+): boolean {
+  const reportedSleeping = new Map(
+    status.slots
+      .filter((s) => s.kind === "inference")
+      .flatMap((s) => s.models ?? [])
+      .map((m) => [m.name, m.sleeping]),
+  );
+  const configured = domain.slots.flatMap((slot) =>
+    slot.spec.kind === "inference" ? slot.spec.models : [],
+  );
+  return (
+    configured.length > 0 &&
+    configured.every((m) => reportedSleeping.get(m.name) === isSleeping)
+  );
+}
+
+/**
  * Whether EVERY training slot the layout declares on this domain is
  * reported by the supervisor in the given run state. Matching by
  * gpuIndex against the layout (not just "every reported slot") stops a
@@ -255,15 +282,29 @@ async function stopTraining(context: StepContext): Promise<StepOutcome> {
 }
 
 async function verifyGpu(context: StepContext): Promise<StepOutcome> {
-  return withSupervisor(context, { role: "target" }, async (_, options) => {
-    const memory = await supervisorClient.gpuMemory(options);
-    const isReleased =
-      memory.gpus.length > 0 &&
-      memory.gpus.every(
-        (gpu) => gpu.usedMiB / gpu.totalMiB <= GPU_FREE_THRESHOLD_RATIO,
+  // Only the GPUs whose training this promotion just stopped need to
+  // prove their VRAM release: judging every physical GPU on the host
+  // would wedge promotion on busy inference or unmanaged GPUs, and a
+  // domain with no training slots has nothing to verify.
+  return withSupervisor(
+    context,
+    { role: "target", isNoop: hasNoTrainingSlots },
+    async (domain, options) => {
+      const memory = await supervisorClient.gpuMemory(options);
+      const usageByIndex = new Map(
+        memory.gpus.map((gpu) => [gpu.index, gpu.usedMiB / gpu.totalMiB]),
       );
-    return isReleased ? DONE : PENDING;
-  });
+      const trainingGpuIndexes = domain.slots
+        .filter((s) => s.kind === "training")
+        .map((s) => s.gpuIndex);
+      // A configured index missing from the report proves nothing.
+      const isReleased = trainingGpuIndexes.every((index) => {
+        const usage = usageByIndex.get(index);
+        return usage !== undefined && usage <= GPU_FREE_THRESHOLD_RATIO;
+      });
+      return isReleased ? DONE : PENDING;
+    },
+  );
 }
 
 async function wakeVllm(context: StepContext): Promise<StepOutcome> {
@@ -287,12 +328,7 @@ async function wakeVllm(context: StepContext): Promise<StepOutcome> {
       // status poll below on later nudges.
       await supervisorClient.wake(options);
       const status = await supervisorClient.status(options);
-      const models = status.slots
-        .filter((s) => s.kind === "inference")
-        .flatMap((s) => s.models ?? []);
-      const isAllAwake =
-        models.length > 0 && models.every((m) => m.sleeping === false);
-      if (!isAllAwake) {
+      if (!isEveryConfiguredInferenceModel(domain, status, false)) {
         return PENDING;
       }
       await transitionDomainSlots(
@@ -416,6 +452,17 @@ async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
     async (domain, options) => {
       // Level 1 sleep: weights offload to CPU RAM, KV cache dropped.
       await supervisorClient.sleep(options);
+      // Prove the sleep before recording it or moving on: the next
+      // step starts training on these GPUs, and an unproven sleep
+      // (offload still in progress, or a drifted supervisor that only
+      // slept the models it knows about) would make the training job
+      // fight still-awake vLLM servers for VRAM. Staying PENDING
+      // resolves via the best-effort budget, which deliberately SKIPS
+      // demote_old_train when this step never completed.
+      const status = await supervisorClient.status(options);
+      if (!isEveryConfiguredInferenceModel(domain, status, true)) {
+        return PENDING;
+      }
       await transitionDomainSlots(
         context.database,
         domain.id,
@@ -474,14 +521,10 @@ async function sleepVllm(context: StepContext): Promise<StepOutcome> {
     async (domain, options) => {
       await supervisorClient.sleep(options);
       const status = await supervisorClient.status(options);
-      const models = status.slots
-        .filter((s) => s.kind === "inference")
-        .flatMap((s) => s.models ?? []);
-      // Same vacuous-truth guard as wake: a supervisor reporting zero
-      // models cannot prove anything went to sleep.
-      const isAllAsleep =
-        models.length > 0 && models.every((m) => m.sleeping === true);
-      if (!isAllAsleep) {
+      // Every LAYOUT-bound model must report asleep: a drifted
+      // supervisor omitting a model (or reporting none) proves
+      // nothing about it.
+      if (!isEveryConfiguredInferenceModel(domain, status, true)) {
         return PENDING;
       }
       // Narrower than the table's predecessors of sleeping: a starting
@@ -513,13 +556,15 @@ async function startTraining(context: StepContext): Promise<StepOutcome> {
       if (!isEveryConfiguredTrainingSlot(domain, status, "running")) {
         return PENDING;
       }
-      // Narrower than the table's predecessors of training: a stopping
-      // slot mid-cleanup was not proven restarted by this demote step.
+      // The gpuIndex-matched running poll above proves even a slot a
+      // failed promotion left in "stopping" was restarted, so the
+      // table's full predecessor set applies (a literal ["idle"]
+      // would leave stopping slots permanently stuck).
       await transitionDomainSlots(
         context.database,
         domain.id,
         "training",
-        ["idle"],
+        statesWithEdgeTo("training", "training"),
         "training",
       );
       return DONE;

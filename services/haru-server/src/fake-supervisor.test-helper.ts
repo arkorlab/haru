@@ -64,6 +64,9 @@ export interface FakeSupervisorState {
   /** When true, /v1/training/start answers 200 but the run stays
    * idle, like a spawn failure surfacing via the child error path. */
   trainingStartIgnored: boolean;
+  /** When true, /v1/vllm/sleep answers 200 but the models never
+   * report asleep (offload wedged, or drifted supervisor config). */
+  sleepIgnored: boolean;
   /** Whether the fake's vLLM servers are asleep. */
   sleeping: boolean;
   /** GPU memory in use as a fraction of total. */
@@ -86,6 +89,7 @@ export function fakeSupervisorState(
   return {
     training: "idle",
     trainingStartIgnored: false,
+    sleepIgnored: false,
     sleeping: true,
     gpuUsedRatio: 0.1,
     probeOk: true,
@@ -149,7 +153,9 @@ function supervisorResponse(
       state.sleeping = false;
       return json({ status: "ok" });
     case "POST /v1/vllm/sleep":
-      state.sleeping = true;
+      if (!state.sleepIgnored) {
+        state.sleeping = true;
+      }
       return json({ status: "ok" });
     case "GET /v1/gpu/memory":
       return json({

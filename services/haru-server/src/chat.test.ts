@@ -247,10 +247,13 @@ describe("POST /v1/chat/completions", () => {
 
   it("stops routing to a dead model after a heartbeat and recovers when it returns", async () => {
     const alphaState = fakeSupervisorState({ sleeping: false });
+    // Injected clock: cache expiry is driven by warping nowMs instead
+    // of real setTimeout waits (guideline: inject all I/O incl. time).
+    let nowMs = Date.now();
     const app = createApp({
       database,
-      // Tiny TTL so the health flip is visible right after reconcile.
-      config: { snapshotCacheTtlMs: 1 },
+      now: () => new Date(nowMs),
+      config: { snapshotCacheTtlMs: 1000 },
       fetchFn: buildFakeFetch({
         supervisors: {
           [ALPHA_SUPERVISOR]: alphaState,
@@ -269,7 +272,9 @@ describe("POST /v1/chat/completions", () => {
       });
     const reconcile = () =>
       app.request("/v1/fleets/default/reconcile", { method: "POST" });
-    const waitTtl = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const waitTtl = () => {
+      nowMs += 1001;
+    };
 
     expect((await chat()).status).toBe(200);
 
@@ -278,7 +283,7 @@ describe("POST /v1/chat/completions", () => {
     // dead server.
     alphaState.sleeping = true;
     await reconcile();
-    await waitTtl();
+    waitTtl();
     const dead = await chat();
     expect(dead.status).toBe(404);
     expect((await dead.json()).error.code).toBe("model_not_found");
@@ -294,7 +299,7 @@ describe("POST /v1/chat/completions", () => {
     // The model comes back: the same sync recovers the slot.
     alphaState.sleeping = false;
     await reconcile();
-    await waitTtl();
+    waitTtl();
     expect((await chat()).status).toBe(200);
   });
 

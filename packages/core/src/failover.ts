@@ -122,11 +122,16 @@ export function detectFailover(
     return null;
   }
 
-  // First promotable standby of the shared ranking (state, heartbeat
-  // freshness, slug) so failover and route intent agree on the pick.
-  const standby = rankStandbys(fleet).find((d) =>
-    PROMOTABLE_DOMAIN_STATES.includes(d.state),
-  );
+  // Prefer the first VIABLE standby of the shared ranking: picking a
+  // promotable-state dud (no supervisor, no bindings, unreachable)
+  // fails the promotion before routing moves and gets re-picked every
+  // tick, starving a viable lower-ranked standby indefinitely. When
+  // nothing is provably viable, fall back to promotable state (a dead
+  // active serves nothing, so any attempt beats none).
+  const ranked = rankStandbys(fleet);
+  const standby =
+    ranked.find((d) => isViableFailoverTarget(d, fleet.policy, nowMs)) ??
+    ranked.find((d) => PROMOTABLE_DOMAIN_STATES.includes(d.state));
   if (!standby) {
     return null;
   }

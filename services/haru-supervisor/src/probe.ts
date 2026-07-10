@@ -1,4 +1,8 @@
-import { fetchJsonWithTimeout, type ProbeResult } from "@haru/protocol";
+import {
+  fetchJsonWithTimeout,
+  joinUrl,
+  type ProbeResult,
+} from "@haru/protocol";
 
 /** Fallback when the caller does not send a probe budget. */
 export const DEFAULT_PROBE_CALL_TIMEOUT_MS = 60_000;
@@ -25,7 +29,7 @@ export async function probeModel(
     // that stalls mid-response cannot hang the probe past its budget.
     const { response, body } = await fetchJsonWithTimeout(
       fetchFunction,
-      `http://127.0.0.1:${model.port}/v1/chat/completions`,
+      joinUrl(`http://127.0.0.1:${model.port}`, "/v1/chat/completions"),
       {
         method: "POST",
         headers: { "content-type": "application/json" },

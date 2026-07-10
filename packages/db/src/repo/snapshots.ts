@@ -3,7 +3,7 @@ import {
   resolveFleetPolicy,
   type FleetSnapshot,
 } from "@haru/protocol";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, type SQL } from "drizzle-orm";
 
 import { domains, fleets, slots } from "../schema/index.js";
 
@@ -18,24 +18,28 @@ const UUID_RE =
  * the slug charset admits UUID-shaped slugs, and a single OR query
  * would return a planner-picked winner when one fleet's id collides
  * with another fleet's slug. Id wins deterministically instead.
+ * Parameterized by column selection so the chat hot path's pointer
+ * lookup stays narrow while the snapshot loads the full row.
  */
-async function findFleetRow(database: HaruDatabase, reference: string) {
+async function lookupFleetByReference<T>(
+  runQuery: (where: SQL) => Promise<T[]>,
+  reference: string,
+): Promise<T | null> {
   if (UUID_RE.test(reference)) {
-    const byId = await database
-      .select()
-      .from(fleets)
-      .where(eq(fleets.id, reference))
-      .limit(1);
+    const byId = await runQuery(eq(fleets.id, reference));
     if (byId[0]) {
       return byId[0];
     }
   }
-  const bySlug = await database
-    .select()
-    .from(fleets)
-    .where(eq(fleets.slug, reference))
-    .limit(1);
-  return bySlug[0];
+  const bySlug = await runQuery(eq(fleets.slug, reference));
+  return bySlug[0] ?? null;
+}
+
+async function findFleetRow(database: HaruDatabase, reference: string) {
+  return lookupFleetByReference(
+    (where) => database.select().from(fleets).where(where).limit(1),
+    reference,
+  );
 }
 
 export interface FleetRoutePointer {
@@ -63,22 +67,11 @@ export async function getFleetRoutePointer(
   database: HaruDatabase,
   reference: string,
 ): Promise<FleetRoutePointer | null> {
-  if (UUID_RE.test(reference)) {
-    const byId = await database
-      .select(ROUTE_POINTER_COLUMNS)
-      .from(fleets)
-      .where(eq(fleets.id, reference))
-      .limit(1);
-    if (byId[0]) {
-      return byId[0];
-    }
-  }
-  const bySlug = await database
-    .select(ROUTE_POINTER_COLUMNS)
-    .from(fleets)
-    .where(eq(fleets.slug, reference))
-    .limit(1);
-  return bySlug[0] ?? null;
+  return lookupFleetByReference(
+    (where) =>
+      database.select(ROUTE_POINTER_COLUMNS).from(fleets).where(where).limit(1),
+    reference,
+  );
 }
 
 /**

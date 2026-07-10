@@ -585,7 +585,6 @@ export async function reconcileFleet(
         fleetId: fleet.id,
         kind: "promote",
         targetDomainId: failover.targetDomainId,
-        sourceDomainId: fleet.activeDomainId,
       });
       if (created.created) {
         await appendEvent(dependencies.database, {
