@@ -153,18 +153,23 @@ export function detectFailover(
   }
 
   // Prefer the first VIABLE standby of the shared ranking: picking a
-  // promotable-state dud (no supervisor, unreachable) fails the
-  // promotion before routing moves and gets re-picked every tick,
-  // starving a viable lower-ranked standby indefinitely. When nothing
-  // is provably viable, fall back to promotable state (a dead active
-  // serves nothing, so any attempt beats none) - but never to a domain
-  // with no inference bindings, whose promotion cannot succeed at all.
+  // promotable-state dud (unreachable) fails the promotion before
+  // routing moves and gets re-picked every tick, starving a viable
+  // lower-ranked standby indefinitely. When nothing is provably
+  // viable, fall back to promotable state (a dead active serves
+  // nothing, so any attempt beats none) - but never to a domain whose
+  // promotion cannot even be attempted: no inference bindings means
+  // nothing to serve, and no supervisor URL fails the very first step
+  // (both would be re-picked forever, starving standbys that merely
+  // have a stale heartbeat).
   const ranked = rankStandbys(fleet);
   const standby =
     ranked.find((d) => isViableFailoverTarget(d, fleet.policy, nowMs)) ??
     ranked.find(
       (d) =>
-        PROMOTABLE_DOMAIN_STATES.includes(d.state) && hasInferenceBindings(d),
+        PROMOTABLE_DOMAIN_STATES.includes(d.state) &&
+        d.supervisorUrl !== null &&
+        hasInferenceBindings(d),
     );
   if (!standby) {
     return null;

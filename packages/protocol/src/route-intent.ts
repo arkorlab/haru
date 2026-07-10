@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { slugSchema } from "./enums.js";
-import { modelBindingSchema } from "./fleet.js";
+import { httpUrlSchema, modelBindingSchema } from "./fleet.js";
 
 /**
  * One routed model on a target: the model binding (routing key +
@@ -24,7 +24,7 @@ export const routeTargetSchema = z.object({
   domainId: z.uuid(),
   domainSlug: slugSchema,
   /** OpenAI-compatible base URL for the domain, null if not yet known. */
-  endpointUrl: z.url().nullable(),
+  endpointUrl: httpUrlSchema.nullable(),
   /**
    * Whether traffic may be routed to this target right now: active
    * role, an endpoint URL, and AT LEAST ONE eligible model. All-or-

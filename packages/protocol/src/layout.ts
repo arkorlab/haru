@@ -1,7 +1,11 @@
 import { z } from "zod";
 
 import { domainProviderSchema, slugSchema } from "./enums.js";
-import { inferenceSlotSpecSchema, trainingSlotSpecSchema } from "./fleet.js";
+import {
+  httpUrlSchema,
+  inferenceSlotSpecSchema,
+  trainingSlotSpecSchema,
+} from "./fleet.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema } from "./policy.js";
 
@@ -25,8 +29,8 @@ export const domainLayoutSchema = z.object({
   slug: slugSchema,
   provider: domainProviderSchema.default("static"),
   placement: placementSpecSchema,
-  supervisorUrl: z.url().optional(),
-  servingBaseUrl: z.url().optional(),
+  supervisorUrl: httpUrlSchema.optional(),
+  servingBaseUrl: httpUrlSchema.optional(),
   slots: z.array(slotLayoutSchema).min(1),
 });
 export type DomainLayout = z.infer<typeof domainLayoutSchema>;
@@ -47,6 +51,30 @@ export const fleetLayoutSchema = z
       layout.domains.some((d) => d.slug === layout.activeDomainSlug),
     {
       message: "activeDomainSlug must reference one of the domains",
+      path: ["activeDomainSlug"],
+    },
+  )
+  // The promote path already rejects training-only targets (nothing to
+  // serve); a seeded initial active must meet the same bar or the
+  // fleet starts ready-but-unservable.
+  .refine(
+    (layout) => {
+      if (layout.activeDomainSlug === undefined) {
+        return true;
+      }
+      const active = layout.domains.find(
+        (d) => d.slug === layout.activeDomainSlug,
+      );
+      // A dangling slug is the previous refinement's error, not this
+      // one's.
+      return (
+        active === undefined ||
+        active.slots.some((slot) => slot.kind === "inference")
+      );
+    },
+    {
+      message:
+        "the active domain must bind at least one inference model (a training-only active cannot serve)",
       path: ["activeDomainSlug"],
     },
   )

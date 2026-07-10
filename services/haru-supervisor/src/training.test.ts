@@ -123,6 +123,26 @@ describe("TrainingRun", () => {
     expect(children).toHaveLength(2);
   });
 
+  it("a later stop with a SHORTER grace tightens the kill deadline", () => {
+    const training = run();
+    training.start();
+    // A slow manual stop is in flight; a failover stop must be able
+    // to pull the SIGKILL forward to its own grace.
+    training.stop(90_000);
+    training.stop(30_000);
+    vi.advanceTimersByTime(30_000);
+    expect(children[0]?.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("a later stop with a LONGER grace never loosens the deadline", () => {
+    const training = run();
+    training.start();
+    training.stop(30_000);
+    training.stop(90_000);
+    vi.advanceTimersByTime(30_000);
+    expect(children[0]?.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
   it("stop is idempotent when idle and while stopping", () => {
     const training = run();
     expect(training.stop(1000)).toBe("idle");

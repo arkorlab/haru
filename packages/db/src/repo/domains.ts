@@ -1,7 +1,7 @@
 import { assertDomainTransition } from "@haru/core";
-import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
 
-import { domains, operations } from "../schema/index.js";
+import { domains, fleets, operations } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 import type { DomainState } from "@haru/protocol";
@@ -42,13 +42,17 @@ export async function transitionDomain(
 
 /**
  * Escalate a degraded domain to failed ONLY while its fleet has no
- * in-flight operation, in one statement: a separate read-then-update
- * would let a promote/demote created in between occupy the
- * one-in-flight slot right as the active stops routing, with no
- * failover able to start. A createOperation committing between this
- * statement's snapshot and its commit can still slip through (that
- * window is sub-statement and self-heals: the failed trigger fires as
- * soon as the slot frees), but the multi-statement window is gone.
+ * in-flight operation AND still routes to this domain, in one
+ * statement: a separate read-then-update would let a promote/demote
+ * created in between occupy the one-in-flight slot right as the
+ * active stops routing, with no failover able to start - and a
+ * promotion that committed in between would leave this domain a
+ * STANDBY, which the escalation rule never touches (failing it would
+ * strip a viable failback target). A createOperation committing
+ * between this statement's snapshot and its commit can still slip
+ * through (that window is sub-statement and self-heals: the failed
+ * trigger fires as soon as the slot frees), but the multi-statement
+ * windows are gone.
  */
 export async function escalateDomainIfFleetIdle(
   database: HaruDatabase,
@@ -57,6 +61,10 @@ export async function escalateDomainIfFleetIdle(
   at: Date,
 ): Promise<boolean> {
   assertDomainTransition("degraded", "failed");
+  const pointerAtDomain = database
+    .select({ one: sql`1` })
+    .from(fleets)
+    .where(and(eq(fleets.id, fleetId), eq(fleets.activeDomainId, domainId)));
   const inflightOperation = database
     .select({ one: sql`1` })
     .from(operations)
@@ -73,6 +81,7 @@ export async function escalateDomainIfFleetIdle(
       and(
         eq(domains.id, domainId),
         eq(domains.state, "degraded"),
+        exists(pointerAtDomain),
         notExists(inflightOperation),
       ),
     )

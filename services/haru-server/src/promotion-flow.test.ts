@@ -213,9 +213,43 @@ describe("full promotion flow", () => {
     expect(intent.active?.domainSlug).toBe("alpha");
   });
 
+  it("an extra non-layout model failing its probe does not block the promotion", async () => {
+    await seed();
+    // The supervisor config carries a model the fleet layout never
+    // routes to; its failure must not veto a promotion whose
+    // layout-bound models all probed fine (the supervisor's aggregate
+    // `ok` is false here and is deliberately ignored).
+    betaSupervisor.probeResults = [
+      { model: "example-chat-small", ok: true, latencyMs: 5 },
+      {
+        model: "extra-unrouted-model",
+        ok: false,
+        latencyMs: 5,
+        error: "synthetic failure",
+      },
+    ];
+    const app = makeApp();
+
+    await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+
+    const result = await reconcileUntilSettled(app);
+    expect((result.operation as { state: string }).state).toBe("succeeded");
+    const intentResponse = await app.request("/v1/fleets/default/route-intent");
+    const intent = routeIntentSchema.parse(await intentResponse.json());
+    expect(intent.active?.domainSlug).toBe("beta");
+  });
+
   it("passes the policy probe budget through to the supervisor probe call", async () => {
     await seed({ probeTimeoutMs: 12_345 });
-    const app = makeApp();
+    // Frozen clock: the probe request budget is min(probeTimeoutMs,
+    // remaining step budget), and with zero elapsed time those are
+    // equal, keeping the wire assertion exact.
+    const frozen = new Date();
+    const app = makeApp(() => frozen);
 
     await app.request("/v1/fleets/default/promote", {
       method: "POST",
@@ -578,5 +612,38 @@ describe("full promotion flow", () => {
         .filter((s) => s.kind === "training")
         .every((s) => s.state === "idle"),
     ).toBe(true);
+  });
+
+  it("a run reported running WITHOUT a PID never counts as started (spawn-failure window)", async () => {
+    await seed({ startTrainingTimeoutMs: 60_000 });
+    betaSupervisor.sleeping = false;
+    betaSupervisor.training = "idle";
+    // The run flips to running before the child 'error' event lands:
+    // the supervisor reports state running with pids [] in that
+    // window, which must read as "not started yet".
+    betaSupervisor.trainingPidless = true;
+    let nowMs = Date.now();
+    const app = makeApp(() => new Date(nowMs));
+
+    await app.request("/v1/fleets/default/demote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetDomainId: beta().id }),
+    });
+
+    for (let tick = 0; tick < 4; tick += 1) {
+      await app.request("/v1/fleets/default/reconcile", { method: "POST" });
+    }
+    const inflight = await reconcileOnce(app);
+    expect((inflight.operation as { state: string }).state).toBe("running");
+
+    nowMs += 60_001;
+    const result = await reconcileUntilSettled(app);
+    const operation = result.operation as {
+      state: string;
+      error: { code: string } | null;
+    };
+    expect(operation.state).toBe("failed");
+    expect(operation.error?.code).toBe("step_timeout");
   });
 });

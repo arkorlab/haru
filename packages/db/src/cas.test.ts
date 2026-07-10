@@ -184,6 +184,27 @@ describe("transitionDomain", () => {
     ).rejects.toThrow(/invalid domain transition/);
   });
 
+  it("escalateDomainIfFleetIdle refuses once the pointer moved off the domain", async () => {
+    const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
+    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    // A promotion committed between the stale tick's decision and its
+    // escalation UPDATE: alpha is a standby now and must stay
+    // degraded (failing it would strip a failback target).
+    await switchActive(database, fleet.id, alpha().id, beta().id);
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        new Date(),
+      ),
+    ).toBe(false);
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "degraded",
+    );
+  });
+
   it("markDomainSeen records the heartbeat", async () => {
     const at = new Date("2026-01-02T03:04:05.000Z");
     await markDomainSeen(database, alpha().id, at);

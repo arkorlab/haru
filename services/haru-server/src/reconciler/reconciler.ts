@@ -61,12 +61,19 @@ export interface ReconcileResult {
  * math stays correct on non-reloading ticks.
  */
 /**
- * Mirror a domain's per-slot inference health from the supervisor
- * status. Heartbeats are the only reconciler of slot state outside
+ * Mirror a domain's per-slot health from the supervisor status.
+ * Heartbeats are the only reconciler of slot state outside
  * operations. Per-slot CAS on purpose: one dead GPU must not drag its
  * healthy siblings along, and only steady-state pairs are touched
- * (slots on a promotion's wake path belong to the operation's
- * executors).
+ * (slots on a promotion's wake path, and training slots mid-stop,
+ * belong to the operation's executors).
+ *
+ * TRAINING (any role): training <-> idle mirrors a run that exited on
+ * its own (crash/completion; the DB must not report a workload that
+ * no longer exists) or was started outside an operation. Stopping/
+ * failed/stopped are never touched, and idle -> training additionally
+ * requires a live PID (the spawn-failure window reports running with
+ * no process behind it).
  *
  * ACTIVE: serving <-> failed on whether every layout-bound model
  * reports awake (a crashed model must stop being routed to; recovery
@@ -87,7 +94,40 @@ async function syncInferenceSlotHealth(
 ): Promise<boolean> {
   let didChangeState = false;
   for (const slot of domain.slots) {
-    if (slot.kind !== "inference" || slot.spec.kind !== "inference") {
+    if (slot.kind === "training") {
+      const training = status.slots.find(
+        (s) => s.kind === "training" && s.gpuIndex === slot.gpuIndex,
+      )?.training;
+      if (slot.state === "training" && training?.state === "idle") {
+        const didStop = await transitionSlot(
+          dependencies.database,
+          slot.id,
+          "training",
+          ["training"],
+          "idle",
+        );
+        if (didStop) {
+          didChangeState = true;
+        }
+      } else if (
+        slot.state === "idle" &&
+        training?.state === "running" &&
+        training.pids.length > 0
+      ) {
+        const didStart = await transitionSlot(
+          dependencies.database,
+          slot.id,
+          "training",
+          ["idle"],
+          "training",
+        );
+        if (didStart) {
+          didChangeState = true;
+        }
+      }
+      continue;
+    }
+    if (slot.spec.kind !== "inference") {
       continue;
     }
     const reported = status.slots.find(
@@ -514,10 +554,11 @@ async function advanceInFlightOperation(
   }
   const step = operationStepSchema.parse(operation.currentStep);
 
+  const budgetMs = stepTimeoutMs(fleet.policy, step);
   const elapsedMs =
     dependencies.now().getTime() - operation.stepStartedAt.getTime();
   const resolution: StepResolution =
-    elapsedMs > stepTimeoutMs(fleet.policy, step)
+    elapsedMs > budgetMs
       ? await resolveStepTimeout(dependencies, fleet, operation, step)
       : await executeStep(
           {
@@ -527,6 +568,10 @@ async function advanceInFlightOperation(
             fleet,
             operation,
             supervisorToken: dependencies.supervisorToken,
+            // Supervisor calls inside the step are capped to what
+            // remains, so the budget is a true per-step bound instead
+            // of "budget + one whole per-call timeout".
+            stepRemainingMs: budgetMs - elapsedMs,
           },
           step,
         );

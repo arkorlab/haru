@@ -11,6 +11,15 @@ import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema } from "./policy.js";
 
 /**
+ * URL that the chat proxy / supervisor client will feed to
+ * joinUrl + fetch as an HTTP endpoint. `z.url()` alone admits schemes
+ * like mailto: or file:, which would pass seed validation and then
+ * blow up (or be fetched) mid-request; bad layouts must fail at
+ * config time instead.
+ */
+export const httpUrlSchema = z.url({ protocol: /^https?$/ });
+
+/**
  * One model exposed by an inference slot: the public model name (what
  * chat clients put in `model`) and the OpenAI-compatible base URL of
  * the vLLM server that hosts it. Multiple models on one GPU slot means
@@ -29,7 +38,7 @@ export const modelBindingSchema = z.object({
     .refine((value) => value === value.toLowerCase(), {
       message: "model binding names must be lowercase (routing key)",
     }),
-  servingUrl: z.url(),
+  servingUrl: httpUrlSchema,
 });
 export type ModelBinding = z.infer<typeof modelBindingSchema>;
 
@@ -82,9 +91,9 @@ export const domainSnapshotSchema = z.object({
   provider: domainProviderSchema,
   placement: placementSpecSchema,
   /** Private control-plane URL of the domain's supervisor. */
-  supervisorUrl: z.url().nullable(),
+  supervisorUrl: httpUrlSchema.nullable(),
   /** OpenAI-compatible base URL used as the domain-level fallback. */
-  servingBaseUrl: z.url().nullable(),
+  servingBaseUrl: httpUrlSchema.nullable(),
   lastSeenAt: z.iso.datetime({ offset: true }).nullable(),
   /**
    * When the domain last changed state. Written with the reconciler's

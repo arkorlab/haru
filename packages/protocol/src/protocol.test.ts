@@ -171,6 +171,49 @@ describe("fleetLayoutSchema", () => {
     ).toThrow();
   });
 
+  it("rejects a training-only initial active (nothing to serve)", () => {
+    const domain = validLayout.domains[0]!;
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [
+          {
+            ...domain,
+            slots: domain.slots.filter((slot) => slot.kind === "training"),
+          },
+        ],
+      }),
+    ).toThrow(/at least one inference model/);
+  });
+
+  it("rejects non-HTTP serving and supervisor URLs at config time", () => {
+    const domain = validLayout.domains[0]!;
+    const inferenceSlot = domain.slots[0]!;
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [
+          {
+            ...domain,
+            slots: [
+              {
+                ...inferenceSlot,
+                models: [{ name: "example-chat", servingUrl: "mailto:x@y" }],
+              },
+              domain.slots[1],
+            ],
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [{ ...domain, supervisorUrl: "file:///etc/passwd" }],
+      }),
+    ).toThrow();
+  });
+
   it("rejects duplicate domain slugs", () => {
     const domain = validLayout.domains[0];
     expect(() =>

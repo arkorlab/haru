@@ -113,11 +113,28 @@ describe("detectFailover", () => {
       policy: autoFailoverPolicy,
       domains: [
         domain(DOMAIN_A_ID, "alpha", { state: "failed" }),
-        domain(DOMAIN_B_ID, "beta", { supervisorUrl: null }),
+        // Stale heartbeat: not viable, but the promotion can at least
+        // be attempted (supervisor + bindings present).
+        domain(DOMAIN_B_ID, "beta", { lastSeenAt: STALE }),
       ],
     });
     // A dead active serves nothing; any attempt beats none.
     expect(detectFailover(snapshot, NOW_MS)?.targetDomainId).toBe(DOMAIN_B_ID);
+  });
+
+  it("the fallback skips a no-supervisor standby instead of starving a lower-ranked one", () => {
+    const GAMMA_ID = "00000000-0000-4000-8000-00000000000c";
+    const snapshot = fleet({
+      policy: autoFailoverPolicy,
+      domains: [
+        domain(DOMAIN_A_ID, "alpha", { state: "failed" }),
+        // beta ranks first but can never be promoted: its promotion
+        // fails at the first step and would be re-picked every tick.
+        domain(DOMAIN_B_ID, "beta", { supervisorUrl: null }),
+        domain(GAMMA_ID, "gamma", { lastSeenAt: STALE }),
+      ],
+    });
+    expect(detectFailover(snapshot, NOW_MS)?.targetDomainId).toBe(GAMMA_ID);
   });
 
   it("never falls back to a training-only standby (promotion cannot succeed)", () => {

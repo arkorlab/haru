@@ -43,6 +43,12 @@ const realSpawn: SpawnFunction = (command, options) => {
   }
   const child = spawn(executable, arguments_, {
     stdio: "inherit",
+    // Own process group (pgid = child pid): LoRA launchers commonly
+    // fork GPU-owning workers, and signalling only the launcher would
+    // leave them holding VRAM, so verify_gpu never observes the
+    // release and the failover stalls. The group kill below reaches
+    // every descendant.
+    detached: true,
     env: {
       ...process.env,
       // The trainer must checkpoint here and resume from it on start.
@@ -51,7 +57,20 @@ const realSpawn: SpawnFunction = (command, options) => {
   });
   return {
     pid: child.pid,
-    kill: (signal) => child.kill(signal),
+    kill: (signal) => {
+      if (child.pid === undefined) {
+        return child.kill(signal);
+      }
+      try {
+        // Negative pid = the whole process group.
+        process.kill(-child.pid, signal);
+        return true;
+      } catch {
+        // Group already gone (or platform without group semantics):
+        // fall back to the direct child.
+        return child.kill(signal);
+      }
+    },
     once: (event, listener) => {
       // Forward both 'exit' and 'error': an unlistened ChildProcess
       // 'error' (e.g. ENOENT for a typo'd command) would otherwise

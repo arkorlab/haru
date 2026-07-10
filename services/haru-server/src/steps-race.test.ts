@@ -127,6 +127,7 @@ function contextFor(operation: OperationRow) {
     fleet: staleFleet,
     operation,
     supervisorToken: undefined,
+    stepRemainingMs: 60_000,
   };
 }
 
@@ -298,6 +299,7 @@ describe("switch_active under concurrent ticks", () => {
         fleet: staleFleet,
         operation,
         supervisorToken: undefined,
+        stepRemainingMs: 60_000,
       },
       "verify_gpu",
     );
@@ -330,6 +332,7 @@ describe("switch_active under concurrent ticks", () => {
         fleet: fresh,
         operation,
         supervisorToken: undefined,
+        stepRemainingMs: 60_000,
       },
       "sleep_vllm",
     );

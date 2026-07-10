@@ -28,6 +28,7 @@ export type SpawnFunction = (
 export class TrainingRun {
   private child: ChildHandle | null = null;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
+  private killDeadlineMs: number | null = null;
   private stateValue: TrainingRunState = "idle";
   private readonly command: readonly string[];
   private readonly checkpointDirectory: string;
@@ -51,8 +52,21 @@ export class TrainingRun {
       clearTimeout(this.killTimer);
       this.killTimer = null;
     }
+    this.killDeadlineMs = null;
     this.child = null;
     this.stateValue = "idle";
+  }
+
+  private scheduleKill(child: ChildHandle, graceMs: number): void {
+    if (this.killTimer !== null) {
+      clearTimeout(this.killTimer);
+    }
+    this.killDeadlineMs = Date.now() + graceMs;
+    this.killTimer = setTimeout(() => {
+      // Grace expired: force kill. Checkpoint recovery picks up from
+      // the last flushed checkpoint.
+      child.kill("SIGKILL");
+    }, graceMs);
   }
 
   get state(): TrainingRunState {
@@ -86,19 +100,27 @@ export class TrainingRun {
   }
 
   /** Idempotent: stopping an idle run is a no-op. Repeated stops while
-   * stopping keep the earlier (shorter) kill deadline. */
+   * stopping keep the EARLIEST kill deadline: a failover stop with a
+   * short grace must be able to tighten a longer manual stop already
+   * in flight (never loosen it - promotion speed wins). */
   stop(graceMs: number): TrainingRunState {
+    if (this.stateValue === "stopping" && this.child !== null) {
+      const requestedDeadlineMs = Date.now() + graceMs;
+      if (
+        this.killDeadlineMs === null ||
+        requestedDeadlineMs < this.killDeadlineMs
+      ) {
+        this.scheduleKill(this.child, graceMs);
+      }
+      return this.stateValue;
+    }
     if (this.stateValue !== "running" || this.child === null) {
       return this.stateValue;
     }
     const child = this.child;
     this.stateValue = "stopping";
     child.kill("SIGTERM");
-    this.killTimer = setTimeout(() => {
-      // Grace expired: force kill. Checkpoint recovery picks up from
-      // the last flushed checkpoint.
-      child.kill("SIGKILL");
-    }, graceMs);
+    this.scheduleKill(child, graceMs);
     return this.stateValue;
   }
 }

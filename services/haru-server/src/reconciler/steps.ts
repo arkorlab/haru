@@ -46,6 +46,13 @@ export interface StepContext {
   fleet: FleetSnapshot;
   operation: OperationRow;
   supervisorToken: string | undefined;
+  /**
+   * What remains of the step's policy budget at nudge start. Every
+   * supervisor call is capped to it (see withSupervisor), so the
+   * budget is a real per-step bound: a call issued with 1ms left
+   * cannot run for its full per-call timeout on top.
+   */
+  stepRemainingMs: number;
 }
 
 export type StepOutcome =
@@ -162,7 +169,10 @@ async function withSupervisor(
     fetchFn: context.fetchFn,
     baseUrl: domain.supervisorUrl,
     token: context.supervisorToken,
-    timeoutMs: config.timeoutMs ?? STEP_CALL_TIMEOUT_MS,
+    timeoutMs: Math.min(
+      config.timeoutMs ?? STEP_CALL_TIMEOUT_MS,
+      context.stepRemainingMs,
+    ),
   };
   try {
     return await body(domain, options);
@@ -227,12 +237,22 @@ function isEveryConfiguredTrainingSlot(
   const reportedByGpu = new Map(
     status.slots
       .filter((s) => s.kind === "training")
-      .map((s) => [s.gpuIndex, s.training?.state]),
+      .map((s) => [s.gpuIndex, s.training]),
   );
   const configured = domain.slots.filter((s) => s.kind === "training");
   return (
     configured.length > 0 &&
-    configured.every((s) => reportedByGpu.get(s.gpuIndex) === runState)
+    configured.every((s) => {
+      const training = reportedByGpu.get(s.gpuIndex);
+      if (training?.state !== runState) {
+        return false;
+      }
+      // "running" with no PID is the async spawn-failure window: the
+      // run flips to running BEFORE the child 'error' event lands, so
+      // a poll in that window would mark DB slots training for a
+      // process that never existed. A live run always has a PID.
+      return runState === "idle" || training.pids.length > 0;
+    })
   );
 }
 
@@ -367,10 +387,17 @@ async function probe(context: StepContext): Promise<StepOutcome> {
   // The probe endpoint is synchronous (it runs real completions), so
   // its client timeout must cover the whole probe budget: aborting at
   // the nudge timeout would discard a slow-but-successful probe and
-  // re-queue a fresh completion on the cold GPU every tick.
+  // re-queue a fresh completion on the cold GPU every tick. Capped to
+  // what remains of the STEP budget, so a probe started late in the
+  // step cannot overrun the documented per-step bound by a whole
+  // extra probeTimeoutMs.
+  const probeBudgetMs = Math.min(
+    context.fleet.policy.probeTimeoutMs,
+    context.stepRemainingMs,
+  );
   return withSupervisor(
     context,
-    { role: "target", timeoutMs: context.fleet.policy.probeTimeoutMs },
+    { role: "target", timeoutMs: probeBudgetMs },
     async (domain, options) => {
       // Every model binding the fleet layout routes to this domain must
       // be proven, not just the models the supervisor happens to be
@@ -394,17 +421,22 @@ async function probe(context: StepContext): Promise<StepOutcome> {
         options,
         context.fleet.policy.probe.prompt,
         context.fleet.policy.probe.maxTokens,
-        context.fleet.policy.probeTimeoutMs,
+        probeBudgetMs,
       );
-      const okModels = new Set(
-        result.results.filter((r) => r.ok).map((r) => r.model),
+      // The decision is over the LAYOUT-bound models only, never the
+      // supervisor's aggregate `ok`: an extra model in the supervisor
+      // config that Haru will never route to must not block the
+      // promotion by failing its probe. Probed-but-failed and
+      // never-attempted (config drift) are reported as distinct
+      // causes.
+      const attempted = new Set(result.results.map((r) => r.model));
+      const failedExpected = result.results.filter(
+        (r) => !r.ok && expectedModels.has(r.model),
       );
-      const missing = [...expectedModels.difference(okModels)];
-      if (!result.ok || missing.length > 0) {
+      const missing = [...expectedModels.difference(attempted)];
+      if (failedExpected.length > 0 || missing.length > 0) {
         const failures = [
-          ...result.results
-            .filter((r) => !r.ok)
-            .map((r) => `${r.model}: ${r.error ?? "failed"}`),
+          ...failedExpected.map((r) => `${r.model}: ${r.error ?? "failed"}`),
           ...(missing.length > 0
             ? [
                 `not probed by the supervisor (config drift?): ${missing.join(", ")}`,

@@ -104,14 +104,18 @@ Dependency graph (enforce it when adding imports):
   From-lists that are deliberately NARROWER than the table's predecessor set
   stay literal at the call site with a "why" comment - keep new ones that way.
 - Degraded escalation: an ACTIVE domain that stays `degraded` past
-  `policy.degradedGraceMs` (autoFailover on, AND a viable standby exists,
-  AND no operation is in flight) is CAS-escalated to `failed`, which makes
-  `detectFailover`'s failed trigger fire in the same tick; a reachable
-  supervisor recovers a failed domain via `failed -> degraded` (the active
-  additionally has to report ready). Heartbeats also mirror the ACTIVE
-  domain's per-slot inference health (`serving <-> failed`, per-slot CAS)
-  from supervisor status, so chat and route intent stop routing to a dead
-  model within one tick.
+  `policy.degradedGraceMs` (autoFailover on, AND a viable standby exists -
+  viable means READY, supervised, bound, fresh-heartbeat, no failed
+  inference slot - AND no operation is in flight AND the pointer still
+  targets it, both guarded inside the escalation UPDATE) is CAS-escalated
+  to `failed`, which makes `detectFailover`'s failed trigger fire in the
+  same tick; a reachable supervisor recovers a failed domain via
+  `failed -> degraded` (the active additionally has to report ready).
+  Heartbeats also mirror per-slot health from supervisor status (per-slot
+  CAS, steady-state pairs only): the ACTIVE domain's inference
+  `serving <-> failed`, a STANDBY's `sleeping <-> failed` posture, and
+  training `training <-> idle` on every role (a running report without a
+  PID never counts - that is the async spawn-failure window).
 - Completion checks over supervisor-reported lists must guard the empty case
   (`length > 0 && every(...)`) - a drifted supervisor config must not make a
   step vacuously succeed.

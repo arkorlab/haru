@@ -68,6 +68,12 @@ const TWO_SLOT_LAYOUT = {
             { name: "example-chat-small", servingUrl: "https://c.test" },
           ],
         },
+        {
+          kind: "training",
+          gpuIndex: 0,
+          command: ["python", "train.py"],
+          checkpointDir: "/checkpoints/beta",
+        },
       ],
     },
   ],
@@ -77,9 +83,15 @@ const TWO_SLOT_LAYOUT = {
  * delete an entry to simulate a drifted supervisor omitting it. */
 type ReportedModels = Map<string, boolean | null>;
 
+/** Reported status of beta's training slot; undefined = omitted. */
+type ReportedTraining =
+  | { state: "idle" | "running" | "stopping"; pids: number[] }
+  | undefined;
+
 function statusFetch(
   alphaReported: ReportedModels,
   betaReported: ReportedModels = new Map([["example-chat-small", true]]),
+  betaTraining?: ReportedTraining,
 ): typeof fetch {
   return (input) => {
     const url = new URL(requestTargetUrl(input));
@@ -97,6 +109,15 @@ function statusFetch(
               ? []
               : [{ name: "example-chat-small", port: 9100, sleeping }],
         },
+        ...(betaTraining === undefined
+          ? []
+          : [
+              {
+                gpuIndex: 0,
+                kind: "training",
+                training: betaTraining,
+              } satisfies SupervisorSlotStatus,
+            ]),
       ];
       return Promise.resolve(Response.json({ slots, ready: false }));
     }
@@ -138,11 +159,12 @@ afterEach(async () => {
 async function reconcileWith(
   reported: ReportedModels,
   betaReported?: ReportedModels,
+  betaTraining?: ReportedTraining,
 ): Promise<void> {
   await reconcileFleet(
     {
       database,
-      fetchFn: statusFetch(reported, betaReported),
+      fetchFn: statusFetch(reported, betaReported, betaTraining),
       now: () => new Date(),
       supervisorToken: undefined,
     },
@@ -161,6 +183,12 @@ async function standbyStates(): Promise<string[]> {
   return (beta?.slots ?? [])
     .filter((s) => s.kind === "inference")
     .map((s) => s.state);
+}
+
+async function standbyTrainingState(): Promise<string | undefined> {
+  const snapshot = await getFleetSnapshot(database, "default");
+  const beta = snapshot?.domains.find((d) => d.slug === "beta");
+  return beta?.slots.find((s) => s.kind === "training")?.state;
 }
 
 async function inferenceStates(): Promise<Map<number, string>> {
@@ -240,6 +268,30 @@ describe("active slot-health sync", () => {
       new Map([["example-chat-small", true]]),
     );
     expect(await standbyStates()).toEqual(["sleeping"]);
+  });
+
+  it("mirrors training runs: exit -> idle, external start -> training, pidless never counts", async () => {
+    // Externally observed start: reported running with a live PID.
+    await reconcileWith(new Map(HEALTHY_ALPHA), undefined, {
+      state: "running",
+      pids: [42],
+    });
+    expect(await standbyTrainingState()).toBe("training");
+
+    // The trainer crashes or completes on its own: the durable slot
+    // must stop reporting a workload that no longer exists.
+    await reconcileWith(new Map(HEALTHY_ALPHA), undefined, {
+      state: "idle",
+      pids: [],
+    });
+    expect(await standbyTrainingState()).toBe("idle");
+
+    // Spawn-failure window (running with no PID): not a live run.
+    await reconcileWith(new Map(HEALTHY_ALPHA), undefined, {
+      state: "running",
+      pids: [],
+    });
+    expect(await standbyTrainingState()).toBe("idle");
   });
 
   it("treats a configured model the supervisor omits as unhealthy", async () => {

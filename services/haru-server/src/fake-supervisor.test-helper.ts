@@ -64,6 +64,10 @@ export interface FakeSupervisorState {
   /** When true, /v1/training/start answers 200 but the run stays
    * idle, like a spawn failure surfacing via the child error path. */
   trainingStartIgnored: boolean;
+  /** When true, a running training run reports NO pids, like the
+   * window between start() flipping to running and the async child
+   * 'error' event landing for a command that failed to spawn. */
+  trainingPidless: boolean;
   /** When true, /v1/vllm/sleep answers 200 but the models never
    * report asleep (offload wedged, or drifted supervisor config). */
   sleepIgnored: boolean;
@@ -89,6 +93,7 @@ export function fakeSupervisorState(
   return {
     training: "idle",
     trainingStartIgnored: false,
+    trainingPidless: false,
     sleepIgnored: false,
     sleeping: true,
     gpuUsedRatio: 0.1,
@@ -136,7 +141,10 @@ function supervisorResponse(
             kind: "training",
             training: {
               state: state.training === "running" ? "running" : state.training,
-              pids: state.training === "running" ? [1234] : [],
+              pids:
+                state.training === "running" && !state.trainingPidless
+                  ? [1234]
+                  : [],
             },
           },
         ],
