@@ -39,11 +39,7 @@ catalog:
   oxlint-tsgolint: "^0.24.0"
   tsx: "^4.23.0"
   turbo: "^2.10.4"
-  # TypeScript 7 stable (7.0.2, the first stable 7.x) was published on
-  # 2026-07-08 and is still inside the 24h `minimumReleaseAge` window
-  # at the time of writing. `7.0.1-rc` is the same 7.0 line and clears
-  # the gate. Bump to `^7.0.2` after 2026-07-09T15:55Z.
-  typescript: "7.0.1-rc"
+  typescript: "^7.0.2"
   typescript-eslint: "^8.63.0"
   vitest: "^4.1.10"
   yaml: "^2.9.0"

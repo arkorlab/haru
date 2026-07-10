@@ -80,7 +80,7 @@ models and placement are all data.
 
 ## Repository layout
 
-```
+```text
 packages/protocol         Zod schemas / typed API contracts (source of type truth)
 packages/core             Pure state machines, promotion planning, route intent
 packages/db               Neon/Postgres state store (Drizzle schema, migrations,

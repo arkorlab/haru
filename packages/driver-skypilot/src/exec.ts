@@ -33,6 +33,20 @@ export const DEFAULT_SKY_LAUNCH_TIMEOUT_MS = 30 * 60 * 1000;
 /** Bound for status/stop/down calls. */
 export const DEFAULT_SKY_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * Parse a `sky ... --format json` stdout, wrapping non-JSON output
+ * (empty string, warning banners, truncation) in a typed SkyCliError
+ * instead of letting a raw SyntaxError escape the driver boundary.
+ */
+export function parseStdoutJson(stdout: string, command: string): unknown {
+  try {
+    return JSON.parse(stdout) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new SkyCliError(command, 0, `non-JSON stdout (${detail}): ${stdout}`);
+  }
+}
+
 export type SkyRunner = (
   arguments_: readonly string[],
   timeoutMs: number,

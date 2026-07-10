@@ -4,6 +4,7 @@ import {
   createSkyRunner,
   DEFAULT_SKY_COMMAND_TIMEOUT_MS,
   DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
+  parseStdoutJson,
   SkyCliError,
   writeTemporaryYaml,
   type ExecFunction,
@@ -66,7 +67,7 @@ export function createSkypilotDriver(
       );
       const parsed = z
         .array(skyClusterStatusSchema)
-        .safeParse(JSON.parse(stdout));
+        .safeParse(parseStdoutJson(stdout, `sky status ${clusterName}`));
       if (!parsed.success) {
         throw new SkyCliError(
           `sky status ${clusterName}`,

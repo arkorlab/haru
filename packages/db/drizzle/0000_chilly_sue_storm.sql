@@ -73,6 +73,8 @@ CREATE TABLE "slots" (
 --> statement-breakpoint
 ALTER TABLE "domains" ADD CONSTRAINT "domains_fleet_id_fleets_id_fk" FOREIGN KEY ("fleet_id") REFERENCES "public"."fleets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operations" ADD CONSTRAINT "operations_fleet_id_fleets_id_fk" FOREIGN KEY ("fleet_id") REFERENCES "public"."fleets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "operations" ADD CONSTRAINT "operations_target_domain_id_domains_id_fk" FOREIGN KEY ("target_domain_id") REFERENCES "public"."domains"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "operations" ADD CONSTRAINT "operations_source_domain_id_domains_id_fk" FOREIGN KEY ("source_domain_id") REFERENCES "public"."domains"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "slots" ADD CONSTRAINT "slots_domain_id_domains_id_fk" FOREIGN KEY ("domain_id") REFERENCES "public"."domains"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "idx_domains_fleet" ON "domains" USING btree ("fleet_id");--> statement-breakpoint
 CREATE INDEX "idx_events_fleet" ON "events" USING btree ("fleet_id","id");--> statement-breakpoint

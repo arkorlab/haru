@@ -245,6 +245,59 @@ describe("POST /v1/chat/completions", () => {
     expect(wasUpstreamAborted).toBe(true);
   });
 
+  it("stops routing to a dead model after a heartbeat and recovers when it returns", async () => {
+    const alphaState = fakeSupervisorState({ sleeping: false });
+    const app = createApp({
+      database,
+      // Tiny TTL so the health flip is visible right after reconcile.
+      config: { snapshotCacheTtlMs: 1 },
+      fetchFn: buildFakeFetch({
+        supervisors: {
+          [ALPHA_SUPERVISOR]: alphaState,
+          [BETA_SUPERVISOR]: fakeSupervisorState(),
+        },
+      }),
+    });
+    const chat = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+      });
+    const reconcile = () =>
+      app.request("/v1/fleets/default/reconcile", { method: "POST" });
+    const waitTtl = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect((await chat()).status).toBe(200);
+
+    // The active's model dies (supervisor reachable, model asleep):
+    // the heartbeat sync fails the slot and chat stops proxying to a
+    // dead server.
+    alphaState.sleeping = true;
+    await reconcile();
+    await waitTtl();
+    const dead = await chat();
+    expect(dead.status).toBe(404);
+    expect((await dead.json()).error.code).toBe("model_not_found");
+    const degraded = await getFleetSnapshot(database, "default");
+    const alphaDomain = degraded?.domains.find((d) => d.slug === "alpha");
+    expect(alphaDomain?.state).toBe("degraded");
+    expect(
+      alphaDomain?.slots
+        .filter((s) => s.kind === "inference")
+        .every((s) => s.state === "failed"),
+    ).toBe(true);
+
+    // The model comes back: the same sync recovers the slot.
+    alphaState.sleeping = false;
+    await reconcile();
+    await waitTtl();
+    expect((await chat()).status).toBe(200);
+  });
+
   it("routes to the new active immediately after a pointer move (cache revalidation)", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const app = chatApp({ chatCalls });

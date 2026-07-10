@@ -77,7 +77,15 @@ export async function fetchJsonWithTimeout(
     if (!response.ok) {
       return { response, body: undefined };
     }
-    return { response, body: (await response.json()) as unknown };
+    // Read as text first: some control endpoints (e.g. vLLM's
+    // sleep/wake admin routes) answer an EMPTY 200 body, which
+    // response.json() would reject. Empty means "no body", not an
+    // error; non-empty non-JSON still throws for the caller to map.
+    const text = await response.text();
+    return {
+      response,
+      body: text === "" ? undefined : (JSON.parse(text) as unknown),
+    };
   } finally {
     clearTimeout(timer);
   }

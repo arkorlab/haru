@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
 import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
-import { transitionDomainSlots } from "./repo/slots.js";
+import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
@@ -119,6 +119,38 @@ describe("slot transitions", () => {
         "sleeping",
       ),
     ).toBe(0);
+  });
+
+  it("transitionSlot moves exactly one slot with a CAS guard", async () => {
+    const servingSlot = alpha().slots.find(
+      (s) => s.kind === "inference" && s.state === "serving",
+    )!;
+    expect(
+      await transitionSlot(
+        database,
+        servingSlot.id,
+        "inference",
+        ["serving"],
+        "failed",
+      ),
+    ).toBe(true);
+    expect(
+      await transitionSlot(
+        database,
+        servingSlot.id,
+        "inference",
+        ["serving"],
+        "failed",
+      ),
+    ).toBe(false);
+    // The sibling slot was untouched by the single-slot CAS.
+    const after = await getFleetSnapshot(database, "default");
+    const alphaSlots = after?.domains
+      .find((d) => d.slug === "alpha")
+      ?.slots.filter((s) => s.kind === "inference");
+    expect(
+      alphaSlots?.map((s) => s.state).toSorted((a, b) => a.localeCompare(b)),
+    ).toEqual(["failed", "serving"]);
   });
 
   it("rejects from-lists that violate the core slot state table", async () => {

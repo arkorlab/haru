@@ -1,5 +1,5 @@
 {
-  "id": "71662a01-a331-4189-b325-da1f00b5e9f2",
+  "id": "4db6e93e-f05d-497a-8e0c-343abc8fc4f2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -411,6 +411,24 @@
           "tableFrom": "operations",
           "tableTo": "fleets",
           "columnsFrom": ["fleet_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "operations_target_domain_id_domains_id_fk": {
+          "name": "operations_target_domain_id_domains_id_fk",
+          "tableFrom": "operations",
+          "tableTo": "domains",
+          "columnsFrom": ["target_domain_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "operations_source_domain_id_domains_id_fk": {
+          "name": "operations_source_domain_id_domains_id_fk",
+          "tableFrom": "operations",
+          "tableTo": "domains",
+          "columnsFrom": ["source_domain_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"

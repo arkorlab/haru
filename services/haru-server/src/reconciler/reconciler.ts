@@ -21,6 +21,7 @@ import {
   toOperationSnapshot,
   transitionDomain,
   transitionDomainSlots,
+  transitionSlot,
 } from "@haru/db";
 import { operationStepSchema } from "@haru/protocol";
 
@@ -34,6 +35,7 @@ import type {
   FleetSnapshot,
   OperationSnapshot,
   OperationStep,
+  SupervisorStatus,
 } from "@haru/protocol";
 
 /** Timeout for one heartbeat status call during a reconcile tick. */
@@ -57,6 +59,53 @@ export interface ReconcileResult {
  * snapshot only then). Patches the in-memory `lastSeenAt` so staleness
  * math stays correct on non-reloading ticks.
  */
+/**
+ * Mirror the ACTIVE domain's per-slot inference health from the
+ * supervisor status. Heartbeats are the only reconciler of slot state
+ * outside operations: without this, a crashed/asleep model keeps its
+ * DB slot "serving" and chat + route intent keep routing to a dead
+ * server. Per-slot CAS on purpose: one dead GPU must not drag its
+ * healthy siblings along. Standbys are exempt (their models sleep by
+ * design), and only the serving <-> failed pair is touched: slots on
+ * a promotion's wake path belong to the operation's executors.
+ */
+async function syncActiveInferenceSlots(
+  dependencies: ReconcilerDependencies,
+  domain: DomainSnapshot,
+  status: SupervisorStatus,
+): Promise<boolean> {
+  let didChangeState = false;
+  for (const slot of domain.slots) {
+    if (slot.kind !== "inference") {
+      continue;
+    }
+    const reported = status.slots.find(
+      (s) => s.kind === "inference" && s.gpuIndex === slot.gpuIndex,
+    );
+    const models = reported?.models ?? [];
+    const isHealthy =
+      models.length > 0 && models.every((m) => m.sleeping === false);
+    if (slot.state === "serving" && !isHealthy) {
+      didChangeState ||= await transitionSlot(
+        dependencies.database,
+        slot.id,
+        "inference",
+        ["serving"],
+        "failed",
+      );
+    } else if (slot.state === "failed" && isHealthy) {
+      didChangeState ||= await transitionSlot(
+        dependencies.database,
+        slot.id,
+        "inference",
+        ["failed"],
+        "serving",
+      );
+    }
+  }
+  return didChangeState;
+}
+
 async function pollOneDomain(
   dependencies: ReconcilerDependencies,
   fleet: FleetSnapshot,
@@ -77,18 +126,22 @@ async function pollOneDomain(
     const status = await supervisorClient.status(options);
     await markDomainSeen(dependencies.database, domain.id, at);
     domain.lastSeenAt = at.toISOString();
+    const didSyncSlots = isActiveDomain
+      ? await syncActiveInferenceSlots(dependencies, domain, status)
+      : false;
     if (domain.state === "provisioning") {
       // Role-aware like the recovery rung below: an ACTIVE domain
       // finishing provisioning with its models down must surface as
       // degraded (and start the escalation clock), not as ready.
       const to = isActiveDomain && !status.ready ? "degraded" : "ready";
-      return await transitionDomain(
+      const didMove = await transitionDomain(
         dependencies.database,
         domain.id,
         ["provisioning"],
         to,
         at,
       );
+      return didMove || didSyncSlots;
     }
     if (domain.state === "failed") {
       // Role-aware rejoin: a failed STANDBY (typically escalated away
@@ -99,15 +152,16 @@ async function pollOneDomain(
       // failover retries to one per grace period.
       const canRejoin = isActiveDomain ? status.ready : true;
       if (!canRejoin) {
-        return false;
+        return didSyncSlots;
       }
-      return await transitionDomain(
+      const didMove = await transitionDomain(
         dependencies.database,
         domain.id,
         ["failed"],
         "degraded",
         at,
       );
+      return didMove || didSyncSlots;
     }
     if (isActiveDomain && domain.state === "ready" && !status.ready) {
       // The active domain's supervisor is reachable but its models
@@ -129,7 +183,7 @@ async function pollOneDomain(
           payload: { ready: status.ready },
         });
       }
-      return didDegrade;
+      return didDegrade || didSyncSlots;
     }
     if (domain.state === "degraded") {
       // Recovery is role-aware: a standby's models sleep by design,
@@ -137,16 +191,17 @@ async function pollOneDomain(
       // domain must actually report ready.
       const hasRecovered = isActiveDomain ? status.ready : true;
       if (hasRecovered) {
-        return await transitionDomain(
+        const didMove = await transitionDomain(
           dependencies.database,
           domain.id,
           ["degraded"],
           "ready",
           at,
         );
+        return didMove || didSyncSlots;
       }
     }
-    return false;
+    return didSyncSlots;
   } catch (error) {
     if (!(error instanceof SupervisorError)) {
       throw error;

@@ -9,6 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import { domains } from "./domains.js";
 import { operationKindEnum, operationStateEnum } from "./enums.js";
 import { fleets } from "./fleets.js";
 
@@ -23,14 +24,16 @@ export const operations = pgTable(
       .references(() => fleets.id),
     kind: operationKindEnum("kind").notNull(),
     state: operationStateEnum("state").notNull().default("pending"),
-    targetDomainId: uuid("target_domain_id").notNull(),
+    targetDomainId: uuid("target_domain_id")
+      .notNull()
+      .references(() => domains.id),
     /**
      * The fleet's active pointer at operation-creation time: the "old
      * active" a promote's post-commit demote steps act on. Null means
      * no active existed (headless promote) and the cleanup steps
      * deliberately no-op instead of guessing a domain.
      */
-    sourceDomainId: uuid("source_domain_id"),
+    sourceDomainId: uuid("source_domain_id").references(() => domains.id),
     /** Current OperationStep while running; null before claim/after finish. */
     currentStep: text("current_step"),
     stepStartedAt: timestamp("step_started_at", { withTimezone: true }),

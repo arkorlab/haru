@@ -23,6 +23,34 @@ function assertFromList(
 }
 
 /**
+ * Guarded single-slot state transition (compare-and-swap). Used by the
+ * reconciler's heartbeat slot-health sync, which moves slots on the
+ * active domain individually (one dead GPU must not drag its healthy
+ * siblings along).
+ */
+export async function transitionSlot(
+  database: HaruDatabase,
+  slotId: string,
+  kind: SlotKind,
+  from: readonly SlotState[],
+  to: SlotState,
+): Promise<boolean> {
+  assertFromList(kind, from, to);
+  const rows = await database
+    .update(slots)
+    .set({ state: to, stateUpdatedAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(slots.id, slotId),
+        eq(slots.kind, kind),
+        inArray(slots.state, [...from]),
+      ),
+    )
+    .returning({ id: slots.id });
+  return rows.length === 1;
+}
+
+/**
  * Guarded bulk transition of every slot of one kind in a domain (e.g.
  * all inference slots sleeping -> waking during promotion). Returns
  * the number of slots that moved; slots outside the `from` set are

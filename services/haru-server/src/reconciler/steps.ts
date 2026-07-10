@@ -413,6 +413,20 @@ async function demoteOldTrain(context: StepContext): Promise<StepOutcome> {
     { role: "source", isNoop: hasNoTrainingSlots },
     async (domain, options) => {
       await supervisorClient.startTraining(options);
+      // Same verification as start_training: the start call returns
+      // before the child proves healthy (a spawn failure drops back to
+      // idle), and nothing later reconciles training slot state, so
+      // only a status poll may mark the DB slots as training. Being
+      // best-effort, a never-starting run resolves via the step budget
+      // (advance + degrade) instead of failing the promotion.
+      const status = await supervisorClient.status(options);
+      const trainingSlots = status.slots.filter((s) => s.kind === "training");
+      const isAllRunning =
+        trainingSlots.length > 0 &&
+        trainingSlots.every((s) => s.training?.state === "running");
+      if (!isAllRunning) {
+        return PENDING;
+      }
       await transitionDomainSlots(
         context.database,
         domain.id,

@@ -30,6 +30,7 @@ const INFERENCE_ALLOWED: ReadonlySet<string> = new Set([
   "probing>sleeping",
   "probing>failed",
   "probing>stopped",
+  "failed>serving",
   "failed>waking",
   "failed>starting",
   "failed>stopped",

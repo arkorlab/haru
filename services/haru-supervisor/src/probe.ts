@@ -47,7 +47,7 @@ export async function probeModel(
         error: `upstream returned ${response.status}`,
       };
     }
-    const completion = body as { choices?: unknown[] };
+    const completion = (body ?? {}) as { choices?: unknown[] };
     const hasChoices =
       Array.isArray(completion.choices) && completion.choices.length > 0;
     if (!hasChoices) {

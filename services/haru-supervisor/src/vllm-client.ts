@@ -75,11 +75,8 @@ export async function isServerSleeping(
   fetchFunction: typeof fetch,
   port: number,
 ): Promise<boolean> {
-  const body = (await adminCall(
-    fetchFunction,
-    port,
-    "GET",
-    "/is_sleeping",
-  )) as { is_sleeping?: unknown };
-  return body.is_sleeping === true;
+  const body = (await adminCall(fetchFunction, port, "GET", "/is_sleeping")) as
+    | { is_sleeping?: unknown }
+    | undefined;
+  return body?.is_sleeping === true;
 }

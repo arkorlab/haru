@@ -2,6 +2,7 @@ import {
   createSkyRunner,
   DEFAULT_SKY_COMMAND_TIMEOUT_MS,
   DEFAULT_SKY_LAUNCH_TIMEOUT_MS,
+  parseStdoutJson,
   SkyCliError,
   writeTemporaryYaml,
 } from "@haru/driver-skypilot/exec";
@@ -70,7 +71,7 @@ export function createSkyserveDriver(
       );
       const parsed = z
         .array(skyServiceStatusSchema)
-        .safeParse(JSON.parse(stdout));
+        .safeParse(parseStdoutJson(stdout, `sky serve status ${serviceName}`));
       if (!parsed.success) {
         throw new SkyCliError(
           `sky serve status ${serviceName}`,
