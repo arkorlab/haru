@@ -287,12 +287,16 @@ describe("full promotion flow", () => {
   });
 
   it("escalates a reachable-but-dead active to failed and auto-fails-over", async () => {
-    await seed({ autoFailover: true, degradedGraceMs: 100 });
+    await seed({ autoFailover: true, degradedGraceMs: 60_000 });
     // Alpha's supervisor answers every call, but its models are down:
     // heartbeat staleness never fires, so only the degraded
     // escalation path can promote away from it.
     alphaSupervisor.sleeping = true;
-    const app = makeApp();
+    // Injected clock: the escalation budget compares stateUpdatedAt
+    // (written with this clock) against now(), so warping the
+    // variable is deterministic under any lane's real latency.
+    let nowMs = Date.now();
+    const app = makeApp(() => new Date(nowMs));
 
     // First tick: active ready + !status.ready -> degraded.
     await reconcileOnce(app);
@@ -306,7 +310,7 @@ describe("full promotion flow", () => {
 
     // Past the grace, the escalation flips alpha to failed and the
     // auto-failover promote fires in the same tick.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    nowMs += 60_001;
     const result = await reconcileUntilSettled(app);
     const operation = result.operation as {
       state: string;
@@ -330,14 +334,15 @@ describe("full promotion flow", () => {
   });
 
   it("defers escalation while another operation holds the in-flight slot", async () => {
-    await seed({ autoFailover: true, degradedGraceMs: 100 });
+    await seed({ autoFailover: true, degradedGraceMs: 60_000 });
     // Active alpha is reachable but its models are down.
     alphaSupervisor.sleeping = true;
     // Beta starts awake so a demote has work to do; making it
     // unreachable right after the request pins the demote in flight.
     betaSupervisor.sleeping = false;
     betaSupervisor.training = "idle";
-    const app = makeApp();
+    let nowMs = Date.now();
+    const app = makeApp(() => new Date(nowMs));
 
     await reconcileOnce(app);
     betaSupervisor.reachable = false;
@@ -351,7 +356,7 @@ describe("full promotion flow", () => {
     // Past the grace, but the demote still holds the one-in-flight
     // slot: the active must NOT be flipped to failed (that would 503
     // its healthy traffic with no failover able to start).
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    nowMs += 60_001;
     const tick = await reconcileOnce(app);
     expect((tick.operation as { kind: string }).kind).toBe("demote");
     const snapshot = await getFleetSnapshot(database, "default");
