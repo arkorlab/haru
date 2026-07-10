@@ -132,6 +132,30 @@ describe("GET /v1/status and /v1/ready", () => {
     expect(ready).toEqual({ ready: true });
   });
 
+  it("reports sleeping=null when /is_sleeping answers an empty or shapeless body", async () => {
+    const emptyBodyFetch: typeof fetch = (input) => {
+      const url = new URL(requestTargetUrl(input));
+      if (url.pathname === "/is_sleeping") {
+        // Proves nothing about the sleep state; must NOT read as
+        // "awake" (that would mark the domain ready unverified).
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+      return Promise.reject(new TypeError(`unrouted ${url.href}`));
+    };
+    const app = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: emptyBodyFetch,
+      spawnFn: noopSpawn,
+    });
+    const status = supervisorStatusSchema.parse(
+      await (await app.request("/v1/status")).json(),
+    );
+    const models = status.slots.find((s) => s.kind === "inference")?.models;
+    expect(models?.every((m) => m.sleeping === null)).toBe(true);
+    expect(status.ready).toBe(false);
+  });
+
   it("reports sleeping=null for an unreachable vLLM server", async () => {
     const failingFetch: typeof fetch = () =>
       Promise.reject(new TypeError("fetch failed"));
@@ -322,6 +346,18 @@ describe("POST /v1/probe", () => {
         r.error?.includes("aborted"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("boot validation", () => {
+  it("throws when training slots are configured without a spawn function", () => {
+    expect(() =>
+      createSupervisorApp({
+        config: loadSupervisorConfig(CONFIG_JSON),
+        token: undefined,
+        fetchFn: fetch,
+      }),
+    ).toThrow(/training slots but no spawn function/);
   });
 });
 

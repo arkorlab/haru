@@ -18,6 +18,7 @@ import type {
   FleetSnapshot,
   OperationStep,
   SlotState,
+  SupervisorStatus,
 } from "@haru/protocol";
 
 /**
@@ -174,6 +175,30 @@ async function withSupervisor(
 const hasNoTrainingSlots = (domain: DomainSnapshot): boolean =>
   domain.slots.every((s) => s.kind !== "training");
 
+/**
+ * Whether EVERY training slot the layout declares on this domain is
+ * reported by the supervisor in the given run state. Matching by
+ * gpuIndex against the layout (not just "every reported slot") stops a
+ * drifted supervisor that omits a slot from vacuously passing, which
+ * would let transitionDomainSlots mark unstarted slots as moved.
+ */
+function isEveryConfiguredTrainingSlot(
+  domain: DomainSnapshot,
+  status: SupervisorStatus,
+  runState: "idle" | "running",
+): boolean {
+  const reportedByGpu = new Map(
+    status.slots
+      .filter((s) => s.kind === "training")
+      .map((s) => [s.gpuIndex, s.training?.state]),
+  );
+  const configured = domain.slots.filter((s) => s.kind === "training");
+  return (
+    configured.length > 0 &&
+    configured.every((s) => reportedByGpu.get(s.gpuIndex) === runState)
+  );
+}
+
 /** Whether any slot of the kind sits in one of the given states, per
  * the tick's snapshot. Skips 0-row mirror UPDATEs on retry nudges. */
 function hasSlotIn(
@@ -209,14 +234,10 @@ async function stopTraining(context: StepContext): Promise<StepOutcome> {
         context.fleet.policy.trainingStopGraceMs,
       );
       const status = await supervisorClient.status(options);
-      const trainingSlots = status.slots.filter((s) => s.kind === "training");
-      // Guard the vacuous case: the fleet layout says this domain HAS
-      // training slots, so a supervisor reporting none is config drift,
-      // not success. Stay pending until the step budget surfaces it.
-      const isAllIdle =
-        trainingSlots.length > 0 &&
-        trainingSlots.every((s) => s.training?.state === "idle");
-      if (!isAllIdle) {
+      // Every training slot the LAYOUT declares must report idle: a
+      // supervisor omitting a slot (config drift) is not proof it
+      // stopped. Stay pending until the step budget surfaces it.
+      if (!isEveryConfiguredTrainingSlot(domain, status, "idle")) {
         return PENDING;
       }
       // Deliberately narrower than the table's full predecessor set of
@@ -420,11 +441,7 @@ async function demoteOldTrain(context: StepContext): Promise<StepOutcome> {
       // best-effort, a never-starting run resolves via the step budget
       // (advance + degrade) instead of failing the promotion.
       const status = await supervisorClient.status(options);
-      const trainingSlots = status.slots.filter((s) => s.kind === "training");
-      const isAllRunning =
-        trainingSlots.length > 0 &&
-        trainingSlots.every((s) => s.training?.state === "running");
-      if (!isAllRunning) {
+      if (!isEveryConfiguredTrainingSlot(domain, status, "running")) {
         return PENDING;
       }
       await transitionDomainSlots(
@@ -440,6 +457,17 @@ async function demoteOldTrain(context: StepContext): Promise<StepOutcome> {
 }
 
 async function sleepVllm(context: StepContext): Promise<StepOutcome> {
+  // TOCTOU guard: /demote validated the target as a standby, but a
+  // promote completing between that validation and this tick can have
+  // made the SAME domain active (the one-in-flight slot was free by
+  // then). Sleeping the live route would take production down; fail
+  // the demote instead.
+  if (context.fleet.activeDomainId === context.operation.targetDomainId) {
+    return failed(
+      "target_is_active",
+      "demote target became the active domain; refusing to sleep it",
+    );
+  }
   return withSupervisor(
     context,
     { role: "target" },
@@ -482,11 +510,7 @@ async function startTraining(context: StepContext): Promise<StepOutcome> {
       // not the 200 on the start call. Same vacuous-truth guard as
       // stop_training: zero reported training slots is config drift.
       const status = await supervisorClient.status(options);
-      const trainingSlots = status.slots.filter((s) => s.kind === "training");
-      const isAllRunning =
-        trainingSlots.length > 0 &&
-        trainingSlots.every((s) => s.training?.state === "running");
-      if (!isAllRunning) {
+      if (!isEveryConfiguredTrainingSlot(domain, status, "running")) {
         return PENDING;
       }
       // Narrower than the table's predecessors of training: a stopping

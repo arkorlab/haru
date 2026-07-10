@@ -1,7 +1,7 @@
 import { assertDomainTransition } from "@haru/core";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, notExists, sql } from "drizzle-orm";
 
-import { domains } from "../schema/index.js";
+import { domains, operations } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 import type { DomainState } from "@haru/protocol";
@@ -36,6 +36,46 @@ export async function transitionDomain(
       updatedAt: sql`now()`,
     })
     .where(and(eq(domains.id, domainId), inArray(domains.state, [...from])))
+    .returning({ id: domains.id });
+  return rows.length === 1;
+}
+
+/**
+ * Escalate a degraded domain to failed ONLY while its fleet has no
+ * in-flight operation, in one statement: a separate read-then-update
+ * would let a promote/demote created in between occupy the
+ * one-in-flight slot right as the active stops routing, with no
+ * failover able to start. A createOperation committing between this
+ * statement's snapshot and its commit can still slip through (that
+ * window is sub-statement and self-heals: the failed trigger fires as
+ * soon as the slot frees), but the multi-statement window is gone.
+ */
+export async function escalateDomainIfFleetIdle(
+  database: HaruDatabase,
+  domainId: string,
+  fleetId: string,
+  at: Date,
+): Promise<boolean> {
+  assertDomainTransition("degraded", "failed");
+  const inflightOperation = database
+    .select({ one: sql`1` })
+    .from(operations)
+    .where(
+      and(
+        eq(operations.fleetId, fleetId),
+        inArray(operations.state, ["pending", "running"]),
+      ),
+    );
+  const rows = await database
+    .update(domains)
+    .set({ state: "failed", stateUpdatedAt: at, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(domains.id, domainId),
+        eq(domains.state, "degraded"),
+        notExists(inflightOperation),
+      ),
+    )
     .returning({ id: domains.id });
   return rows.length === 1;
 }

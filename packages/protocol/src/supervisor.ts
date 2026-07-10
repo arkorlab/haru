@@ -104,9 +104,15 @@ export const vllmTargetRequestSchema = z.object({
 });
 export type VllmTargetRequest = z.infer<typeof vllmTargetRequestSchema>;
 
+/**
+ * Millisecond values feed setTimeout, which clamps delays above
+ * 2^31-1 to ~1ms; an oversized "grace" would SIGKILL immediately.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** POST /v1/training/stop body. */
 export const trainingStopRequestSchema = z.object({
-  graceMs: z.number().int().positive().optional(),
+  graceMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
 });
 export type TrainingStopRequest = z.infer<typeof trainingStopRequestSchema>;
 
@@ -133,7 +139,7 @@ export const probeRequestSchema = z.object({
    * alive past the point the caller stopped waiting for it; omitted
    * means the supervisor's built-in default.
    */
-  timeoutMs: z.number().int().positive().optional(),
+  timeoutMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
 });
 export type ProbeRequest = z.infer<typeof probeRequestSchema>;
 

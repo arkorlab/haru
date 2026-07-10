@@ -78,5 +78,15 @@ export async function isServerSleeping(
   const body = (await adminCall(fetchFunction, port, "GET", "/is_sleeping")) as
     | { is_sleeping?: unknown }
     | undefined;
-  return body?.is_sleeping === true;
+  const sleeping: unknown = body?.is_sleeping;
+  if (typeof sleeping !== "boolean") {
+    // An empty or shape-drifted body proves NOTHING about the sleep
+    // state; reporting "awake" here would let /v1/status mark the
+    // domain ready on unverified servers. Throwing surfaces it as
+    // sleeping: null (unknown) to status callers.
+    throw new VllmAdminError(
+      `vLLM :${port} /is_sleeping returned no boolean is_sleeping field`,
+    );
+  }
+  return sleeping;
 }

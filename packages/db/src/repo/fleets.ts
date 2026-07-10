@@ -34,10 +34,17 @@ export async function switchActive(
       eq(operations.id, requireRunningOperationId),
       eq(operations.state, "running"),
     );
+    // FOR UPDATE locks the operation row inside this statement, which
+    // serializes the routing commit against a concurrent
+    // failOperation UPDATE on the same row: whichever lands first,
+    // the loser re-evaluates and sees the winner's state (a plain
+    // EXISTS would read its own statement snapshot and could commit
+    // routing for an operation a racing timeout just failed).
     const runningOperation = database
       .select({ one: sql`1` })
       .from(operations)
-      .where(operationRunningCondition);
+      .where(operationRunningCondition)
+      .for("update");
     conditions.push(exists(runningOperation));
   }
   const rows = await database

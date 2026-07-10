@@ -2,10 +2,12 @@ import {
   applyFleetLayout,
   claimOperation,
   createOperation,
+  escalateDomainIfFleetIdle,
   failOperation,
   getFleetSnapshot,
   getOperation,
   switchActive,
+  transitionDomain,
   transitionDomainSlots,
 } from "@haru/db";
 import { createTestDatabase } from "@haru/db/testing";
@@ -276,6 +278,77 @@ describe("switch_active under concurrent ticks", () => {
       .find((d) => d.slug === "beta")!
       .slots.filter((s) => s.kind === "inference");
     expect(betaSlots?.every((s) => s.state === "serving")).toBe(true);
+  });
+
+  it("a demote whose target became active refuses to sleep it", async () => {
+    // TOCTOU: /demote validated beta as a standby, then a promote
+    // finished and made beta active before the demote's first nudge.
+    const { operation } = await createOperation(database, {
+      fleetId: staleFleet.id,
+      kind: "demote",
+      targetDomainId: domainId("beta"),
+    });
+    await claimOperation(database, operation.id, "sleep_vllm");
+    await switchActive(
+      database,
+      staleFleet.id,
+      domainId("alpha"),
+      domainId("beta"),
+    );
+    const fresh = await getFleetSnapshot(database, "default");
+    if (!fresh) throw new Error("snapshot vanished");
+
+    const outcome = await executeStep(
+      {
+        database,
+        fetchFn: fetch,
+        now: () => new Date(),
+        fleet: fresh,
+        operation,
+        supervisorToken: undefined,
+      },
+      "sleep_vllm",
+    );
+    expect(outcome.status).toBe("failed");
+    expect(outcome.status === "failed" && outcome.code).toBe(
+      "target_is_active",
+    );
+  });
+
+  it("escalation is refused in the same statement while an operation is in flight", async () => {
+    await transitionDomain(database, domainId("alpha"), ["ready"], "degraded");
+    const { operation } = await createOperation(database, {
+      fleetId: staleFleet.id,
+      kind: "demote",
+      targetDomainId: domainId("beta"),
+    });
+    // The in-flight row makes the guarded CAS a no-op.
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        domainId("alpha"),
+        staleFleet.id,
+        new Date(),
+      ),
+    ).toBe(false);
+    // Once the slot frees, the same CAS lands.
+    await failOperation(database, operation.id, {
+      step: null,
+      code: "test",
+      message: "released",
+    });
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        domainId("alpha"),
+        staleFleet.id,
+        new Date(),
+      ),
+    ).toBe(true);
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "failed",
+    );
   });
 
   it("still fails cas_lost when the pointer moved somewhere else", async () => {

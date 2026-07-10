@@ -12,7 +12,7 @@ import {
 import { fleetLayoutSchema } from "./layout.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
-import { probeRequestSchema } from "./supervisor.js";
+import { probeRequestSchema, trainingStopRequestSchema } from "./supervisor.js";
 import { joinUrl } from "./url.js";
 
 describe("slugSchema", () => {
@@ -223,6 +223,21 @@ describe("probeRequestSchema", () => {
     expect(probeRequestSchema.parse({}).timeoutMs).toBeUndefined();
     expect(probeRequestSchema.parse({ timeoutMs: 1500 }).timeoutMs).toBe(1500);
     expect(() => probeRequestSchema.parse({ timeoutMs: 0 })).toThrow();
+    // setTimeout clamps > 2^31-1 to ~1ms; reject at the schema.
+    expect(() =>
+      probeRequestSchema.parse({ timeoutMs: 2_147_483_648 }),
+    ).toThrow();
+  });
+});
+
+describe("trainingStopRequestSchema", () => {
+  it("bounds graceMs at the setTimeout clamp", () => {
+    expect(trainingStopRequestSchema.parse({ graceMs: 5000 }).graceMs).toBe(
+      5000,
+    );
+    expect(() =>
+      trainingStopRequestSchema.parse({ graceMs: 2_147_483_648 }),
+    ).toThrow();
   });
 });
 

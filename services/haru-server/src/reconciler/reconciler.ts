@@ -17,6 +17,7 @@ import {
   getFleetSnapshot,
   getInFlightOperation,
   getOperation,
+  escalateDomainIfFleetIdle,
   markDomainSeen,
   toOperationSnapshot,
   transitionDomain,
@@ -76,31 +77,45 @@ async function syncActiveInferenceSlots(
 ): Promise<boolean> {
   let didChangeState = false;
   for (const slot of domain.slots) {
-    if (slot.kind !== "inference") {
+    if (slot.kind !== "inference" || slot.spec.kind !== "inference") {
       continue;
     }
     const reported = status.slots.find(
       (s) => s.kind === "inference" && s.gpuIndex === slot.gpuIndex,
     );
-    const models = reported?.models ?? [];
-    const isHealthy =
-      models.length > 0 && models.every((m) => m.sleeping === false);
+    const reportedSleeping = new Map(
+      (reported?.models ?? []).map((m) => [m.name, m.sleeping]),
+    );
+    // Healthy = every model the LAYOUT binds to this slot is reported
+    // awake. A drifted supervisor omitting a configured model proves
+    // nothing about it, so the slot must not stay serving.
+    const isHealthy = slot.spec.models.every(
+      (m) => reportedSleeping.get(m.name) === false,
+    );
     if (slot.state === "serving" && !isHealthy) {
-      didChangeState ||= await transitionSlot(
+      // No ||= shortcuts here: EVERY slot must get its CAS this tick,
+      // not just the first one that changed.
+      const didFail = await transitionSlot(
         dependencies.database,
         slot.id,
         "inference",
         ["serving"],
         "failed",
       );
+      if (didFail) {
+        didChangeState = true;
+      }
     } else if (slot.state === "failed" && isHealthy) {
-      didChangeState ||= await transitionSlot(
+      const didRecover = await transitionSlot(
         dependencies.database,
         slot.id,
         "inference",
         ["failed"],
         "serving",
       );
+      if (didRecover) {
+        didChangeState = true;
+      }
     }
   }
   return didChangeState;
@@ -304,6 +319,11 @@ type StepResolution = StepOutcome | { status: "advance_degrade_source" };
  * markFailedPromotionSlots treat the NEW active as a failed promotion
  * target, and converging to done also runs the post-commit cleanup
  * steps the old active still needs.
+ *
+ * A timed-out demote_old_sleep additionally SKIPS demote_old_train
+ * (the operation completes at the sleep step): sleep was never
+ * proven, so starting training would contend for VRAM with vLLM
+ * servers that may still be awake.
  */
 async function resolveStepTimeout(
   dependencies: ReconcilerDependencies,
@@ -371,7 +391,10 @@ async function applyStepResolution(
     }
     case "done":
     case "advance_degrade_source": {
-      const next = nextStep(operation.kind, step);
+      const isUnprovenSleep =
+        resolution.status === "advance_degrade_source" &&
+        step === "demote_old_sleep";
+      const next = isUnprovenSleep ? null : nextStep(operation.kind, step);
       const advancedRow = await (next === null
         ? completeOperation(dependencies.database, operation.id, step)
         : advanceStep(
@@ -523,11 +546,13 @@ export async function reconcileFleet(
       dependencies.now().getTime(),
     );
     if (escalation) {
-      const didEscalate = await transitionDomain(
+      // Single-statement CAS: the fleet-idle guard rides INSIDE the
+      // update so an operation created after the in-flight check above
+      // cannot be raced into a failed-active-with-blocked-failover.
+      const didEscalate = await escalateDomainIfFleetIdle(
         dependencies.database,
         escalation.domainId,
-        ["degraded"],
-        "failed",
+        fleet.id,
         dependencies.now(),
       );
       if (didEscalate) {

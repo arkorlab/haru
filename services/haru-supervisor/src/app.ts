@@ -69,7 +69,16 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   );
   const trainingSlots = config.slots.filter((slot) => slot.kind === "training");
 
-  // One supervised run per training slot, keyed by GPU index.
+  // One supervised run per training slot, keyed by GPU index. A
+  // config with training slots but no way to spawn them must fail at
+  // boot: otherwise /v1/training/start would 200 while starting
+  // nothing, and the reconciler's start_training step would poll a
+  // forever-idle status until its budget expires.
+  if (trainingSlots.length > 0 && !spawnFunction) {
+    throw new Error(
+      "supervisor config declares training slots but no spawn function was provided",
+    );
+  }
   const trainingRuns = new Map<number, TrainingRun>();
   for (const slot of trainingSlots) {
     if (spawnFunction) {
