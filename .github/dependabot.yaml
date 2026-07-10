@@ -1,0 +1,32 @@
+version: 2
+# Supply-chain hardening: every ecosystem sets `cooldown.default-days: 1`,
+# so Dependabot waits 24h after a release before opening a version-update
+# PR (mirroring pnpm's `minimumReleaseAge: 1440` install gate). That
+# window lets a compromised or yanked release be pulled before we adopt
+# it. Security (CVE) updates are exempt from cooldown by default, so
+# fixes still land immediately.
+updates:
+  # pnpm workspace. Every npm dep in this repo is declared as a
+  # `catalog:` reference and resolved through the catalog in
+  # pnpm-workspace.yaml, so Dependabot's pnpm-catalog support opens
+  # version-update PRs against the catalog from this single root entry;
+  # no per-workspace update blocks needed.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 1
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
+
+  # GitHub Actions (workflows pin actions to commit SHAs; Dependabot
+  # keeps the pins fresh and updates the trailing version comments).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 1

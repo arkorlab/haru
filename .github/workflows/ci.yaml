@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Nothing pushes back to the repo; do not leave credentials
+          # on disk for later steps (zizmor: artipacked).
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          standalone: true
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      # Build BEFORE the drift gate: drizzle-kit loads the schema,
+      # whose runtime imports resolve to workspace dist/ files.
+      - run: pnpm build
+      # Migration drift gate: tests run the committed migrations while
+      # deploys use db:push from the schema files; a schema edit
+      # without a regenerated migration must fail here, not diverge.
+      # drizzle-kit exits 0 even when generate errors (verified), so
+      # the gate also greps its output for failures.
+      - name: Migration drift gate
+        run: |
+          pnpm db:generate 2>&1 | tee /tmp/db-generate.log
+          if grep -qE "MODULE_NOT_FOUND|^Error" /tmp/db-generate.log; then
+            echo "drizzle-kit generate reported an error (it exits 0 on failures)"
+            exit 1
+          fi
+          git diff --exit-code packages/db/drizzle
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+
+  # Integration lane: the same DB-backed suites against a real
+  # Postgres. PGlite (the default lane above) is single-connection and
+  # serializes the Promise.all CAS races; this lane exercises row-lock
+  # waits and predicate re-evaluation under true concurrency.
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HARU_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Nothing pushes back to the repo; do not leave credentials
+          # on disk for later steps (zizmor: artipacked).
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          standalone: true
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec turbo run test --filter=@haru/db --filter=@haru/server

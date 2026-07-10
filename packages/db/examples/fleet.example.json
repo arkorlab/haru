@@ -1,0 +1,110 @@
+{
+  "slug": "default",
+  "displayName": "Example fleet",
+  "activeDomainSlug": "alpha",
+  "policy": {
+    "autoFailover": false
+  },
+  "domains": [
+    {
+      "slug": "alpha",
+      "provider": "static",
+      "placement": {
+        "cloud": "aws",
+        "region": "us-east-1",
+        "accelerator": "EXAMPLE-GPU",
+        "acceleratorCount": 2
+      },
+      "supervisorUrl": "http://127.0.0.1:8701",
+      "servingBaseUrl": "http://127.0.0.1:9001",
+      "slots": [
+        {
+          "kind": "inference",
+          "gpuIndex": 0,
+          "models": [
+            {
+              "name": "example-chat-small",
+              "servingUrl": "http://127.0.0.1:9001"
+            },
+            {
+              "name": "example-chat-medium",
+              "servingUrl": "http://127.0.0.1:9002"
+            }
+          ]
+        },
+        {
+          "kind": "inference",
+          "gpuIndex": 1,
+          "models": [
+            {
+              "name": "example-chat-large",
+              "servingUrl": "http://127.0.0.1:9003"
+            }
+          ]
+        },
+        {
+          "kind": "training",
+          "gpuIndex": 0,
+          "command": ["python", "train_lora.py", "--resume"],
+          "checkpointDir": "/checkpoints/alpha-gpu0"
+        },
+        {
+          "kind": "training",
+          "gpuIndex": 1,
+          "command": ["python", "train_lora.py", "--resume"],
+          "checkpointDir": "/checkpoints/alpha-gpu1"
+        }
+      ]
+    },
+    {
+      "slug": "beta",
+      "provider": "static",
+      "placement": {
+        "cloud": "gcp",
+        "region": "us-central1",
+        "accelerator": "EXAMPLE-GPU",
+        "acceleratorCount": 2
+      },
+      "supervisorUrl": "http://127.0.0.1:8702",
+      "servingBaseUrl": "http://127.0.0.1:9101",
+      "slots": [
+        {
+          "kind": "inference",
+          "gpuIndex": 0,
+          "models": [
+            {
+              "name": "example-chat-small",
+              "servingUrl": "http://127.0.0.1:9101"
+            },
+            {
+              "name": "example-chat-medium",
+              "servingUrl": "http://127.0.0.1:9102"
+            }
+          ]
+        },
+        {
+          "kind": "inference",
+          "gpuIndex": 1,
+          "models": [
+            {
+              "name": "example-chat-large",
+              "servingUrl": "http://127.0.0.1:9103"
+            }
+          ]
+        },
+        {
+          "kind": "training",
+          "gpuIndex": 0,
+          "command": ["python", "train_lora.py", "--resume"],
+          "checkpointDir": "/checkpoints/beta-gpu0"
+        },
+        {
+          "kind": "training",
+          "gpuIndex": 1,
+          "command": ["python", "train_lora.py", "--resume"],
+          "checkpointDir": "/checkpoints/beta-gpu1"
+        }
+      ]
+    }
+  ]
+}

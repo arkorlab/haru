@@ -1,0 +1,41 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "globalDependencies": [
+    "eslint.config.ts",
+    "oxlint.config.ts",
+    "tsconfig.base.json"
+  ],
+  // Turbo 2 strict env mode strips undeclared vars from task
+  // processes; without this entry the test-postgres CI lane would
+  // silently fall back to PGlite. globalEnv (not passThroughEnv) so
+  // the two lanes never share a task cache entry.
+  "globalEnv": ["HARU_TEST_DATABASE_URL"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "dev": {
+      // Workspace packages export dist/ only: a clean checkout must
+      // build deps before tsx watch can resolve them.
+      "dependsOn": ["^build"],
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "test:coverage": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    }
+  }
+}

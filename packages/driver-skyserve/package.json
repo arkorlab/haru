@@ -1,0 +1,36 @@
+{
+  "name": "@haru/driver-skyserve",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SkyServe driver boundary for the haru GPU HAL: service spec to sky serve translation and CLI wrapping",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings . && eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@haru/driver-skypilot": "workspace:*",
+    "@haru/protocol": "workspace:*",
+    "yaml": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.10.0"
+  }
+}
