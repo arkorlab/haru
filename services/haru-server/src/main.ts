@@ -57,6 +57,7 @@ const server = serve(
 
 // Optional background reconcile loop. POST /v1/fleets/:id/reconcile
 // drives the same tick on demand (e.g. from cron or tests).
+let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
   const fleetReferences = (
     environment.HARU_RECONCILE_FLEETS ??
@@ -83,7 +84,7 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
   // pile up concurrent loops issuing duplicate GPU work - the DB CAS
   // dedupes state transitions but not the supervisor calls themselves.
   let isTickRunning = false;
-  const reconcileTimer = setInterval(() => {
+  reconcileTimer = setInterval(() => {
     if (isTickRunning) {
       return;
     }
@@ -102,20 +103,27 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
       }
     })();
   }, environment.HARU_RECONCILE_INTERVAL_MS);
-  // Installing a SIGTERM handler suppresses Node's default
-  // terminate-on-signal, so the handler must complete the shutdown
-  // itself: stop scheduling ticks, stop accepting requests, and exit
-  // once the listener closed (an in-flight tick's writes are
-  // re-entrant CASes and safe to abandon).
-  process.on("SIGTERM", () => {
-    clearInterval(reconcileTimer);
-    // Closing the listener lets the process exit naturally once the
-    // event loop drains (no process.exit: in-flight work finishes).
-    // Node >= 19 also closes idle keep-alive connections on close().
-    server.close();
-    // Same policy for the chat dispatcher's upstream sockets:
-    // Agent.close() lets in-flight chat streams finish, then tears
-    // down keep-alive connections instead of leaving them to idle out.
-    void chatFetch.close();
-  });
 }
+
+// Installing a SIGTERM handler suppresses Node's default
+// terminate-on-signal, so the handler must complete the shutdown
+// itself: stop scheduling ticks, stop accepting requests, and exit
+// once the listener closed. Registered in BOTH modes (with and
+// without the reconcile loop): running without the loop is a valid
+// production configuration, and a deploy there must also let
+// in-flight work finish instead of hard-killing active chat streams.
+process.on("SIGTERM", () => {
+  if (reconcileTimer !== undefined) {
+    // An in-flight tick's writes are re-entrant CASes, safe to
+    // abandon; only new ticks must stop.
+    clearInterval(reconcileTimer);
+  }
+  // Closing the listener lets the process exit naturally once the
+  // event loop drains (no process.exit: in-flight work finishes).
+  // Node >= 19 also closes idle keep-alive connections on close().
+  server.close();
+  // Same policy for the chat dispatcher's upstream sockets:
+  // Agent.close() lets in-flight chat streams finish, then tears
+  // down keep-alive connections instead of leaving them to idle out.
+  void chatFetch.close();
+});
