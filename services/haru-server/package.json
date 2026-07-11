@@ -22,6 +22,7 @@
     "@haru/protocol": "workspace:*",
     "@hono/node-server": "catalog:",
     "hono": "catalog:",
+    "undici": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

@@ -12,20 +12,6 @@
 
 ## 先送り (レビュー後のバックログ)
 
-### chat の TTFB 上限は undici の headersTimeout で暗黙に頭打ちになる
-
-- 場所: `services/haru-server/src/chat-proxy.ts` (`fetchWithTimeout`
-  経由)。README の `HARU_CHAT_HEADER_TIMEOUT_MS` 行にも注記あり。
-- 現状: Node 組み込み fetch (undici) は独自の 300 秒 headersTimeout を
-  持つ。それを超える TTFB 設定は 300 秒時点で TypeError ("fetch
-  failed") となり、proxy は 504 ではなく 502 `upstream_unreachable`
-  にマップしてしまう。
-- 先送りの理由: 超えるにはカスタム undici dispatcher (依存追加) が
-  必要。300 秒未満の設定 (デフォルト 30 秒) には影響なし。
-- 意図する修正: 本当に >300 秒が必要になったら、chat proxy の fetch に
-  `headersTimeout: 0` の dispatcher を注入し、undici の
-  HeadersTimeoutError を明示的にマップする。
-
 ### defaultExec は spawn 失敗と timeout kill を exit 1 に潰す
 
 - 場所: `packages/protocol/src/exec.ts`。
