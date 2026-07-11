@@ -6,9 +6,9 @@ import {
   type OperationSnapshot,
   type OperationStep,
 } from "@haru/protocol";
-import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
 
-import { fleets, operations, slots } from "../schema/index.js";
+import { domains, fleets, operations, slots } from "../schema/index.js";
 
 import { FAILED_PROMOTION_SLOT_STATES } from "./slots.js";
 
@@ -315,6 +315,19 @@ export async function failOperationWithPromotionCleanup(
         eq(fleets.activeDomainId, failedOperation.targetDomainId),
       ),
     );
+  // The pointer guard above is scoped to the operation's OWN fleet, so
+  // a stale/malformed row whose target belongs to another fleet would
+  // pass it vacuously and fail THAT fleet's slots; require the target
+  // to belong to the operation's fleet before any slot is touched.
+  const targetBelongsToFleet = database
+    .select({ one: sql`1` })
+    .from(domains)
+    .where(
+      and(
+        eq(domains.id, failedOperation.targetDomainId),
+        eq(domains.fleetId, failedOperation.fleetId),
+      ),
+    );
   const cleanupQuery = database
     .update(slots)
     .set({
@@ -329,6 +342,7 @@ export async function failOperationWithPromotionCleanup(
         eq(slots.domainId, failedOperation.targetDomainId),
         eq(slots.kind, "inference"),
         inArray(slots.state, [...FAILED_PROMOTION_SLOT_STATES]),
+        exists(targetBelongsToFleet),
         notExists(pointerAtFailedTarget),
       ),
     )

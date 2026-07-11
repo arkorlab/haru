@@ -1,3 +1,4 @@
+import { fleetLayoutSchema } from "@haru/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
@@ -461,6 +462,39 @@ describe("failOperationWithPromotionCleanup", () => {
     );
     expect(failedRow?.state).toBe("failed");
     expect(await betaInferenceStates()).toEqual(["serving", "serving"]);
+  });
+
+  it("never cleans another fleet's slots (cross-fleet target guard)", async () => {
+    await wakeBetaSlots();
+    // A stale/malformed operation in ANOTHER fleet pointing at
+    // default's beta: the pointer guard is scoped to the operation's
+    // own fleet and would pass vacuously, so the ownership guard must
+    // keep beta's slots untouched.
+    await applyFleetLayout(database, {
+      ...fleetLayoutSchema.parse(loadExampleFleetLayout()),
+      slug: "other",
+    });
+    const other = await getFleetSnapshot(database, "other");
+    if (!other) throw new Error("second fleet seed failed");
+    const {
+      createOperation,
+      claimOperation,
+      failOperationWithPromotionCleanup,
+    } = await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: other.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "probe");
+    const failedRow = await failOperationWithPromotionCleanup(
+      database,
+      operation.id,
+      { step: "probe", code: "probe_failed", message: "cross-fleet" },
+      "probe",
+    );
+    expect(failedRow?.state).toBe("failed");
+    expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
   });
 
   it("never cleans slots for a failed demote", async () => {

@@ -235,7 +235,11 @@ async function pollOneDomain(
     // the models the supervisor's own config knows about, so a
     // drifted config omitting a layout-bound model would keep the
     // domain "ready" (never starting the escalation clock) while
-    // requests for that model 404.
+    // requests for that model 404. The vacuous FALSE for an active
+    // with zero inference bindings is deliberate: such a domain
+    // cannot serve anything and must never read as ready (every
+    // validated path - layout, promote, failover - already refuses to
+    // make one active, so this only surfaces manual state surgery).
     const isActiveReady =
       status.ready && isEveryConfiguredInferenceModel(domain, status, false);
     if (domain.state === "provisioning") {
