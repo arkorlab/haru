@@ -92,6 +92,7 @@ function statusFetch(
   alphaReported: ReportedModels,
   betaReported: ReportedModels = new Map([["example-chat-small", true]]),
   betaTraining?: ReportedTraining,
+  isAlphaReadyOverride?: boolean,
 ): typeof fetch {
   return (input) => {
     const url = new URL(requestTargetUrl(input));
@@ -135,7 +136,13 @@ function statusFetch(
     });
     const isAllAwake = alphaReported.values().every((s) => s === false);
     return Promise.resolve(
-      Response.json({ slots, ready: alphaReported.size === 2 && isAllAwake }),
+      Response.json({
+        slots,
+        // Overridable: a drifted supervisor computes ready over ITS
+        // configured models and can claim true while omitting a
+        // layout-bound one.
+        ready: isAlphaReadyOverride ?? (alphaReported.size === 2 && isAllAwake),
+      }),
     );
   };
 }
@@ -160,11 +167,17 @@ async function reconcileWith(
   reported: ReportedModels,
   betaReported?: ReportedModels,
   betaTraining?: ReportedTraining,
+  isAlphaReadyOverride?: boolean,
 ): Promise<void> {
   await reconcileFleet(
     {
       database,
-      fetchFn: statusFetch(reported, betaReported, betaTraining),
+      fetchFn: statusFetch(
+        reported,
+        betaReported,
+        betaTraining,
+        isAlphaReadyOverride,
+      ),
       now: () => new Date(),
       supervisorToken: undefined,
     },
@@ -183,6 +196,11 @@ async function standbyStates(): Promise<string[]> {
   return (beta?.slots ?? [])
     .filter((s) => s.kind === "inference")
     .map((s) => s.state);
+}
+
+async function activeDomainState(): Promise<string | undefined> {
+  const snapshot = await getFleetSnapshot(database, "default");
+  return snapshot?.domains.find((d) => d.slug === "alpha")?.state;
 }
 
 async function standbyTrainingState(): Promise<string | undefined> {
@@ -292,6 +310,26 @@ describe("active slot-health sync", () => {
       pids: [],
     });
     expect(await standbyTrainingState()).toBe("idle");
+  });
+
+  it("degrades a 'ready' active whose supervisor omits a layout-bound model", async () => {
+    // The drifted supervisor computes ready over its OWN configured
+    // models and claims true while omitting gpu1's layout-bound
+    // model; the domain must still degrade (starting the escalation
+    // clock) because requests for that model 404.
+    const reported: ReportedModels = new Map([["example-chat-small", false]]);
+    await reconcileWith(reported, undefined, undefined, true);
+    expect(await activeDomainState()).toBe("degraded");
+
+    // The omitted model comes back: full recovery.
+    await reconcileWith(new Map(HEALTHY_ALPHA));
+    expect(await activeDomainState()).toBe("ready");
+    expect(await inferenceStates()).toEqual(
+      new Map([
+        [0, "serving"],
+        [1, "serving"],
+      ]),
+    );
   });
 
   it("treats a configured model the supervisor omits as unhealthy", async () => {

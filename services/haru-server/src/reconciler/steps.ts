@@ -165,14 +165,23 @@ async function withSupervisor(
       ? failed("no_supervisor", `domain ${domain.slug} has no supervisor URL`)
       : DONE;
   }
+  const perCallTimeoutMs = config.timeoutMs ?? STEP_CALL_TIMEOUT_MS;
+  const stepDeadlineMs = context.now().getTime() + context.stepRemainingMs;
   const options: SupervisorClientOptions = {
     fetchFn: context.fetchFn,
     baseUrl: domain.supervisorUrl,
     token: context.supervisorToken,
-    timeoutMs: Math.min(
-      config.timeoutMs ?? STEP_CALL_TIMEOUT_MS,
-      context.stepRemainingMs,
-    ),
+    // A getter, so the budget is re-evaluated at EVERY supervisor
+    // call: multi-call executors (action + status poll) must fit ALL
+    // their calls inside the step's remaining budget together, not
+    // each call separately (which would let a step run for nearly
+    // twice its documented bound).
+    get timeoutMs() {
+      return Math.max(
+        1,
+        Math.min(perCallTimeoutMs, stepDeadlineMs - context.now().getTime()),
+      );
+    },
   };
   try {
     return await body(domain, options);
@@ -200,9 +209,12 @@ const hasNoInferenceSlots = (domain: DomainSnapshot): boolean =>
  * reported by the supervisor with the given sleeping flag. Matching
  * the LAYOUT's bindings (not just the reported subset) stops a
  * drifted supervisor that omits a model from vacuously passing a
- * wake or sleep check.
+ * wake or sleep check. Also the reconciler's definition of "the
+ * active domain serves everything the fleet routes to it": the
+ * supervisor's own `ready` flag only covers the models IT knows
+ * about.
  */
-function isEveryConfiguredInferenceModel(
+export function isEveryConfiguredInferenceModel(
   domain: DomainSnapshot,
   status: SupervisorStatus,
   isSleeping: boolean,

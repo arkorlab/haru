@@ -12,8 +12,7 @@ import {
   claimOperation,
   completeOperation,
   createOperation,
-  failOperation,
-  failPromotionTargetSlots,
+  failOperationWithPromotionCleanup,
   getFleetRoutePointer,
   getFleetSnapshot,
   getInFlightOperation,
@@ -28,7 +27,12 @@ import { operationStepSchema } from "@haru/protocol";
 
 import { SupervisorError, supervisorClient } from "../supervisor-client.js";
 
-import { executeStep, resolveSourceDomain, type StepOutcome } from "./steps.js";
+import {
+  executeStep,
+  isEveryConfiguredInferenceModel,
+  resolveSourceDomain,
+  type StepOutcome,
+} from "./steps.js";
 
 import type { HaruDatabase, OperationRow } from "@haru/db";
 import type {
@@ -226,11 +230,19 @@ async function pollOneDomain(
       status,
       isActiveDomain,
     );
+    // The active domain's readiness is judged against the LAYOUT, not
+    // just the supervisor's aggregate flag: `status.ready` only covers
+    // the models the supervisor's own config knows about, so a
+    // drifted config omitting a layout-bound model would keep the
+    // domain "ready" (never starting the escalation clock) while
+    // requests for that model 404.
+    const isActiveReady =
+      status.ready && isEveryConfiguredInferenceModel(domain, status, false);
     if (domain.state === "provisioning") {
       // Role-aware like the recovery rung below: an ACTIVE domain
       // finishing provisioning with its models down must surface as
       // degraded (and start the escalation clock), not as ready.
-      const to = isActiveDomain && !status.ready ? "degraded" : "ready";
+      const to = isActiveDomain && !isActiveReady ? "degraded" : "ready";
       const didMove = await transitionDomain(
         dependencies.database,
         domain.id,
@@ -247,7 +259,7 @@ async function pollOneDomain(
       // still the ACTIVE pointer must also report ready, otherwise the
       // rejoin would reset the escalation clock every tick and throttle
       // failover retries to one per grace period.
-      const canRejoin = isActiveDomain ? status.ready : true;
+      const canRejoin = isActiveDomain ? isActiveReady : true;
       if (!canRejoin) {
         return didSyncSlots;
       }
@@ -260,7 +272,7 @@ async function pollOneDomain(
       );
       return didMove || didSyncSlots;
     }
-    if (isActiveDomain && domain.state === "ready" && !status.ready) {
+    if (isActiveDomain && domain.state === "ready" && !isActiveReady) {
       // The active domain's supervisor is reachable but its models
       // are not serving (crashed/asleep): reflect that in the domain
       // state so route-intent consumers can react, and start the
@@ -285,8 +297,8 @@ async function pollOneDomain(
     if (domain.state === "degraded") {
       // Recovery is role-aware: a standby's models sleep by design,
       // so its supervisor being reachable is recovery; the active
-      // domain must actually report ready.
-      const hasRecovered = isActiveDomain ? status.ready : true;
+      // domain must actually serve every layout-bound model.
+      const hasRecovered = isActiveDomain ? isActiveReady : true;
       if (hasRecovered) {
         const didMove = await transitionDomain(
           dependencies.database,
@@ -346,34 +358,6 @@ async function pollHeartbeats(
   return {
     stateChanged: settled.some((r) => r.status === "fulfilled" && r.value),
   };
-}
-
-/**
- * Mark a failed promotion's target inference slots failed so a later
- * promote starts from a clean state. "serving" is included because the
- * probe step advances slots to serving BEFORE switch_active commits
- * routing: a promote failing at switch_active leaves an awake but
- * non-active domain, and its recorded state must demand a fresh
- * wake+probe cycle before it is trusted again. Demotes are excluded:
- * their target's serving slots reflect a sleep that genuinely did not
- * happen.
- *
- * Both safety checks (routing pointer not at the target; no newer
- * in-flight operation racing this cleanup) ride INSIDE the repo's
- * single UPDATE statement - see failPromotionTargetSlots.
- */
-async function markFailedPromotionSlots(
-  database: HaruDatabase,
-  operation: OperationRow,
-): Promise<void> {
-  if (operation.kind !== "promote") {
-    return;
-  }
-  await failPromotionTargetSlots(
-    database,
-    operation.fleetId,
-    operation.targetDomainId,
-  );
 }
 
 /**
@@ -445,7 +429,12 @@ async function applyStepResolution(
       return operation;
     }
     case "failed": {
-      const failedRow = await failOperation(
+      // ONE statement fails the operation AND (for promotes whose
+      // routing never committed) marks the target's wake-path slots
+      // failed, so a retry promote can only ever observe the cleaned
+      // states - a separate cleanup after the fail released the
+      // one-in-flight slot could clobber the retry's own slots.
+      const failedRow = await failOperationWithPromotionCleanup(
         dependencies.database,
         operation.id,
         { step, code: resolution.code, message: resolution.message },
@@ -461,7 +450,6 @@ async function applyStepResolution(
       if (!failedRow) {
         return null;
       }
-      await markFailedPromotionSlots(dependencies.database, operation);
       await appendEvent(dependencies.database, {
         fleetId: fleet.id,
         operationId: operation.id,
@@ -632,14 +620,17 @@ export async function reconcileFleet(
       dependencies.now().getTime(),
     );
     if (escalation) {
-      // Single-statement CAS: the fleet-idle guard rides INSIDE the
-      // update so an operation created after the in-flight check above
-      // cannot be raced into a failed-active-with-blocked-failover.
+      // Single-statement CAS: the fleet-idle, pointer and
+      // viable-standby guards all ride INSIDE the update, so neither
+      // an operation created after the in-flight check above nor a
+      // concurrent heartbeat failing the last viable standby's slot
+      // can race the active into failed-with-no-failover.
       const didEscalate = await escalateDomainIfFleetIdle(
         dependencies.database,
         escalation.domainId,
         fleet.id,
         dependencies.now(),
+        fleet.policy.heartbeatStaleMs,
       );
       if (didEscalate) {
         await appendEvent(dependencies.database, {

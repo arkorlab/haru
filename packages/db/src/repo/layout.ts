@@ -3,7 +3,7 @@ import {
   type FleetLayout,
   type SlotState,
 } from "@haru/protocol";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, exists, isNull, ne, notExists, sql } from "drizzle-orm";
 
 import { domains, fleets, slots } from "../schema/index.js";
 
@@ -132,13 +132,49 @@ export async function applyFleetLayout(
       (d) => d.slug === layout.activeDomainSlug,
     );
     if (active) {
+      // The pointer is only initialised when the domain's PERSISTED
+      // inference slots are already in the active posture (all
+      // serving). On a first apply the slots were just seeded serving,
+      // so this passes; on a re-apply of a previously HEADLESS fleet
+      // the existing rows are sleeping (ON CONFLICT DO NOTHING left
+      // them untouched), and pointing routing at a sleeping domain
+      // would make the fleet unroutable while promote reports
+      // already_active. Such a fleet stays headless: activate it via
+      // the normal promotion flow instead.
+      const servingSlot = database
+        .select({ one: sql`1` })
+        .from(slots)
+        .where(
+          and(
+            eq(slots.domainId, active.id),
+            eq(slots.kind, "inference"),
+            eq(slots.state, "serving"),
+          ),
+        );
+      const nonServingSlot = database
+        .select({ one: sql`1` })
+        .from(slots)
+        .where(
+          and(
+            eq(slots.domainId, active.id),
+            eq(slots.kind, "inference"),
+            ne(slots.state, "serving"),
+          ),
+        );
       await database
         .update(fleets)
         .set({
           activeDomainId: active.id,
           routeRevision: sql`${fleets.routeRevision} + 1`,
         })
-        .where(and(eq(fleets.id, fleetRow.id), isNull(fleets.activeDomainId)));
+        .where(
+          and(
+            eq(fleets.id, fleetRow.id),
+            isNull(fleets.activeDomainId),
+            exists(servingSlot),
+            notExists(nonServingSlot),
+          ),
+        );
     }
   }
 

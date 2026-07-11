@@ -1,14 +1,9 @@
-import { fleetLayoutSchema } from "@haru/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
 import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
-import {
-  failPromotionTargetSlots,
-  transitionDomainSlots,
-  transitionSlot,
-} from "./repo/slots.js";
+import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
@@ -187,6 +182,9 @@ describe("transitionDomain", () => {
   it("escalateDomainIfFleetIdle refuses once the pointer moved off the domain", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
     await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    // Beta is otherwise a viable standby, so the POINTER guard is
+    // what must refuse here.
+    await markDomainSeen(database, beta().id, new Date());
     // A promotion committed between the stale tick's decision and its
     // escalation UPDATE: alpha is a standby now and must stay
     // degraded (failing it would strip a failback target).
@@ -197,12 +195,65 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
+        30_000,
       ),
     ).toBe(false);
     const after = await getFleetSnapshot(database, "default");
     expect(after?.domains.find((d) => d.slug === "alpha")?.state).toBe(
       "degraded",
     );
+  });
+
+  it("escalateDomainIfFleetIdle requires a viable standby in the same statement", async () => {
+    const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
+    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    // Beta has never heartbeated: no viable standby, no escalation
+    // (failing the active would drop its remaining healthy models
+    // with nobody able to take over).
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        new Date(),
+        30_000,
+      ),
+    ).toBe(false);
+    await markDomainSeen(database, beta().id, new Date());
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        new Date(),
+        30_000,
+      ),
+    ).toBe(true);
+  });
+
+  it("escalateDomainIfFleetIdle refuses when the standby has a failed inference slot", async () => {
+    const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
+    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    await markDomainSeen(database, beta().id, new Date());
+    // A concurrent heartbeat failed the standby's slot between the
+    // in-memory viability decision and this UPDATE: waking it would
+    // stall, so the escalation must not fire.
+    await transitionDomainSlots(
+      database,
+      beta().id,
+      "inference",
+      ["sleeping"],
+      "failed",
+    );
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        new Date(),
+        30_000,
+      ),
+    ).toBe(false);
   });
 
   it("markDomainSeen records the heartbeat", async () => {
@@ -313,7 +364,7 @@ describe("slot transitions", () => {
   });
 });
 
-describe("failPromotionTargetSlots", () => {
+describe("failOperationWithPromotionCleanup", () => {
   // Simulate a promotion that already drove beta's inference slots
   // onto the wake path before failing.
   const wakeBetaSlots = () =>
@@ -333,45 +384,53 @@ describe("failPromotionTargetSlots", () => {
       .map((s) => s.state);
   };
 
-  it("fails the wake-path slots when the fleet is idle", async () => {
-    await wakeBetaSlots();
-    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
-      2,
-    );
-    expect(await betaInferenceStates()).toEqual(["failed", "failed"]);
-  });
-
-  it("no-ops while another operation is in flight (immediate retry owns the slots)", async () => {
-    await wakeBetaSlots();
-    const { createOperation } = await import("./repo/operations.js");
-    await createOperation(database, {
+  const promoteToBeta = async () => {
+    const { createOperation, claimOperation } =
+      await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
       fleetId: fleet.id,
       kind: "promote",
       targetDomainId: beta().id,
     });
-    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
-      0,
-    );
-    expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
-  });
+    await claimOperation(database, operation.id, "probe");
+    return operation;
+  };
 
-  it("never touches slots when the target belongs to a different fleet", async () => {
+  it("fails the operation AND its wake-path slots in one statement", async () => {
     await wakeBetaSlots();
-    await applyFleetLayout(database, {
-      ...fleetLayoutSchema.parse(loadExampleFleetLayout()),
-      slug: "other",
-    });
-    const other = await getFleetSnapshot(database, "other");
-    if (!other) throw new Error("second fleet seed failed");
-    // A mismatched (fleetId, targetDomainId) pair must not let the
-    // fleet-scoped guards pass vacuously and fail default's slots.
-    expect(await failPromotionTargetSlots(database, other.id, beta().id)).toBe(
-      0,
+    const operation = await promoteToBeta();
+    const { failOperationWithPromotionCleanup } =
+      await import("./repo/operations.js");
+    const failedRow = await failOperationWithPromotionCleanup(
+      database,
+      operation.id,
+      { step: "probe", code: "probe_failed", message: "boom" },
+      "probe",
     );
+    expect(failedRow?.state).toBe("failed");
+    expect(await betaInferenceStates()).toEqual(["failed", "failed"]);
+  });
+
+  it("cleans no slots when the fail CAS loses", async () => {
+    await wakeBetaSlots();
+    const operation = await promoteToBeta();
+    const { failOperationWithPromotionCleanup } =
+      await import("./repo/operations.js");
+    // Guarded on a step the operation is not at: the fail matches
+    // zero rows, so the slot CTE (driven by the failed row) must
+    // clean nothing either.
+    expect(
+      await failOperationWithPromotionCleanup(
+        database,
+        operation.id,
+        { step: "wake_vllm", code: "step_timeout", message: "stale" },
+        "wake_vllm",
+      ),
+    ).toBeNull();
     expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
   });
 
-  it("no-ops once the routing pointer committed to the target", async () => {
+  it("keeps slots serving when the routing pointer committed to the target", async () => {
     await wakeBetaSlots();
     await transitionDomainSlots(
       database,
@@ -387,11 +446,45 @@ describe("failPromotionTargetSlots", () => {
       ["probing"],
       "serving",
     );
+    const operation = await promoteToBeta();
     await switchActive(database, fleet.id, alpha().id, beta().id);
-    // The target IS live traffic now: nothing may be failed.
-    expect(await failPromotionTargetSlots(database, fleet.id, beta().id)).toBe(
-      0,
+    const { failOperationWithPromotionCleanup } =
+      await import("./repo/operations.js");
+    // The operation itself may fail (no target_not_routed guard for a
+    // non-switch_active step), but the target IS live traffic now:
+    // nothing may be marked failed.
+    const failedRow = await failOperationWithPromotionCleanup(
+      database,
+      operation.id,
+      { step: "probe", code: "probe_failed", message: "late" },
+      "probe",
     );
+    expect(failedRow?.state).toBe("failed");
     expect(await betaInferenceStates()).toEqual(["serving", "serving"]);
+  });
+
+  it("never cleans slots for a failed demote", async () => {
+    const {
+      createOperation,
+      claimOperation,
+      failOperationWithPromotionCleanup,
+    } = await import("./repo/operations.js");
+    // A demote target's serving-path slots reflect a sleep that
+    // genuinely did not happen; simulate alpha (serving) as target.
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "demote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "sleep_vllm");
+    await wakeBetaSlots();
+    const failedRow = await failOperationWithPromotionCleanup(
+      database,
+      operation.id,
+      { step: "sleep_vllm", code: "step_timeout", message: "wedged" },
+      "sleep_vllm",
+    );
+    expect(failedRow?.state).toBe("failed");
+    expect(await betaInferenceStates()).toEqual(["waking", "waking"]);
   });
 });

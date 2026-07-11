@@ -340,5 +340,16 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     });
   });
 
-  return app;
+  // Shutdown hook for main's SIGTERM handler: trainers run as their
+  // own detached process groups, so a run left unstopped would
+  // survive a supervisor restart, keep holding GPU VRAM, and the
+  // restarted supervisor (fresh in-memory state) could start a second
+  // run beside it.
+  const stopAllTraining = (graceMs: number): void => {
+    for (const run of trainingRuns.values()) {
+      run.stop(graceMs);
+    }
+  };
+
+  return { app, stopAllTraining };
 }

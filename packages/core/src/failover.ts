@@ -39,6 +39,11 @@ export function hasInferenceBindings(domain: DomainSnapshot): boolean {
  * lastSeenAt still records the last SUCCESS - the freshness check
  * alone would keep treating that just-unreachable supervisor as
  * viable for a whole heartbeatStaleMs window.
+ *
+ * MIRRORED IN SQL: the escalation CAS re-checks this predicate inside
+ * its UPDATE statement (escalateDomainIfFleetIdle in @haru/db) so a
+ * concurrent heartbeat cannot strip the standby between the in-memory
+ * decision and the escalation. Keep the two in sync.
  */
 function isViableFailoverTarget(
   domain: DomainSnapshot,

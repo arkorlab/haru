@@ -6,6 +6,7 @@ import {
   failOperation,
   getFleetSnapshot,
   getOperation,
+  markDomainSeen,
   switchActive,
   transitionDomain,
   transitionDomainSlots,
@@ -37,6 +38,9 @@ const THREE_DOMAIN_LAYOUT = {
       region: "us-east-1",
       accelerator: "TEST-GPU",
     },
+    // Present so viability-gated paths (the escalation CAS) can see a
+    // drivable standby; every fetch in this file still rejects.
+    supervisorUrl: `https://${slug}-supervisor.test`,
     servingBaseUrl: `https://${slug}-serving.test`,
     slots: [
       {
@@ -344,6 +348,9 @@ describe("switch_active under concurrent ticks", () => {
 
   it("escalation is refused in the same statement while an operation is in flight", async () => {
     await transitionDomain(database, domainId("alpha"), ["ready"], "degraded");
+    // Beta is otherwise a viable failover target, so the in-flight
+    // guard is what must refuse here.
+    await markDomainSeen(database, domainId("beta"), new Date());
     const { operation } = await createOperation(database, {
       fleetId: staleFleet.id,
       kind: "demote",
@@ -356,6 +363,7 @@ describe("switch_active under concurrent ticks", () => {
         domainId("alpha"),
         staleFleet.id,
         new Date(),
+        30_000,
       ),
     ).toBe(false);
     // Once the slot frees, the same CAS lands.
@@ -370,6 +378,7 @@ describe("switch_active under concurrent ticks", () => {
         domainId("alpha"),
         staleFleet.id,
         new Date(),
+        30_000,
       ),
     ).toBe(true);
     const after = await getFleetSnapshot(database, "default");
