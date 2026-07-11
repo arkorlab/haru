@@ -13,22 +13,6 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 ## Deferred (post-review backlog)
 
-### Chat TTFB bound is silently capped by undici's headersTimeout
-
-- Where: `services/haru-server/src/chat-proxy.ts` via
-  `fetchWithTimeout`; documented at the `HARU_CHAT_HEADER_TIMEOUT_MS`
-  row in the README.
-- Current: Node's built-in fetch (undici) enforces its own 300s
-  headersTimeout. A configured TTFB bound above that dies at 300s with
-  a TypeError ("fetch failed"), which the proxy maps to 502
-  `upstream_unreachable` instead of 504.
-- Why deferred: exceeding it needs a custom undici dispatcher (an
-  extra dependency surface); sub-300s configs (the default is 30s) are
-  unaffected.
-- Intended fix: when a >300s bound is a real need, inject a dispatcher
-  with `headersTimeout: 0` into the chat proxy's fetch and map undici's
-  HeadersTimeoutError explicitly.
-
 ### defaultExec collapses spawn failures and timeout kills into exit 1
 
 - Where: `packages/protocol/src/exec.ts`.

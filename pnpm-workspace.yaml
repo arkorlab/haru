@@ -41,6 +41,10 @@ catalog:
   turbo: "^2.10.4"
   typescript: "^7.0.2"
   typescript-eslint: "^8.63.0"
+  # Dedicated dispatcher for the chat proxy: Node's bundled fetch
+  # enforces a fixed 300s headersTimeout that silently capped
+  # HARU_CHAT_HEADER_TIMEOUT_MS (see haru-server/src/chat-fetch.ts).
+  undici: "^8.7.0"
   vitest: "^4.1.10"
   yaml: "^2.9.0"
   zod: "^4.4.3"
