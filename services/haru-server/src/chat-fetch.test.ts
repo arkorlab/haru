@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createChatFetch } from "./chat-fetch.js";
 
+import type { ChatFetch, ChatFetchOptions } from "./chat-fetch.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 /**
@@ -33,8 +34,20 @@ async function listen(
   return `http://127.0.0.1:${address.port}`;
 }
 
+const chatFetches: ChatFetch[] = [];
+
+/** createChatFetch, tracked so afterEach closes its Agent (also
+ * exercising the graceful-close half of the module's contract). */
+function trackedChatFetch(options?: ChatFetchOptions): typeof fetch {
+  const created = createChatFetch(options);
+  chatFetches.push(created);
+  return created.fetch;
+}
+
 afterEach(async () => {
-  const closing = servers.map(
+  const closingAgents = chatFetches.map((chatFetch) => chatFetch.close());
+  chatFetches.length = 0;
+  const closingServers = servers.map(
     (server) =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -44,7 +57,7 @@ afterEach(async () => {
       }),
   );
   servers.length = 0;
-  await Promise.all(closing);
+  await Promise.all([...closingAgents, ...closingServers]);
 });
 
 /** Delay before the slow test servers answer. undici schedules its
@@ -120,14 +133,14 @@ function quietStreamServer(): Promise<string> {
 describe("createChatFetch", () => {
   it("propagates a configured headers timeout to the wire", async () => {
     const url = await slowHeadersServer();
-    const chatFetch = createChatFetch({ headersTimeoutMs: 50 });
+    const chatFetch = trackedChatFetch({ headersTimeoutMs: 50 });
     const error = await rejectionOf(chatFetch(url));
     expect(undiciCode(error)).toBe("UND_ERR_HEADERS_TIMEOUT");
   });
 
   it("by default does not cut a slow-header response", async () => {
     const url = await slowHeadersServer();
-    const chatFetch = createChatFetch();
+    const chatFetch = trackedChatFetch();
     const response = await chatFetch(url);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("{}");
@@ -135,7 +148,7 @@ describe("createChatFetch", () => {
 
   it("propagates a configured body idle timeout to the wire", async () => {
     const url = await quietStreamServer();
-    const chatFetch = createChatFetch({ bodyTimeoutMs: 50 });
+    const chatFetch = trackedChatFetch({ bodyTimeoutMs: 50 });
     // Headers arrive instantly; the idle timer must fire mid-BODY.
     const response = await chatFetch(url);
     expect(response.status).toBe(200);
@@ -145,7 +158,7 @@ describe("createChatFetch", () => {
 
   it("by default streams across a mid-body quiet period uncut", async () => {
     const url = await quietStreamServer();
-    const chatFetch = createChatFetch();
+    const chatFetch = trackedChatFetch();
     const response = await chatFetch(url);
     const body = await response.text();
     expect(body).toContain("data: first");

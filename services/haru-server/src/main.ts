@@ -24,12 +24,16 @@ if (!isAuthenticated) {
   );
 }
 
+// Chat traffic gets a dedicated dispatcher (undici's fixed 300s
+// headers/body timers disabled) so HARU_CHAT_HEADER_TIMEOUT_MS is
+// the exact TTFB bound and quiet SSE streams are never severed.
+// Closed in the SIGTERM path below so shutdown does not strand the
+// dispatcher's keep-alive sockets.
+const chatFetch = createChatFetch();
+
 const app = createApp({
   database,
-  // Chat traffic gets a dedicated dispatcher (undici's fixed 300s
-  // headers/body timers disabled) so HARU_CHAT_HEADER_TIMEOUT_MS is
-  // the exact TTFB bound and quiet SSE streams are never severed.
-  chatFetchFn: createChatFetch(),
+  chatFetchFn: chatFetch.fetch,
   config: {
     apiToken: environment.HARU_API_TOKEN,
     supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
@@ -109,5 +113,9 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
     // event loop drains (no process.exit: in-flight work finishes).
     // Node >= 19 also closes idle keep-alive connections on close().
     server.close();
+    // Same policy for the chat dispatcher's upstream sockets:
+    // Agent.close() lets in-flight chat streams finish, then tears
+    // down keep-alive connections instead of leaving them to idle out.
+    void chatFetch.close();
   });
 }

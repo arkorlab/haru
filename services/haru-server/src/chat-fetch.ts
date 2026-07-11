@@ -13,6 +13,18 @@ export interface ChatFetchOptions {
   bodyTimeoutMs?: number;
 }
 
+export interface ChatFetch {
+  /** The fetch to hand to createApp's chatFetchFn. */
+  fetch: typeof fetch;
+  /**
+   * Gracefully close the underlying Agent: in-flight requests finish,
+   * then the dispatcher's sockets are torn down. Call this from the
+   * shutdown path; without it, upstream keep-alive sockets owned by
+   * the dispatcher only die via their idle timeout.
+   */
+  close: () => Promise<void>;
+}
+
 /**
  * A fetch for the chat proxy whose transport-level timeouts are OWNED
  * BY HARU, not by undici's defaults.
@@ -39,7 +51,7 @@ export interface ChatFetchOptions {
  * budgets well below undici's defaults, and inheriting those defaults
  * is a useful backstop there.
  */
-export function createChatFetch(options: ChatFetchOptions = {}): typeof fetch {
+export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
   const dispatcher = new Agent({
     headersTimeout: options.headersTimeoutMs ?? 0,
     bodyTimeout: options.bodyTimeoutMs ?? 0,
@@ -56,9 +68,12 @@ export function createChatFetch(options: ChatFetchOptions = {}): typeof fetch {
   // reintroduce the very defaults this module exists to remove.
   // chat-fetch.test.ts proves at runtime that the options reach the
   // wire.
-  return (input, init) =>
-    undiciFetch(input as Parameters<typeof undiciFetch>[0], {
-      ...(init as Parameters<typeof undiciFetch>[1]),
-      dispatcher,
-    }) as unknown as Promise<Response>;
+  return {
+    fetch: (input, init) =>
+      undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+        ...(init as Parameters<typeof undiciFetch>[1]),
+        dispatcher,
+      }) as unknown as Promise<Response>,
+    close: () => dispatcher.close(),
+  };
 }
