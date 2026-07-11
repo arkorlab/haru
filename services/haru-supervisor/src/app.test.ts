@@ -370,7 +370,7 @@ describe("POST /v1/probe", () => {
   });
 });
 
-describe("stopAllTraining (shutdown hook)", () => {
+describe("beginShutdown (shutdown hook)", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -378,24 +378,37 @@ describe("stopAllTraining (shutdown hook)", () => {
   it("stops every supervised run so no detached process group outlives the supervisor", async () => {
     vi.useFakeTimers();
     const signals: NodeJS.Signals[] = [];
-    const recordingSpawn: SpawnFunction = () => ({
-      pid: 4242,
-      kill: (signal) => {
-        signals.push(signal);
-        return true;
-      },
-      once: () => undefined,
-    });
-    const { app, stopAllTraining } = createSupervisorApp({
+    let spawnCount = 0;
+    const recordingSpawn: SpawnFunction = () => {
+      spawnCount += 1;
+      return {
+        pid: 4242,
+        kill: (signal) => {
+          signals.push(signal);
+          return true;
+        },
+        once: () => undefined,
+      };
+    };
+    const { app, beginShutdown } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: fakeVllmFetch(freshState()),
       spawnFn: recordingSpawn,
     });
     await app.request("/v1/training/start", { method: "POST" });
+    expect(spawnCount).toBe(1);
 
-    stopAllTraining(30_000);
+    beginShutdown(30_000);
     expect(signals).toEqual(["SIGTERM"]);
+
+    // A start still draining through server.close() must NOT spawn a
+    // fresh detached trainer after the stop sweep (it would carry no
+    // kill escalation and outlive the supervisor).
+    const late = await app.request("/v1/training/start", { method: "POST" });
+    expect(late.status).toBe(503);
+    expect(spawnCount).toBe(1);
+
     // The child ignores SIGTERM: the grace escalates to SIGKILL.
     vi.advanceTimersByTime(30_000);
     expect(signals).toEqual(["SIGTERM", "SIGKILL"]);

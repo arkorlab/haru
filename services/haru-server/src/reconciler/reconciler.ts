@@ -222,26 +222,37 @@ async function pollOneDomain(
   const at = dependencies.now();
   try {
     const status = await supervisorClient.status(options);
-    await markDomainSeen(dependencies.database, domain.id, at);
-    domain.lastSeenAt = at.toISOString();
+    // Slot health is mirrored BEFORE the heartbeat becomes fresh: the
+    // escalation CAS trusts "fresh heartbeat AND no failed inference
+    // slot" in one statement, so publishing freshness first would open
+    // a gap where THIS heartbeat has already observed an unviable
+    // standby but the failed slot is not visible yet - the active
+    // could be escalated onto a standby this very poll disproved.
     const didSyncSlots = await syncInferenceSlotHealth(
       dependencies,
       domain,
       status,
       isActiveDomain,
     );
-    // The active domain's readiness is judged against the LAYOUT, not
-    // just the supervisor's aggregate flag: `status.ready` only covers
-    // the models the supervisor's own config knows about, so a
-    // drifted config omitting a layout-bound model would keep the
-    // domain "ready" (never starting the escalation clock) while
-    // requests for that model 404. The vacuous FALSE for an active
-    // with zero inference bindings is deliberate: such a domain
-    // cannot serve anything and must never read as ready (every
-    // validated path - layout, promote, failover - already refuses to
-    // make one active, so this only surfaces manual state surgery).
-    const isActiveReady =
-      status.ready && isEveryConfiguredInferenceModel(domain, status, false);
+    await markDomainSeen(dependencies.database, domain.id, at);
+    domain.lastSeenAt = at.toISOString();
+    // The active domain's readiness is judged against the LAYOUT and
+    // only the layout: every layout-bound model must report awake. The
+    // supervisor's aggregate `ready` flag is deliberately NOT
+    // consulted, in either direction - a drifted config omitting a
+    // layout-bound model can claim ready (requests for that model
+    // 404), and an EXTRA unrouted model being down would veto
+    // readiness for a domain that serves everything the fleet routes
+    // to it. The vacuous FALSE for an active with zero inference
+    // bindings is deliberate: such a domain cannot serve anything and
+    // must never read as ready (every validated path - layout,
+    // promote, failover - already refuses to make one active, so this
+    // only surfaces manual state surgery).
+    const isActiveReady = isEveryConfiguredInferenceModel(
+      domain,
+      status,
+      false,
+    );
     if (domain.state === "provisioning") {
       // Role-aware like the recovery rung below: an ACTIVE domain
       // finishing provisioning with its models down must surface as
@@ -293,7 +304,11 @@ async function pollOneDomain(
           fleetId: fleet.id,
           domainId: domain.id,
           type: "domain.not_ready",
-          payload: { ready: status.ready },
+          // Both views ride in the payload: the layout-bound verdict
+          // that drove this transition, and the supervisor's own
+          // aggregate flag (their disagreement is exactly the config
+          // drift an operator needs to see).
+          payload: { ready: isActiveReady, supervisorReady: status.ready },
         });
       }
       return didDegrade || didSyncSlots;

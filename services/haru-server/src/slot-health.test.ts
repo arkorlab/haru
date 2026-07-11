@@ -312,6 +312,22 @@ describe("active slot-health sync", () => {
     expect(await standbyTrainingState()).toBe("idle");
   });
 
+  it("an extra unrouted model being down never degrades a fully routable active", async () => {
+    // Every layout-bound model is awake, but the supervisor's own
+    // aggregate ready flag is false (e.g. an extra model outside the
+    // fleet layout is down). The layout-bound predicate is the only
+    // readiness gate: the domain must stay ready instead of starting
+    // the escalation clock for a model the fleet never routes to.
+    await reconcileWith(new Map(HEALTHY_ALPHA), undefined, undefined, false);
+    expect(await activeDomainState()).toBe("ready");
+    expect(await inferenceStates()).toEqual(
+      new Map([
+        [0, "serving"],
+        [1, "serving"],
+      ]),
+    );
+  });
+
   it("degrades a 'ready' active whose supervisor omits a layout-bound model", async () => {
     // The drifted supervisor computes ready over its OWN configured
     // models and claims true while omitting gpu1's layout-bound

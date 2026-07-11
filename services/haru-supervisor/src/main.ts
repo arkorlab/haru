@@ -80,7 +80,7 @@ const realSpawn: SpawnFunction = (command, options) => {
   };
 };
 
-const { app, stopAllTraining } = createSupervisorApp({
+const { app, beginShutdown } = createSupervisorApp({
   config,
   token: environment.HARU_SUPERVISOR_TOKEN,
   exec: realExec,
@@ -111,9 +111,11 @@ const SHUTDOWN_TRAINING_GRACE_MS = 30_000;
 // itself. Trainers MUST be stopped here: they run as detached process
 // groups, so an unstopped run would survive the restart holding GPU
 // VRAM while the restarted supervisor (fresh in-memory state) could
-// start a second run beside it.
+// start a second run beside it. beginShutdown also rejects any
+// /v1/training/start still draining through server.close(), so no
+// trainer can spawn after the stop sweep.
 process.on("SIGTERM", () => {
-  stopAllTraining(SHUTDOWN_TRAINING_GRACE_MS);
+  beginShutdown(SHUTDOWN_TRAINING_GRACE_MS);
   // Closing the listener lets the process exit naturally once the
   // event loop drains; the pending kill timers keep it alive until
   // every trainer exited or was SIGKILLed.

@@ -21,6 +21,8 @@ export const ERROR_CODES = {
   operationConflict: "operation_conflict",
   upstreamUnreachable: "upstream_unreachable",
   upstreamTimeout: "upstream_timeout",
+  /** The supervisor received SIGTERM; no new work is accepted. */
+  shuttingDown: "shutting_down",
 } as const;
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 
