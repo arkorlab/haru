@@ -1,6 +1,4 @@
-import { Agent } from "undici";
-
-import type { Dispatcher } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 
 /**
  * Undici timeout overrides for the chat proxy's dispatcher. Values are
@@ -46,19 +44,21 @@ export function createChatFetch(options: ChatFetchOptions = {}): typeof fetch {
     headersTimeout: options.headersTimeoutMs ?? 0,
     bodyTimeout: options.bodyTimeoutMs ?? 0,
   });
-  // `dispatcher` is undici's own extension of fetch's RequestInit
-  // (honored by Node's bundled fetch, invisible to the standard type),
-  // so the init is typed as the intersection: a plain structural
-  // subtype, no assertion. The spread puts our dispatcher last on
-  // purpose: a caller-supplied one would reintroduce the very defaults
-  // this module exists to remove, so the chat dispatcher wins by
-  // construction. chat-fetch.test.ts proves at runtime that the
-  // option actually reaches the wire.
-  return (input, init) => {
-    const withDispatcher: RequestInit & { dispatcher: Dispatcher } = {
-      ...init,
+  // undici's OWN fetch, not Node's bundled one: a dispatcher only
+  // composes reliably with the fetch of the same undici instance.
+  // Node 24's bundled fetch rejects this package's Agent with
+  // UND_ERR_INVALID_ARG (Node 26 happens to accept it - exactly the
+  // version coupling this avoids). The assertions bridge the undici
+  // package's types to the lib's global fetch signature: both describe
+  // the same runtime web classes, and the chat proxy only ever passes
+  // a string URL, a plain init, and an AbortSignal. The spread puts
+  // our dispatcher last on purpose: a caller-supplied one would
+  // reintroduce the very defaults this module exists to remove.
+  // chat-fetch.test.ts proves at runtime that the options reach the
+  // wire.
+  return (input, init) =>
+    undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+      ...(init as Parameters<typeof undiciFetch>[1]),
       dispatcher,
-    };
-    return fetch(input, withDispatcher);
-  };
+    }) as unknown as Promise<Response>;
 }
