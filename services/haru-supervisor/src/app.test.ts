@@ -1,5 +1,5 @@
 import { requestTargetUrl, supervisorStatusSchema } from "@haru/protocol";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createSupervisorApp } from "./app.js";
 import { loadSupervisorConfig } from "./config.js";
@@ -79,7 +79,7 @@ function makeApp(options: { state: FakeVllmState; token?: string }) {
     spawnFn: noopSpawn,
     exec: () =>
       Promise.resolve({ code: 0, stdout: "0, 1000, 97887\n", stderr: "" }),
-  });
+  }).app;
 }
 
 function freshState(): FakeVllmState {
@@ -142,7 +142,7 @@ describe("GET /v1/status and /v1/ready", () => {
       }
       return Promise.reject(new TypeError(`unrouted ${url.href}`));
     };
-    const app = createSupervisorApp({
+    const { app } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: emptyBodyFetch,
@@ -159,7 +159,7 @@ describe("GET /v1/status and /v1/ready", () => {
   it("reports sleeping=null for an unreachable vLLM server", async () => {
     const failingFetch: typeof fetch = () =>
       Promise.reject(new TypeError("fetch failed"));
-    const app = createSupervisorApp({
+    const { app } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: failingFetch,
@@ -235,7 +235,7 @@ describe("vLLM sleep/wake control", () => {
         inFlight -= 1;
       }
     };
-    const app = createSupervisorApp({
+    const { app } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: gatedFetch,
@@ -315,7 +315,7 @@ describe("POST /v1/probe", () => {
       }
       return Promise.reject(new TypeError(`unrouted ${url.href}`));
     };
-    const app = createSupervisorApp({
+    const { app } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: shapelessFetch,
@@ -346,7 +346,7 @@ describe("POST /v1/probe", () => {
           reject(new Error("aborted by timeout"));
         });
       });
-    const app = createSupervisorApp({
+    const { app } = createSupervisorApp({
       config: loadSupervisorConfig(CONFIG_JSON),
       token: undefined,
       fetchFn: neverResolvingFetch,
@@ -367,6 +367,51 @@ describe("POST /v1/probe", () => {
         r.error?.includes("aborted"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("beginShutdown (shutdown hook)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stops every supervised run so no detached process group outlives the supervisor", async () => {
+    vi.useFakeTimers();
+    const signals: NodeJS.Signals[] = [];
+    let spawnCount = 0;
+    const recordingSpawn: SpawnFunction = () => {
+      spawnCount += 1;
+      return {
+        pid: 4242,
+        kill: (signal) => {
+          signals.push(signal);
+          return true;
+        },
+        once: () => undefined,
+      };
+    };
+    const { app, beginShutdown } = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: fakeVllmFetch(freshState()),
+      spawnFn: recordingSpawn,
+    });
+    await app.request("/v1/training/start", { method: "POST" });
+    expect(spawnCount).toBe(1);
+
+    beginShutdown(30_000);
+    expect(signals).toEqual(["SIGTERM"]);
+
+    // A start still draining through server.close() must NOT spawn a
+    // fresh detached trainer after the stop sweep (it would carry no
+    // kill escalation and outlive the supervisor).
+    const late = await app.request("/v1/training/start", { method: "POST" });
+    expect(late.status).toBe(503);
+    expect(spawnCount).toBe(1);
+
+    // The child ignores SIGTERM: the grace escalates to SIGKILL.
+    vi.advanceTimersByTime(30_000);
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 });
 

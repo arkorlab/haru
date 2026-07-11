@@ -1,3 +1,4 @@
+import { assertSlotTransition } from "@haru/core";
 import {
   operationSnapshotSchema,
   type OperationError,
@@ -5,9 +6,11 @@ import {
   type OperationSnapshot,
   type OperationStep,
 } from "@haru/protocol";
-import { and, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
 
-import { fleets, operations } from "../schema/index.js";
+import { domains, fleets, operations, slots } from "../schema/index.js";
+
+import { FAILED_PROMOTION_SLOT_STATES } from "./slots.js";
 
 import type { HaruDatabase } from "../client.js";
 
@@ -245,5 +248,109 @@ export async function failOperation(
       ),
     )
     .returning();
+  return rows[0] ?? null;
+}
+
+/**
+ * Fail an in-flight operation AND (for promotes whose routing never
+ * committed) mark the target's wake-path inference slots failed, in
+ * ONE statement via data-modifying CTEs. Atomicity is the point: a
+ * separate cleanup statement runs after failOperation released the
+ * one-in-flight slot, so a retry promote inserted in that gap (or
+ * even inside the cleanup's own snapshot window) could have its
+ * freshly-woken slots clobbered. With fail and cleanup in a single
+ * statement, a retry can only ever be created strictly after the
+ * cleaned slot states are visible. Same `fromStep` /
+ * `target_not_routed` semantics as failOperation; the slot CTE
+ * additionally no-ops for demotes (their target's serving slots
+ * reflect a sleep that genuinely did not happen) and when the routing
+ * pointer already sits on the target (those serving slots ARE live
+ * traffic).
+ */
+export async function failOperationWithPromotionCleanup(
+  database: HaruDatabase,
+  operationId: string,
+  error: OperationError,
+  fromStep?: OperationStep,
+  guard?: "target_not_routed",
+): Promise<OperationRow | null> {
+  for (const state of FAILED_PROMOTION_SLOT_STATES) {
+    assertSlotTransition("inference", state, "failed");
+  }
+  const targetRouted = database
+    .select({ one: sql`1` })
+    .from(fleets)
+    .where(
+      and(
+        eq(fleets.id, operations.fleetId),
+        eq(fleets.activeDomainId, operations.targetDomainId),
+      ),
+    );
+  const failQuery = database
+    .update(operations)
+    .set({
+      state: "failed",
+      error,
+      finishedAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(operations.id, operationId),
+        inArray(operations.state, ["pending", "running"]),
+        ...(fromStep === undefined
+          ? []
+          : [eq(operations.currentStep, fromStep)]),
+        ...(guard === "target_not_routed" ? [notExists(targetRouted)] : []),
+      ),
+    )
+    .returning();
+  const failedOperation = database.$with("failed_operation").as(failQuery);
+  const pointerAtFailedTarget = database
+    .select({ one: sql`1` })
+    .from(fleets)
+    .where(
+      and(
+        eq(fleets.id, failedOperation.fleetId),
+        eq(fleets.activeDomainId, failedOperation.targetDomainId),
+      ),
+    );
+  // The pointer guard above is scoped to the operation's OWN fleet, so
+  // a stale/malformed row whose target belongs to another fleet would
+  // pass it vacuously and fail THAT fleet's slots; require the target
+  // to belong to the operation's fleet before any slot is touched.
+  const targetBelongsToFleet = database
+    .select({ one: sql`1` })
+    .from(domains)
+    .where(
+      and(
+        eq(domains.id, failedOperation.targetDomainId),
+        eq(domains.fleetId, failedOperation.fleetId),
+      ),
+    );
+  const cleanupQuery = database
+    .update(slots)
+    .set({
+      state: "failed",
+      stateUpdatedAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .from(failedOperation)
+    .where(
+      and(
+        eq(failedOperation.kind, "promote"),
+        eq(slots.domainId, failedOperation.targetDomainId),
+        eq(slots.kind, "inference"),
+        inArray(slots.state, [...FAILED_PROMOTION_SLOT_STATES]),
+        exists(targetBelongsToFleet),
+        notExists(pointerAtFailedTarget),
+      ),
+    )
+    .returning({ id: slots.id });
+  const cleanedSlots = database.$with("cleaned_slots").as(cleanupQuery);
+  const rows = await database
+    .with(failedOperation, cleanedSlots)
+    .select()
+    .from(failedOperation);
   return rows[0] ?? null;
 }

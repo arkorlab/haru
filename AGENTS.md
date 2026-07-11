@@ -107,10 +107,12 @@ Dependency graph (enforce it when adding imports):
   `policy.degradedGraceMs` (autoFailover on, AND a viable standby exists -
   viable means READY, supervised, bound, fresh-heartbeat, no failed
   inference slot - AND no operation is in flight AND the pointer still
-  targets it, both guarded inside the escalation UPDATE) is CAS-escalated
-  to `failed`, which makes `detectFailover`'s failed trigger fire in the
-  same tick; a reachable supervisor recovers a failed domain via
-  `failed -> degraded` (the active additionally has to report ready).
+  targets it; the in-flight, pointer AND viable-standby guards all ride
+  inside the escalation UPDATE itself) is CAS-escalated to `failed`,
+  which makes `detectFailover`'s failed trigger fire in the same tick; a
+  reachable supervisor recovers a failed domain via `failed -> degraded`
+  (the active additionally has to serve every LAYOUT-bound model, not
+  just report its own aggregate ready flag).
   Heartbeats also mirror per-slot health from supervisor status (per-slot
   CAS, steady-state pairs only): the ACTIVE domain's inference
   `serving <-> failed`, a STANDBY's `sleeping <-> failed` posture, and

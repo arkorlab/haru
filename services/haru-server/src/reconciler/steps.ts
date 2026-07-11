@@ -47,12 +47,15 @@ export interface StepContext {
   operation: OperationRow;
   supervisorToken: string | undefined;
   /**
-   * What remains of the step's policy budget at nudge start. Every
-   * supervisor call is capped to it (see withSupervisor), so the
-   * budget is a real per-step bound: a call issued with 1ms left
-   * cannot run for its full per-call timeout on top.
+   * Absolute deadline (epoch ms) of the step's policy budget:
+   * stepStartedAt + the step's timeout. Every supervisor call is
+   * capped to what remains of it at call time (see withSupervisor),
+   * so the budget is a real per-step bound: a call issued with 1ms
+   * left cannot run for its full per-call timeout on top. Absolute
+   * (not "remaining at nudge start") so re-reading the clock never
+   * drifts the bound.
    */
-  stepRemainingMs: number;
+  stepDeadlineMs: number;
 }
 
 export type StepOutcome =
@@ -165,14 +168,25 @@ async function withSupervisor(
       ? failed("no_supervisor", `domain ${domain.slug} has no supervisor URL`)
       : DONE;
   }
+  const perCallTimeoutMs = config.timeoutMs ?? STEP_CALL_TIMEOUT_MS;
   const options: SupervisorClientOptions = {
     fetchFn: context.fetchFn,
     baseUrl: domain.supervisorUrl,
     token: context.supervisorToken,
-    timeoutMs: Math.min(
-      config.timeoutMs ?? STEP_CALL_TIMEOUT_MS,
-      context.stepRemainingMs,
-    ),
+    // A getter, so the budget is re-evaluated at EVERY supervisor
+    // call: multi-call executors (action + status poll) must fit ALL
+    // their calls inside the step's remaining budget together, not
+    // each call separately (which would let a step run for nearly
+    // twice its documented bound).
+    get timeoutMs() {
+      return Math.max(
+        1,
+        Math.min(
+          perCallTimeoutMs,
+          context.stepDeadlineMs - context.now().getTime(),
+        ),
+      );
+    },
   };
   try {
     return await body(domain, options);
@@ -200,9 +214,12 @@ const hasNoInferenceSlots = (domain: DomainSnapshot): boolean =>
  * reported by the supervisor with the given sleeping flag. Matching
  * the LAYOUT's bindings (not just the reported subset) stops a
  * drifted supervisor that omits a model from vacuously passing a
- * wake or sleep check.
+ * wake or sleep check. Also the reconciler's definition of "the
+ * active domain serves everything the fleet routes to it": the
+ * supervisor's own `ready` flag only covers the models IT knows
+ * about.
  */
-function isEveryConfiguredInferenceModel(
+export function isEveryConfiguredInferenceModel(
   domain: DomainSnapshot,
   status: SupervisorStatus,
   isSleeping: boolean,
@@ -391,9 +408,12 @@ async function probe(context: StepContext): Promise<StepOutcome> {
   // what remains of the STEP budget, so a probe started late in the
   // step cannot overrun the documented per-step bound by a whole
   // extra probeTimeoutMs.
-  const probeBudgetMs = Math.min(
-    context.fleet.policy.probeTimeoutMs,
-    context.stepRemainingMs,
+  const probeBudgetMs = Math.max(
+    1,
+    Math.min(
+      context.fleet.policy.probeTimeoutMs,
+      context.stepDeadlineMs - context.now().getTime(),
+    ),
   );
   return withSupervisor(
     context,

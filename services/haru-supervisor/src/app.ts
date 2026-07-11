@@ -90,6 +90,7 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   }
 
   const app = new Hono();
+  let isShuttingDown = false;
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -254,6 +255,20 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/training/start", (c) => {
+    // SIGTERM race: server.close() still drains in-flight requests, so
+    // a start accepted just before shutdown could otherwise spawn a
+    // fresh detached trainer AFTER the shutdown stop sweep ran,
+    // leaving it with no kill escalation (the supervisor would hang on
+    // its child, or orphan the GPU process on restart).
+    if (isShuttingDown) {
+      return c.json(
+        errorBody(
+          "shutting_down",
+          "supervisor is shutting down; training cannot start",
+        ),
+        503,
+      );
+    }
     for (const run of trainingRuns.values()) {
       run.start();
     }
@@ -340,5 +355,19 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     });
   });
 
-  return app;
+  // Shutdown hook for main's SIGTERM handler: trainers run as their
+  // own detached process groups, so a run left unstopped would
+  // survive a supervisor restart, keep holding GPU VRAM, and the
+  // restarted supervisor (fresh in-memory state) could start a second
+  // run beside it. The flag is raised BEFORE the stop sweep so an
+  // in-flight /v1/training/start draining through server.close()
+  // cannot spawn a new trainer after its run was swept.
+  const beginShutdown = (graceMs: number): void => {
+    isShuttingDown = true;
+    for (const run of trainingRuns.values()) {
+      run.stop(graceMs);
+    }
+  };
+
+  return { app, beginShutdown };
 }

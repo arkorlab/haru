@@ -1,7 +1,18 @@
 import { assertDomainTransition } from "@haru/core";
-import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
+import {
+  aliasedTable,
+  and,
+  eq,
+  exists,
+  gte,
+  inArray,
+  isNotNull,
+  ne,
+  notExists,
+  sql,
+} from "drizzle-orm";
 
-import { domains, fleets, operations } from "../schema/index.js";
+import { domains, fleets, operations, slots } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 import type { DomainState } from "@haru/protocol";
@@ -41,24 +52,32 @@ export async function transitionDomain(
 }
 
 /**
- * Escalate a degraded domain to failed ONLY while its fleet has no
- * in-flight operation AND still routes to this domain, in one
- * statement: a separate read-then-update would let a promote/demote
- * created in between occupy the one-in-flight slot right as the
- * active stops routing, with no failover able to start - and a
- * promotion that committed in between would leave this domain a
- * STANDBY, which the escalation rule never touches (failing it would
- * strip a viable failback target). A createOperation committing
- * between this statement's snapshot and its commit can still slip
- * through (that window is sub-statement and self-heals: the failed
- * trigger fires as soon as the slot frees), but the multi-statement
- * windows are gone.
+ * Escalate a degraded domain to failed ONLY while, in one statement:
+ * the fleet has no in-flight operation, still routes to this domain,
+ * AND a viable failover standby exists. Each guard closes a
+ * multi-statement race a separate read-then-update would leave open:
+ * a promote/demote created in between would occupy the one-in-flight
+ * slot right as the active stops routing; a promotion that committed
+ * in between would leave this domain a STANDBY (which escalation
+ * never touches); and a concurrent heartbeat can strip the standby
+ * `detectDegradedEscalation` bet on (e.g. by failing its only
+ * inference slot) - escalating then would drop the active's remaining
+ * healthy models with only a doomed failover target left. The
+ * viability predicate mirrors core's isViableFailoverTarget: ready
+ * state, a supervisor URL, at least one inference slot (the schema
+ * guarantees an inference slot binds >= 1 model), none of them
+ * failed, and a heartbeat no older than the caller's cutoff. A
+ * createOperation committing between this statement's snapshot and
+ * its commit can still slip through (that window is sub-statement and
+ * self-heals: the failed trigger fires as soon as the slot frees),
+ * but the multi-statement windows are gone.
  */
 export async function escalateDomainIfFleetIdle(
   database: HaruDatabase,
   domainId: string,
   fleetId: string,
   at: Date,
+  heartbeatStaleMs: number,
 ): Promise<boolean> {
   assertDomainTransition("degraded", "failed");
   const pointerAtDomain = database
@@ -74,6 +93,36 @@ export async function escalateDomainIfFleetIdle(
         inArray(operations.state, ["pending", "running"]),
       ),
     );
+  const standby = aliasedTable(domains, "standby");
+  const heartbeatCutoff = new Date(at.getTime() - heartbeatStaleMs);
+  const standbyInferenceSlot = database
+    .select({ one: sql`1` })
+    .from(slots)
+    .where(and(eq(slots.domainId, standby.id), eq(slots.kind, "inference")));
+  const standbyFailedInferenceSlot = database
+    .select({ one: sql`1` })
+    .from(slots)
+    .where(
+      and(
+        eq(slots.domainId, standby.id),
+        eq(slots.kind, "inference"),
+        eq(slots.state, "failed"),
+      ),
+    );
+  const viableStandby = database
+    .select({ one: sql`1` })
+    .from(standby)
+    .where(
+      and(
+        eq(standby.fleetId, fleetId),
+        ne(standby.id, domainId),
+        eq(standby.state, "ready"),
+        isNotNull(standby.supervisorUrl),
+        gte(standby.lastSeenAt, heartbeatCutoff),
+        exists(standbyInferenceSlot),
+        notExists(standbyFailedInferenceSlot),
+      ),
+    );
   const rows = await database
     .update(domains)
     .set({ state: "failed", stateUpdatedAt: at, updatedAt: sql`now()` })
@@ -83,6 +132,7 @@ export async function escalateDomainIfFleetIdle(
         eq(domains.state, "degraded"),
         exists(pointerAtDomain),
         notExists(inflightOperation),
+        exists(viableStandby),
       ),
     )
     .returning({ id: domains.id });

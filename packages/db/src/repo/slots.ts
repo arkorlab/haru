@@ -1,7 +1,7 @@
 import { assertSlotTransition } from "@haru/core";
-import { and, eq, exists, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { domains, fleets, operations, slots } from "../schema/index.js";
+import { slots } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 import type { SlotKind, SlotState } from "@haru/protocol";
@@ -80,69 +80,11 @@ export async function transitionDomainSlots(
 
 /** Slot states a failed promotion can have left its target's inference
  * slots in (the operation's own wake path). Sleeping is excluded: the
- * promotion never touched those slots. */
-const FAILED_PROMOTION_SLOT_STATES: readonly SlotState[] = [
+ * promotion never touched those slots. Consumed by
+ * failOperationWithPromotionCleanup, which fails the operation and
+ * cleans these slots in one atomic statement. */
+export const FAILED_PROMOTION_SLOT_STATES: readonly SlotState[] = [
   "waking",
   "probing",
   "serving",
 ];
-
-/**
- * Mark a failed promotion's target inference slots failed, with BOTH
- * safety guards inside the one statement: the fleet's routing pointer
- * must not point at the target (a committed switch_active means those
- * serving slots ARE live traffic), and no operation may be in flight
- * for the fleet (failOperation released the one-in-flight slot BEFORE
- * this cleanup runs, so an immediate retry promote could already be
- * driving these same slots through its own wake path; failing them
- * under it would 404 chat on the new active until the next heartbeat
- * recovers them). Same single-statement rationale as
- * escalateDomainIfFleetIdle: a multi-statement read-then-update would
- * leave a real race window, this leaves only a sub-statement one that
- * the retry's own from-lists and the heartbeat health sync self-heal.
- */
-export async function failPromotionTargetSlots(
-  database: HaruDatabase,
-  fleetId: string,
-  targetDomainId: string,
-): Promise<number> {
-  assertFromList("inference", FAILED_PROMOTION_SLOT_STATES, "failed");
-  // The fleet-scoped guards below are only meaningful when the target
-  // actually belongs to that fleet: with a mismatched pair both
-  // NOT EXISTS checks would vacuously pass and fail ANOTHER fleet's
-  // slots.
-  const targetBelongsToFleet = database
-    .select({ one: sql`1` })
-    .from(domains)
-    .where(and(eq(domains.id, targetDomainId), eq(domains.fleetId, fleetId)));
-  const pointerAtTarget = database
-    .select({ one: sql`1` })
-    .from(fleets)
-    .where(
-      and(eq(fleets.id, fleetId), eq(fleets.activeDomainId, targetDomainId)),
-    );
-  const inflightOperation = database
-    .select({ one: sql`1` })
-    .from(operations)
-    .where(
-      and(
-        eq(operations.fleetId, fleetId),
-        inArray(operations.state, ["pending", "running"]),
-      ),
-    );
-  const rows = await database
-    .update(slots)
-    .set({ state: "failed", stateUpdatedAt: sql`now()`, updatedAt: sql`now()` })
-    .where(
-      and(
-        eq(slots.domainId, targetDomainId),
-        eq(slots.kind, "inference"),
-        inArray(slots.state, [...FAILED_PROMOTION_SLOT_STATES]),
-        exists(targetBelongsToFleet),
-        notExists(pointerAtTarget),
-        notExists(inflightOperation),
-      ),
-    )
-    .returning({ id: slots.id });
-  return rows.length;
-}

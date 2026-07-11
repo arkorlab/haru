@@ -80,14 +80,14 @@ const realSpawn: SpawnFunction = (command, options) => {
   };
 };
 
-const app = createSupervisorApp({
+const { app, beginShutdown } = createSupervisorApp({
   config,
   token: environment.HARU_SUPERVISOR_TOKEN,
   exec: realExec,
   spawnFn: realSpawn,
 });
 
-serve(
+const server = serve(
   {
     fetch: app.fetch,
     port: environment.PORT,
@@ -99,3 +99,36 @@ serve(
     console.log(`haru-supervisor listening on ${info.address}:${info.port}`);
   },
 );
+
+/** Checkpoint grace for trainers stopped by a supervisor shutdown.
+ * Well inside systemd's default 90s stop timeout, so the SIGTERM ->
+ * grace -> SIGKILL escalation completes before the platform SIGKILLs
+ * the whole group. */
+const SHUTDOWN_TRAINING_GRACE_MS = 30_000;
+
+// Installing a SIGTERM handler suppresses Node's default
+// terminate-on-signal, so the handler must complete the shutdown
+// itself. Trainers MUST be stopped here: they run as detached process
+// groups, so an unstopped run would survive the restart holding GPU
+// VRAM while the restarted supervisor (fresh in-memory state) could
+// start a second run beside it. beginShutdown also rejects any
+// /v1/training/start still draining through server.close(), so no
+// trainer can spawn after the stop sweep.
+process.on("SIGTERM", () => {
+  beginShutdown(SHUTDOWN_TRAINING_GRACE_MS);
+  // Closing the listener lets the process exit naturally once the
+  // event loop drains; the pending kill timers keep it alive until
+  // every trainer exited or was SIGKILLed.
+  server.close();
+  // Hard stop: a stuck client connection or an unkillable child (D
+  // state after SIGKILL) must not hold the process until the platform
+  // SIGKILLs it. By this point every trainer has had SIGTERM plus the
+  // full grace plus SIGKILL, so nothing orderly remains. unref() so
+  // the timer never keeps an otherwise-drained process alive.
+  const hardStop = setTimeout(() => {
+    console.error("shutdown did not drain in time; exiting");
+    // eslint-disable-next-line n/no-process-exit -- last resort after server.close() stalled
+    process.exit(1);
+  }, SHUTDOWN_TRAINING_GRACE_MS + 10_000);
+  hardStop.unref();
+});

@@ -1,3 +1,4 @@
+import { fleetLayoutSchema } from "@haru/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { applyFleetLayout } from "./repo/layout.js";
@@ -77,6 +78,25 @@ describe("applyFleetLayout", () => {
     await applyFleetLayout(database, loadExampleFleetLayout());
     const after = await getFleetSnapshot(database, "default");
     expect(after?.activeDomainId).toBe(beta?.id);
+  });
+
+  it("keeps a previously headless fleet headless when a re-apply adds activeDomainSlug", async () => {
+    const layout = fleetLayoutSchema.parse(loadExampleFleetLayout());
+    // First apply is headless: every inference slot seeds sleeping.
+    const { activeDomainSlug, ...headless } = layout;
+    expect(activeDomainSlug).toBe("alpha");
+    await applyFleetLayout(database, headless);
+    const before = await getFleetSnapshot(database, "default");
+    expect(before?.activeDomainId).toBeNull();
+
+    // Re-applying WITH the active slug must not point routing at a
+    // domain whose persisted slots are still sleeping (chat would 404
+    // while promote reports already_active); the fleet stays headless
+    // and is activated via the normal promotion flow.
+    await applyFleetLayout(database, layout);
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBeNull();
+    expect(after?.routeRevision).toBe(before?.routeRevision);
   });
 
   it("derives new slots' states from the LIVE pointer after a promotion", async () => {
