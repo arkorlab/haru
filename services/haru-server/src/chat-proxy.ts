@@ -72,6 +72,30 @@ export async function proxyChatCompletion(
     if (abortName === "AbortError" || clientSignal?.aborted === true) {
       return { ok: false, status: 499, body: null };
     }
+    // undici's own headers timer surfaces as TypeError("fetch failed")
+    // with a coded cause. It is a timeout, not unreachability, so it
+    // maps to 504 like our own timer. Dead in the default wiring (the
+    // injected chat fetch disables that timer entirely; see
+    // chat-fetch.ts) but embedders passing a plain global fetch with a
+    // TTFB bound above undici's 300s still get the honest status.
+    const cause =
+      typeof error === "object" && error !== null && "cause" in error
+        ? error.cause
+        : undefined;
+    const causeCode =
+      typeof cause === "object" && cause !== null && "code" in cause
+        ? cause.code
+        : undefined;
+    if (causeCode === "UND_ERR_HEADERS_TIMEOUT") {
+      return {
+        ok: false,
+        status: 504,
+        body: errorBody(
+          "upstream_timeout",
+          "upstream did not return headers within the transport's own bound",
+        ),
+      };
+    }
     const detail = error instanceof Error ? error.message : String(error);
     return {
       ok: false,

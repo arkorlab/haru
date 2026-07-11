@@ -187,6 +187,62 @@ describe("POST /v1/chat/completions", () => {
     expect((await response.json()).error.code).toBe("upstream_timeout");
   });
 
+  it("504s when the transport's own headers timer fires", async () => {
+    // The shape undici gives a headers timeout when an embedder wires
+    // a PLAIN global fetch (not createChatFetch) with a TTFB bound
+    // above undici's 300s: a generic TypeError with a coded cause.
+    // Must map to 504 like our own timer, not 502 unreachable.
+    const undiciHeadersTimeout: typeof fetch = () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("Headers Timeout Error"), {
+          code: "UND_ERR_HEADERS_TIMEOUT",
+        }),
+      });
+    };
+    const app = chatApp({ fetchFn: undiciHeadersTimeout });
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: chatBody,
+    });
+    expect(response.status).toBe(504);
+    expect((await response.json()).error.code).toBe("upstream_timeout");
+  });
+
+  it("uses chatFetchFn for chat traffic when provided", async () => {
+    // main.ts wires a dispatcher-backed fetch here; this pins the
+    // dependency plumbing so chat cannot silently fall back to the
+    // control-plane fetch (whose transport timeouts differ).
+    const chatCalls: FakeUpstreamCall[] = [];
+    const controlPlaneOnly: typeof fetch = () => {
+      throw new Error("chat traffic must not use fetchFn");
+    };
+    const app = createApp({
+      database,
+      fetchFn: controlPlaneOnly,
+      chatFetchFn: buildFakeFetch({
+        supervisors: {
+          [ALPHA_SUPERVISOR]: fakeSupervisorState({ sleeping: false }),
+          [BETA_SUPERVISOR]: fakeSupervisorState(),
+        },
+        chatCalls,
+      }),
+    });
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: chatBody,
+    });
+    expect(response.status).toBe(200);
+    expect(chatCalls).toHaveLength(1);
+  });
+
   it("502s when the upstream is unreachable", async () => {
     const failingFetch: typeof fetch = () => {
       throw new TypeError("fetch failed");

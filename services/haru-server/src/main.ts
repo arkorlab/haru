@@ -2,6 +2,7 @@ import { createDatabase } from "@haru/db";
 import { serve } from "@hono/node-server";
 
 import { createApp } from "./app.js";
+import { createChatFetch } from "./chat-fetch.js";
 import { loadServerEnvironment } from "./environment.js";
 import { reconcileFleet } from "./reconciler/reconciler.js";
 
@@ -25,6 +26,10 @@ if (!isAuthenticated) {
 
 const app = createApp({
   database,
+  // Chat traffic gets a dedicated dispatcher (undici's fixed 300s
+  // headers/body timers disabled) so HARU_CHAT_HEADER_TIMEOUT_MS is
+  // the exact TTFB bound and quiet SSE streams are never severed.
+  chatFetchFn: createChatFetch(),
   config: {
     apiToken: environment.HARU_API_TOKEN,
     supervisorToken: environment.HARU_SUPERVISOR_TOKEN,

@@ -52,6 +52,14 @@ export interface AppDependencies {
   database: HaruDatabase;
   config?: AppConfig;
   fetchFn?: typeof fetch;
+  /**
+   * fetch used ONLY by the chat proxy; defaults to fetchFn. main.ts
+   * passes createChatFetch() here so undici's own 300s headers/body
+   * timers never cap chatHeaderTimeoutMs or cut a quiet SSE stream
+   * (see chat-fetch.ts). Kept separate from fetchFn so control-plane
+   * calls retain undici's default timeouts as a backstop.
+   */
+  chatFetchFn?: typeof fetch;
   now?: () => Date;
 }
 
@@ -65,6 +73,7 @@ export function createApp(dependencies: AppDependencies) {
   const database = dependencies.database;
   const config = dependencies.config ?? {};
   const fetchFunction = dependencies.fetchFn ?? fetch;
+  const chatFetchFunction = dependencies.chatFetchFn ?? fetchFunction;
   const now = dependencies.now ?? (() => new Date());
   const chatHeaderTimeoutMs =
     config.chatHeaderTimeoutMs ?? DEFAULT_CHAT_HEADER_TIMEOUT_MS;
@@ -303,7 +312,7 @@ export function createApp(dependencies: AppDependencies) {
     }
 
     const result = await proxyChatCompletion(
-      fetchFunction,
+      chatFetchFunction,
       binding.servingUrl,
       bodyText,
       chatHeaderTimeoutMs,
