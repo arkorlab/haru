@@ -576,9 +576,11 @@ async function advanceInFlightOperation(
             operation,
             supervisorToken: dependencies.supervisorToken,
             // Supervisor calls inside the step are capped to what
-            // remains, so the budget is a true per-step bound instead
-            // of "budget + one whole per-call timeout".
-            stepRemainingMs: budgetMs - elapsedMs,
+            // remains of this absolute deadline, so the budget is a
+            // true per-step bound instead of "budget + one whole
+            // per-call timeout". Anchored on stepStartedAt (the same
+            // app clock the timeout branch compares), never re-read.
+            stepDeadlineMs: operation.stepStartedAt.getTime() + budgetMs,
           },
           step,
         );

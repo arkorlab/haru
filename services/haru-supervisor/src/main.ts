@@ -120,4 +120,15 @@ process.on("SIGTERM", () => {
   // event loop drains; the pending kill timers keep it alive until
   // every trainer exited or was SIGKILLed.
   server.close();
+  // Hard stop: a stuck client connection or an unkillable child (D
+  // state after SIGKILL) must not hold the process until the platform
+  // SIGKILLs it. By this point every trainer has had SIGTERM plus the
+  // full grace plus SIGKILL, so nothing orderly remains. unref() so
+  // the timer never keeps an otherwise-drained process alive.
+  const hardStop = setTimeout(() => {
+    console.error("shutdown did not drain in time; exiting");
+    // eslint-disable-next-line n/no-process-exit -- last resort after server.close() stalled
+    process.exit(1);
+  }, SHUTDOWN_TRAINING_GRACE_MS + 10_000);
+  hardStop.unref();
 });

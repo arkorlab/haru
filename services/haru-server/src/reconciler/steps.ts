@@ -47,12 +47,15 @@ export interface StepContext {
   operation: OperationRow;
   supervisorToken: string | undefined;
   /**
-   * What remains of the step's policy budget at nudge start. Every
-   * supervisor call is capped to it (see withSupervisor), so the
-   * budget is a real per-step bound: a call issued with 1ms left
-   * cannot run for its full per-call timeout on top.
+   * Absolute deadline (epoch ms) of the step's policy budget:
+   * stepStartedAt + the step's timeout. Every supervisor call is
+   * capped to what remains of it at call time (see withSupervisor),
+   * so the budget is a real per-step bound: a call issued with 1ms
+   * left cannot run for its full per-call timeout on top. Absolute
+   * (not "remaining at nudge start") so re-reading the clock never
+   * drifts the bound.
    */
-  stepRemainingMs: number;
+  stepDeadlineMs: number;
 }
 
 export type StepOutcome =
@@ -166,7 +169,6 @@ async function withSupervisor(
       : DONE;
   }
   const perCallTimeoutMs = config.timeoutMs ?? STEP_CALL_TIMEOUT_MS;
-  const stepDeadlineMs = context.now().getTime() + context.stepRemainingMs;
   const options: SupervisorClientOptions = {
     fetchFn: context.fetchFn,
     baseUrl: domain.supervisorUrl,
@@ -179,7 +181,10 @@ async function withSupervisor(
     get timeoutMs() {
       return Math.max(
         1,
-        Math.min(perCallTimeoutMs, stepDeadlineMs - context.now().getTime()),
+        Math.min(
+          perCallTimeoutMs,
+          context.stepDeadlineMs - context.now().getTime(),
+        ),
       );
     },
   };
@@ -403,9 +408,12 @@ async function probe(context: StepContext): Promise<StepOutcome> {
   // what remains of the STEP budget, so a probe started late in the
   // step cannot overrun the documented per-step bound by a whole
   // extra probeTimeoutMs.
-  const probeBudgetMs = Math.min(
-    context.fleet.policy.probeTimeoutMs,
-    context.stepRemainingMs,
+  const probeBudgetMs = Math.max(
+    1,
+    Math.min(
+      context.fleet.policy.probeTimeoutMs,
+      context.stepDeadlineMs - context.now().getTime(),
+    ),
   );
   return withSupervisor(
     context,
