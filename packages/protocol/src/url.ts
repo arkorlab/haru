@@ -15,10 +15,14 @@ export function joinUrl(baseUrl: string, path: string): string {
   const prefix = base.pathname.replace(/\/+$/, "");
   const suffix = path.startsWith("/") ? path : `/${path}`;
   const joined = new URL(`${prefix}${suffix}`, base);
-  // Re-apply the base query params that `new URL` dropped, without
-  // overriding any the path set itself.
+  // Re-apply the base query params that `new URL` dropped. Snapshot the
+  // path's OWN keys first so a same-named base param is skipped (path
+  // wins on conflict) while EVERY value the base carries for other keys
+  // is preserved - including repeats like `?tag=a&tag=b` (a plain
+  // `has()` check inside the loop would drop the second `tag`).
+  const pathKeys = new Set(joined.searchParams.keys());
   for (const [key, value] of base.searchParams) {
-    if (!joined.searchParams.has(key)) {
+    if (!pathKeys.has(key)) {
       joined.searchParams.append(key, value);
     }
   }

@@ -342,6 +342,12 @@ describe("joinUrl", () => {
       "https://host.example/sleep?level=1",
     );
   });
+
+  it("preserves repeated base query keys", () => {
+    expect(joinUrl("https://host.example?tag=a&tag=b", "/v1/status")).toBe(
+      "https://host.example/v1/status?tag=a&tag=b",
+    );
+  });
 });
 
 describe("errorBody", () => {
