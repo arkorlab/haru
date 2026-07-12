@@ -25,10 +25,12 @@ import {
   type PromoteNoopResponse,
 } from "@haru/protocol";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 
 import { bearerAuth } from "./auth.js";
 import {
   DEFAULT_CHAT_HEADER_TIMEOUT_MS,
+  DEFAULT_CHAT_MAX_BODY_BYTES,
   proxyChatCompletion,
 } from "./chat-proxy.js";
 import { reconcileFleet } from "./reconciler/reconciler.js";
@@ -46,6 +48,13 @@ export interface AppConfig {
   chatHeaderTimeoutMs?: number;
   /** Fleet snapshot cache TTL for the chat hot path. */
   snapshotCacheTtlMs?: number;
+  /**
+   * Max chat request body size in bytes (413 above it). The proxy must
+   * buffer the whole body to extract `model` and forward it
+   * byte-identically, so this caps per-request memory instead of
+   * leaving it unbounded.
+   */
+  chatMaxBodyBytes?: number;
 }
 
 export interface AppDependencies {
@@ -78,6 +87,8 @@ export function createApp(dependencies: AppDependencies) {
   const chatHeaderTimeoutMs =
     config.chatHeaderTimeoutMs ?? DEFAULT_CHAT_HEADER_TIMEOUT_MS;
   const snapshotCacheTtlMs = config.snapshotCacheTtlMs ?? 2000;
+  const chatMaxBodyBytes =
+    config.chatMaxBodyBytes ?? DEFAULT_CHAT_MAX_BODY_BYTES;
 
   // Tiny read cache for the chat hot path so per-request DB load stays
   // bounded. Keyed by fleet id (slug and UUID references share one
@@ -251,84 +262,101 @@ export function createApp(dependencies: AppDependencies) {
     return c.json(result.body as Record<string, unknown>, result.status);
   });
 
-  app.post("/v1/chat/completions", async (c) => {
-    const fleetReference = c.req.header("x-haru-fleet") ?? config.defaultFleet;
-    if (fleetReference === undefined || fleetReference === "") {
-      return c.json(
-        errorBody(
-          "fleet_not_found",
-          "no fleet specified: set the X-Haru-Fleet header or configure a default fleet",
+  app.post(
+    "/v1/chat/completions",
+    // Bound the body BEFORE the handler buffers it (runs after the
+    // /v1/* bearer gate, so unauthenticated requests never allocate).
+    bodyLimit({
+      maxSize: chatMaxBodyBytes,
+      onError: (c) =>
+        c.json(
+          errorBody(
+            "payload_too_large",
+            `request body exceeds the ${String(chatMaxBodyBytes)}-byte limit`,
+          ),
+          413,
         ),
-        404,
-      );
-    }
-    const snapshot = await cachedSnapshot(fleetReference);
-    if (!snapshot) {
-      return c.json(errorBody("fleet_not_found", "no such fleet"), 404);
-    }
-
-    // Keep the raw text so unknown fields forward byte-identically;
-    // parse only to extract the model name.
-    const bodyText = await c.req.text();
-    let model: string;
-    try {
-      model = chatCompletionRequestSchema.parse(JSON.parse(bodyText)).model;
-    } catch {
-      return c.json(
-        errorBody("invalid_request", "body must be JSON with a model field"),
-        400,
-      );
-    }
-
-    const active =
-      snapshot.activeDomainId === null
-        ? undefined
-        : snapshot.domains.find((d) => d.id === snapshot.activeDomainId);
-    if (!active || !isRoutableDomainState(active)) {
-      return c.json(
-        errorBody(
-          "no_active_domain",
-          "the fleet has no routable active domain",
-        ),
-        503,
-      );
-    }
-
-    // Same per-model routability predicate route intent reports, so
-    // haru's own ingress and external routing consumers agree.
-    const binding = findRoutableBinding(active, model);
-    if (!binding) {
-      const available = routableModels(active)
-        .filter((m) => m.eligible)
-        .map((m) => m.name)
-        .join(", ");
-      return c.json(
-        errorBody(
-          "model_not_found",
-          `model ${model} is not served by the active domain (available: ${available})`,
-        ),
-        404,
-      );
-    }
-
-    const result = await proxyChatCompletion(
-      chatFetchFunction,
-      binding.servingUrl,
-      bodyText,
-      chatHeaderTimeoutMs,
-      // Propagate a pre-header client disconnect to the upstream so an
-      // abandoned request stops generating immediately.
-      c.req.raw.signal,
-    );
-    if (!result.ok) {
-      if (result.status === 499) {
-        // The client is gone; a bare nginx-style 499 for logs/tests.
-        return new Response(null, { status: 499 });
+    }),
+    async (c) => {
+      const fleetReference =
+        c.req.header("x-haru-fleet") ?? config.defaultFleet;
+      if (fleetReference === undefined || fleetReference === "") {
+        return c.json(
+          errorBody(
+            "fleet_not_found",
+            "no fleet specified: set the X-Haru-Fleet header or configure a default fleet",
+          ),
+          404,
+        );
       }
-      return c.json(result.body, result.status);
-    }
-    return result.response;
-  });
+      const snapshot = await cachedSnapshot(fleetReference);
+      if (!snapshot) {
+        return c.json(errorBody("fleet_not_found", "no such fleet"), 404);
+      }
+
+      // Keep the raw text so unknown fields forward byte-identically;
+      // parse only to extract the model name.
+      const bodyText = await c.req.text();
+      let model: string;
+      try {
+        model = chatCompletionRequestSchema.parse(JSON.parse(bodyText)).model;
+      } catch {
+        return c.json(
+          errorBody("invalid_request", "body must be JSON with a model field"),
+          400,
+        );
+      }
+
+      const active =
+        snapshot.activeDomainId === null
+          ? undefined
+          : snapshot.domains.find((d) => d.id === snapshot.activeDomainId);
+      if (!active || !isRoutableDomainState(active)) {
+        return c.json(
+          errorBody(
+            "no_active_domain",
+            "the fleet has no routable active domain",
+          ),
+          503,
+        );
+      }
+
+      // Same per-model routability predicate route intent reports, so
+      // haru's own ingress and external routing consumers agree.
+      const binding = findRoutableBinding(active, model);
+      if (!binding) {
+        const available = routableModels(active)
+          .filter((m) => m.eligible)
+          .map((m) => m.name)
+          .join(", ");
+        return c.json(
+          errorBody(
+            "model_not_found",
+            `model ${model} is not served by the active domain (available: ${available})`,
+          ),
+          404,
+        );
+      }
+
+      const result = await proxyChatCompletion(
+        chatFetchFunction,
+        binding.servingUrl,
+        bodyText,
+        chatHeaderTimeoutMs,
+        // Propagate a pre-header client disconnect to the upstream so an
+        // abandoned request stops generating immediately.
+        c.req.raw.signal,
+      );
+      if (!result.ok) {
+        if (result.status === 499) {
+          // The client is gone; a bare nginx-style 499 for logs/tests.
+          return new Response(null, { status: 499 });
+        }
+        return c.json(result.body, result.status);
+      }
+      return result.response;
+    },
+  );
 
   return app;
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "operations" ADD COLUMN "routing_committed" boolean DEFAULT false NOT NULL;

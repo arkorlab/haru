@@ -21,6 +21,8 @@ export const ERROR_CODES = {
   operationConflict: "operation_conflict",
   upstreamUnreachable: "upstream_unreachable",
   upstreamTimeout: "upstream_timeout",
+  /** The request body exceeded the chat proxy's size cap. */
+  payloadTooLarge: "payload_too_large",
   /** The supervisor received SIGTERM; no new work is accepted. */
   shuttingDown: "shutting_down",
 } as const;

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   index,
   jsonb,
   pgTable,
@@ -37,6 +38,20 @@ export const operations = pgTable(
     /** Current OperationStep while running; null before claim/after finish. */
     currentStep: text("current_step"),
     stepStartedAt: timestamp("step_started_at", { withTimezone: true }),
+    /**
+     * Set true, atomically with the routing-pointer move, by
+     * `switchActive` (the promotion commit point). This is the ONLY
+     * EPQ-safe signal that a promote already committed routing: the
+     * `target_not_routed` fail guard reads THIS column (a column of the
+     * operation row it locks), not a correlated `fleets` subquery. Under
+     * READ COMMITTED a concurrent `failOperation` blocked on the locked
+     * operation row re-checks the row's own columns on unblock but keeps
+     * its statement snapshot for subqueries, so a `fleets`-pointer
+     * subquery would still read the pre-commit pointer and let the
+     * failure land on a live-routed target. Guarding on this column
+     * closes that switch-commits-first race.
+     */
+    routingCommitted: boolean("routing_committed").notNull().default(false),
     error: jsonb("error").$type<OperationError>(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()

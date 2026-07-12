@@ -3,6 +3,14 @@ import { errorBody, fetchWithTimeout, joinUrl } from "@haru/protocol";
 /** Default bound on the wait for upstream response headers (TTFB). */
 export const DEFAULT_CHAT_HEADER_TIMEOUT_MS = 30_000;
 
+/**
+ * Default chat request-body cap (32 MiB). Generous enough for long
+ * contexts and base64 multimodal payloads, but bounds the per-request
+ * buffer the proxy has to hold to extract `model` and forward the body
+ * verbatim. Override with HARU_CHAT_MAX_BODY_BYTES.
+ */
+export const DEFAULT_CHAT_MAX_BODY_BYTES = 32 * 1024 * 1024;
+
 export type ChatProxyResult =
   | { ok: true; response: Response }
   | { ok: false; status: 502 | 504; body: ReturnType<typeof errorBody> }

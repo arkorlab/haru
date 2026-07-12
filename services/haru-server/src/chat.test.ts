@@ -84,6 +84,24 @@ describe("POST /v1/chat/completions", () => {
     expect(chatCalls[0]?.body).toBe(chatBody);
   });
 
+  it("413s a request body over the configured size cap", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const app = chatApp({ chatCalls, config: { chatMaxBodyBytes: 16 } });
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: chatBody, // well over 16 bytes
+    });
+    expect(response.status).toBe(413);
+    const body = await response.json();
+    expect(body.error.code).toBe("payload_too_large");
+    // Never reached the upstream.
+    expect(chatCalls).toHaveLength(0);
+  });
+
   it("falls back to the configured default fleet", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const app = chatApp({ chatCalls, config: { defaultFleet: "default" } });
