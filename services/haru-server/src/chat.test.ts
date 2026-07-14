@@ -699,6 +699,79 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(1);
   });
 
+  it("does not let an UPPERCASE uuid resolve a lowercase UUID-shaped slug", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat } = failOpenApp({ chatCalls });
+    // A fleet whose SLUG is a uuid string that is nobody's id.
+    const uuidSlug = "0f5c2f5e-9d55-4b5e-8f8e-1c2d3e4f5a6b";
+    const slugOwner = testLayout() as { slug: string };
+    slugOwner.slug = uuidSlug;
+    await applyFleetLayout(database, slugOwner);
+
+    // The store's slug fallback is case-SENSITIVE (slugs are lowercase by
+    // schema), so the uppercase spelling names no fleet: it must 404, not
+    // route to the lowercase slug's owner.
+    const response = await chat(uuidSlug.toUpperCase());
+    expect(response.status).toBe(404);
+    expect(chatCalls).toHaveLength(0);
+    // The lowercase form still resolves.
+    expect((await chat(uuidSlug)).status).toBe(200);
+  });
+
+  it("forgets the previous fleet when a slug is rebound to a new one", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    expect((await chat("default")).status).toBe(200);
+
+    // The fleet is deleted and a NEW one takes its slug.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    const replacement = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
+    replacement.activeDomainSlug = "beta";
+    await applyFleetLayout(database, replacement);
+    expect((await chat("default")).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // The old fleet is unreachable by any live reference, but it is still
+    // keyed by its id: an outage request for that uuid must not resurrect
+    // it through the id-first fast path.
+    breakIt();
+    expect((await chat(goneId)).status).toBe(503);
+    expect(chatCalls).toHaveLength(2);
+  });
+
+  it("forgets a fleet whose UUID-SHAPED SLUG the store reports gone", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const uuidSlug = "0f5c2f5e-9d55-4b5e-8f8e-1c2d3e4f5a6b";
+    const slugOwner = testLayout() as { slug: string };
+    slugOwner.slug = uuidSlug;
+    await applyFleetLayout(database, slugOwner);
+    const fleetId = (await getFleetSnapshot(database, uuidSlug))!.id;
+
+    // Warmed through its ID, so its uuid-shaped slug is never aliased
+    // (that would shadow an id owner): only the snapshot knows the slug.
+    expect((await chat(fleetId)).status).toBe(200);
+
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // The deletion is observed through the SLUG. The entry is keyed by
+    // the id, so nothing but the cached snapshot's own slug can connect
+    // the two.
+    expect((await chat(uuidSlug)).status).toBe(404);
+
+    breakIt();
+    expect((await chat(fleetId)).status).toBe(503);
+    expect(chatCalls).toHaveLength(1);
+  });
+
   it("quarantines the old id owner when a uuid reference falls through to a slug", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });

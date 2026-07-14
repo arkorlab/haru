@@ -172,13 +172,17 @@ export function createApp(dependencies: AppDependencies) {
    * nothing to serve and reports `unavailable`.
    */
   async function cachedSnapshot(rawReference: string): Promise<SnapshotLookup> {
-    // Every cache key and alias is canonical: the database accepts a
-    // UUID in either case but stores (and returns) the lowercase id, so
-    // an uppercase reference must not miss a warm cache.
+    // Cache keys and aliases are canonical: the database accepts a uuid
+    // in either case but stores (and returns) the lowercase id, which is
+    // what the cache is keyed by, so an uppercase reference must not miss
+    // a warm cache. The STORE lookup keeps the raw string: its slug
+    // fallback is case-SENSITIVE (slugs are lowercase by schema), so
+    // lowercasing first would let an uppercase uuid that names no fleet
+    // resolve to a fleet merely using the lowercase form as its slug.
     const reference = canonicalReference(rawReference);
     let pointer;
     try {
-      pointer = await getFleetRoutePointer(database, reference);
+      pointer = await getFleetRoutePointer(database, rawReference);
     } catch (error) {
       // The state store is unreachable. This is the one failure the
       // fail-open argument covers, because it is also the proof that
@@ -324,6 +328,15 @@ export function createApp(dependencies: AppDependencies) {
   }
 
   function rememberFleetReference(reference: string, fleetId: string): void {
+    const previous = fleetIdByReference.get(reference);
+    if (previous !== undefined && previous !== fleetId) {
+      // The reference now names a DIFFERENT fleet (the old one was
+      // deleted and its slug reused). Whatever we cached for the previous
+      // fleet is no longer reachable by any live reference, but it is
+      // still keyed by its id - which cachedFor's id-first fast path
+      // would happily serve during an outage.
+      forgetFleet(previous);
+    }
     fleetIdByReference.set(reference, fleetId);
   }
 
@@ -339,17 +352,25 @@ export function createApp(dependencies: AppDependencies) {
     }
   }
 
+  /** The store says this reference names no fleet. Leave NOTHING behind
+   * that a later outage could serve: the alias, the entry keyed by the
+   * reference itself (a uuid-shaped reference IS a fleet id), and any
+   * cached fleet whose SLUG is that reference - uuid-shaped slugs are
+   * deliberately never aliased, so only the snapshots know them. */
   function forgetFleetByReference(reference: string): void {
     const fleetId = fleetIdByReference.get(reference);
     fleetIdByReference.delete(reference);
     if (fleetId !== undefined) {
       forgetFleet(fleetId);
     }
-    // A UUID-shaped reference IS a fleet id, and the cache is keyed by
-    // fleet id: an entry warmed through the slug has no alias under the
-    // uuid, so the lookup above would have missed it entirely.
     if (isFleetIdShaped(reference)) {
       forgetFleet(reference);
+    }
+    const slugOwners = [...snapshotCache]
+      .filter(([, entry]) => entry.snapshot.slug === reference)
+      .map(([id]) => id);
+    for (const id of slugOwners) {
+      forgetFleet(id);
     }
   }
 
