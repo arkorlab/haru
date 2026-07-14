@@ -275,6 +275,46 @@ describe("training control", () => {
     });
     expect(response.status).toBe(202);
   });
+
+  it("hands the trainer its slot's checkpoint dir and GPU index", async () => {
+    const spawned: { checkpointDir: string; gpuIndex: number }[] = [];
+    const recordingSpawn: SpawnFunction = (_command, options) => {
+      spawned.push({
+        checkpointDir: options.checkpointDir,
+        gpuIndex: options.gpuIndex,
+      });
+      return { pid: 7, kill: () => true, once: () => undefined };
+    };
+    const { app } = createSupervisorApp({
+      config: loadSupervisorConfig(
+        JSON.stringify({
+          slots: [
+            {
+              kind: "inference",
+              gpuIndex: 0,
+              models: [{ name: "example-chat-small", port: 9001 }],
+            },
+            {
+              kind: "training",
+              // Deliberately NOT gpuIndex 0: a trainer that had to guess
+              // would take cuda:0, which is the inference GPU above.
+              gpuIndex: 1,
+              command: ["python", "train.py"],
+              checkpointDir: "/checkpoints/gpu1",
+            },
+          ],
+        }),
+      ),
+      token: undefined,
+      fetchFn: fakeVllmFetch(freshState()),
+      spawnFn: recordingSpawn,
+    });
+    const start = await app.request("/v1/training/start", { method: "POST" });
+    expect(start.status).toBe(200);
+    expect(spawned).toEqual([
+      { checkpointDir: "/checkpoints/gpu1", gpuIndex: 1 },
+    ]);
+  });
 });
 
 describe("GET /v1/gpu/memory", () => {

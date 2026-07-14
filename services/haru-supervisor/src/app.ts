@@ -84,7 +84,12 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     if (spawnFunction) {
       trainingRuns.set(
         slot.gpuIndex,
-        new TrainingRun(slot.command, slot.checkpointDir, spawnFunction),
+        new TrainingRun(
+          slot.command,
+          slot.checkpointDir,
+          slot.gpuIndex,
+          spawnFunction,
+        ),
       );
     }
   }
