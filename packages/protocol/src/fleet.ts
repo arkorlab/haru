@@ -5,7 +5,7 @@ import {
   domainStateSchema,
   slotKindSchema,
   slotStateSchema,
-  slugSchema,
+  storedSlugSchema,
 } from "./enums.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema } from "./policy.js";
@@ -100,7 +100,7 @@ export type SlotSnapshot = z.infer<typeof slotSnapshotSchema>;
 export const domainSnapshotSchema = z.object({
   id: z.uuid(),
   fleetId: z.uuid(),
-  slug: slugSchema,
+  slug: storedSlugSchema,
   state: domainStateSchema,
   provider: domainProviderSchema,
   placement: placementSpecSchema,
@@ -127,7 +127,7 @@ export type DomainSnapshot = z.infer<typeof domainSnapshotSchema>;
  */
 export const fleetSnapshotSchema = z.object({
   id: z.uuid(),
-  slug: slugSchema,
+  slug: storedSlugSchema,
   displayName: z.string().nullable(),
   activeDomainId: z.uuid().nullable(),
   routeRevision: z.number().int().positive(),

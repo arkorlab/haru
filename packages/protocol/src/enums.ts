@@ -95,6 +95,12 @@ export type OperationStep = z.infer<typeof operationStepSchema>;
  * strictly interior: no leading, trailing, or consecutive hyphens, so
  * a slug is always a valid DNS label component (drivers derive
  * SkyPilot cluster / SkyServe service names from it).
+ *
+ * This is the INPUT validator (layout parse / config time). Reading an
+ * already-persisted slug back uses the more permissive
+ * `storedSlugSchema` below: a slug is stored verbatim in a plain text
+ * column, so tightening THIS regex must never be able to reject a slug
+ * an older release already wrote to the database.
  */
 export const slugSchema = z
   .string()
@@ -104,3 +110,20 @@ export const slugSchema = z
     message: "slug must be lowercase alphanumeric with inner hyphens",
   });
 export type Slug = z.infer<typeof slugSchema>;
+
+/**
+ * Lenient slug validator for READ models (domain/fleet snapshots, route
+ * intent). It accepts every slug any past release could have persisted
+ * - including the trailing / consecutive-hyphen forms the original
+ * `slugSchema` allowed - so tightening the input contract can never
+ * brick reading back an existing fleet (which would 500 the chat hot
+ * path). Charset and length are still bounded; only a leading hyphen
+ * and empties are rejected, exactly as the historical writer did.
+ */
+export const storedSlugSchema = z
+  .string()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, {
+    message: "stored slug must be lowercase alphanumeric with hyphens",
+  });
