@@ -26,10 +26,14 @@ export const ERROR_CODES = {
   /** The supervisor received SIGTERM; no new work is accepted. */
   shuttingDown: "shutting_down",
   /**
-   * The fleet state store is unreachable AND nothing was cached, so
-   * the chat proxy cannot even fall back to the last known routing.
-   * A warm process keeps serving instead of raising this (see the
-   * fail-open path in haru-server's `cachedSnapshot`).
+   * The chat proxy could not resolve routing for THIS fleet from the
+   * state store, and had no usable cached routing for it either: the
+   * store is unreachable and the fleet was never cached by this
+   * process, or the store answered but its state is unusable (a
+   * promotion moved the pointer and the fresh snapshot will not load,
+   * or the fleet's persisted state is malformed). A process holding a
+   * cached snapshot for the fleet keeps serving instead of raising
+   * this (see the fail-open path in haru-server's `cachedSnapshot`).
    */
   stateStoreUnavailable: "state_store_unavailable",
 } as const;

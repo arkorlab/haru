@@ -143,17 +143,28 @@ Dependency graph (enforce it when adding imports):
   (schema-enforced on bindings) resolved through the same per-model predicate
   route intent reports (`findRoutableBinding` in core).
 - **The DATA path fails open, the CONTROL path fails closed.** When the state
-  store is unreachable, `cachedSnapshot` serves the last snapshot this process
-  saw (`X-Haru-Routing: stale`; `503 state_store_unavailable` only on a cold
-  cache), because the routing pointer CANNOT move while the database is down -
-  `switchActive` needs the very CAS that is failing - so the cached route is
-  still correct. The TTL deliberately does not bound that path. Control routes
-  (route-intent, fleet GET, promote/demote/reconcile) keep failing. Two
-  corollaries: `/healthz` must never touch the database (a red liveness probe
-  would restart the process and destroy the cache that is keeping traffic
-  alive), and a thrown pointer lookup must never be conflated with a `null`
-  one (`null` = the fleet is gone, evictable; a throw = the store is down,
-  keep the entry).
+  store is UNREACHABLE, `cachedSnapshot` serves the last snapshot this process
+  saw (`X-Haru-Routing: stale`), because the routing pointer CANNOT move while
+  the database is down - `switchActive` needs the very CAS that is failing -
+  so the cached route is still correct. The TTL deliberately does not bound
+  that path. Control routes (route-intent, fleet GET, promote/demote/reconcile)
+  keep failing. Three corollaries, all load-bearing:
+  - The argument rests on "we have no evidence the routing changed", so a
+    FAILING POINTER READ is the only thing that licenses fail-open. Once the
+    pointer read succeeds the store is reachable, and a snapshot load that then
+    fails must fail CLOSED whenever the pointer's revision MOVED (serving the
+    old route would defeat the promotion that just committed) or the state is
+    malformed (`fleetSnapshotSchema` rejecting corrupt jsonb - never mask it).
+    Only a revision-MATCHING cached snapshot may still be served: its routing
+    is provably current and just its slot states are stale, which is the trade
+    the TTL already makes.
+  - `/healthz` must never touch the database: a red liveness probe would
+    restart the process and destroy the cache that is keeping traffic alive.
+  - A pointer lookup that THROWS must never be conflated with one returning
+    `null` (`null` = the fleet is gone, evict its alias; a throw = the store is
+    down, keep the entry). The cache is keyed by fleet id, so every accepted
+    reference form (slug AND uuid) is indexed onto it - the fail-open path has
+    no working query left to resolve one form into the other.
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.

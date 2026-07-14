@@ -1,6 +1,7 @@
 import {
   applyFleetLayout,
   getFleetSnapshot,
+  schema,
   switchActive,
   transitionDomainSlots,
 } from "@haru/db";
@@ -21,6 +22,7 @@ import {
 
 import type { FakeUpstreamCall } from "./fake-supervisor.test-helper.js";
 import type { HaruDatabase } from "@haru/db";
+import type { SlotSpec } from "@haru/protocol";
 
 let database: HaruDatabase;
 let close: () => Promise<void>;
@@ -459,12 +461,12 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
         chatCalls: options.chatCalls,
       }),
     });
-    const chat = () =>
+    const chat = (fleetReference = "default") =>
       app.request("/v1/chat/completions", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-haru-fleet": "default",
+          "x-haru-fleet": fleetReference,
         },
         body: chatBody,
       });
@@ -551,5 +553,94 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(fresh.status).toBe(200);
     expect(fresh.headers.get("x-haru-routing")).toBeNull();
     expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
+  it("reaches a slug-warmed cache by UUID (and vice versa) during an outage", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const fleetId = (await getFleetSnapshot(database, "default"))!.id;
+
+    // Warm through the slug only.
+    expect((await chat("default")).status).toBe(200);
+
+    // X-Haru-Fleet accepts slug OR uuid: the other form must resolve to
+    // the same cached entry, which is keyed by fleet id.
+    breakIt();
+    const byUuid = await chat(fleetId);
+    expect(byUuid.status).toBe(200);
+    expect(byUuid.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+  });
+
+  it("fails CLOSED when the pointer moved but the fresh snapshot will not load", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakAfterSelects } = failOpenApp({ chatCalls });
+    expect((await chat()).status).toBe(200);
+
+    // A promotion commits. The store is still REACHABLE, so the
+    // fail-open argument (the pointer cannot move) does not hold: this
+    // process has just LEARNED that routing moved.
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+
+    // Pointer read succeeds (revision N+1), snapshot load then fails.
+    breakAfterSelects(1);
+    const response = await chat();
+    expect(response.status).toBe(503);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("state_store_unavailable");
+    // Serving the cached route would have sent traffic to the domain the
+    // promotion just moved AWAY from, defeating the failover.
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("still serves stale when only the non-routing refresh fails (same revision)", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat, breakAfterSelects } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+    expect((await chat()).status).toBe(200);
+
+    // TTL expiry forces a snapshot reload; the pointer still reads the
+    // SAME revision, so the cached ROUTING is provably current and only
+    // slot-state freshness is lost. That is the trade the TTL already
+    // makes, so serve it.
+    nowMs += 1001;
+    breakAfterSelects(1);
+    const response = await chat();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+  });
+
+  it("fails CLOSED on malformed persisted state instead of masking it", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+    expect((await chat()).status).toBe(200);
+
+    // The store is reachable but a slot's spec jsonb is corrupt, which
+    // the repo layer deliberately surfaces (fleetSnapshotSchema.parse).
+    // Serving stale routing on top would hide a broken fleet forever.
+    await database
+      .update(schema.slots)
+      .set({ spec: { kind: "bogus" } as unknown as SlotSpec });
+    nowMs += 1001;
+    const response = await chat();
+    expect(response.status).toBe(503);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("state_store_unavailable");
+    expect(chatCalls).toHaveLength(1);
   });
 });

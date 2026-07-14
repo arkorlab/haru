@@ -131,7 +131,7 @@ export function createApp(dependencies: AppDependencies) {
 
   /**
    * Resolve a fleet reference for the chat hot path, FAILING OPEN when
-   * the state store is unreachable: rather than 5xx-ing the data path
+   * the state store is UNREACHABLE: rather than 5xx-ing the data path
    * because the control-plane database is sick, serve the last snapshot
    * this process saw.
    *
@@ -146,74 +146,151 @@ export function createApp(dependencies: AppDependencies) {
    * what failing closed would have produced anyway. Fail-open therefore
    * strictly dominates.
    *
-   * The TTL deliberately does NOT bound this path: capping stale
-   * serving would take a perfectly healthy inference path down because
-   * the control database is unwell, which is the failure this exists to
-   * prevent. A cold process (empty cache) has nothing to serve and
-   * reports `unavailable`.
+   * That argument rests entirely on "we have no evidence the routing
+   * changed", so unreachability is the ONLY failure it licenses, and a
+   * failing POINTER READ is what evidences it. Once the pointer read
+   * succeeds the store is demonstrably reachable, and the two ways the
+   * snapshot load can still fail are handled by `snapshotLoadFailed`
+   * instead: a pointer whose revision MOVED (serving the old route
+   * would defeat the promotion that just committed) and malformed
+   * state (`fleetSnapshotSchema` rejecting corrupt jsonb) both fail
+   * CLOSED.
+   *
+   * The TTL deliberately does NOT bound the stale path: capping it
+   * would take a perfectly healthy inference path down because the
+   * control database is unwell, which is the failure this exists to
+   * prevent. A process with no cached snapshot for the fleet has
+   * nothing to serve and reports `unavailable`.
    */
   async function cachedSnapshot(reference: string): Promise<SnapshotLookup> {
+    let pointer;
+    try {
+      pointer = await getFleetRoutePointer(database, reference);
+    } catch (error) {
+      // The state store is unreachable. This is the one failure the
+      // fail-open argument covers, because it is also the proof that
+      // the routing pointer cannot have moved.
+      return failOpen(reference, error);
+    }
+    if (!pointer) {
+      // The fleet genuinely does not exist. NOT the same signal as a
+      // throw: never treat this as an outage, and never serve a cached
+      // snapshot for it. Forgetting the alias also stops a reused slug
+      // from resolving to the deleted fleet's id during a later outage.
+      fleetIdByReference.delete(reference);
+      return { ok: false, reason: "not_found" };
+    }
+    rememberFleetReference(reference, pointer.id);
+
+    const nowMs = now().getTime();
+    const hit = snapshotCache.get(pointer.id);
+    // A number comparison on hit?.routeRevision narrows hit: equality
+    // with a number can only hold when the entry exists.
+    if (
+      hit?.routeRevision === pointer.routeRevision &&
+      hit.expiresAtMs > nowMs
+    ) {
+      markFresh(pointer.id);
+      return { ok: true, snapshot: hit.snapshot, isStale: false };
+    }
+
     let snapshot;
     try {
-      const pointer = await getFleetRoutePointer(database, reference);
-      if (!pointer) {
-        // The fleet genuinely does not exist. NOT the same signal as a
-        // throw below: never treat this as an outage, and never serve a
-        // cached snapshot for it.
-        return { ok: false, reason: "not_found" };
-      }
-      fleetIdByReference.set(reference, pointer.id);
-      const nowMs = now().getTime();
-      const hit = snapshotCache.get(pointer.id);
-      // A number comparison on hit?.routeRevision narrows hit: equality
-      // with a number can only hold when the entry exists.
-      if (
-        hit?.routeRevision === pointer.routeRevision &&
-        hit.expiresAtMs > nowMs
-      ) {
-        markFresh(pointer.id);
-        return { ok: true, snapshot: hit.snapshot, isStale: false };
-      }
       snapshot = await getFleetSnapshot(database, pointer.id);
-      if (snapshot) {
-        snapshotCache.set(pointer.id, {
-          snapshot,
-          routeRevision: snapshot.routeRevision,
-          expiresAtMs: nowMs + snapshotCacheTtlMs,
-        });
-      }
     } catch (error) {
-      return failOpen(reference, error);
+      return snapshotLoadFailed(reference, pointer, hit, error);
     }
     if (!snapshot) {
       // The fleet vanished between the two reads.
+      fleetIdByReference.delete(reference);
       return { ok: false, reason: "not_found" };
     }
+    snapshotCache.set(pointer.id, {
+      snapshot,
+      routeRevision: snapshot.routeRevision,
+      expiresAtMs: nowMs + snapshotCacheTtlMs,
+    });
+    // The snapshot carries the fleet's other accepted reference form,
+    // so a slug-warmed cache is reachable by UUID during an outage and
+    // vice versa.
+    rememberFleetReference(snapshot.slug, snapshot.id);
     markFresh(snapshot.id);
     return { ok: true, snapshot, isStale: false };
   }
 
+  /** Index every accepted reference form (the caller's, the canonical
+   * id, and the slug once a snapshot reveals it) onto the fleet id the
+   * cache is keyed by: the fail-open path has no working query left to
+   * resolve one form into the other. */
+  function rememberFleetReference(reference: string, fleetId: string): void {
+    fleetIdByReference.set(reference, fleetId);
+    fleetIdByReference.set(fleetId, fleetId);
+  }
+
+  /** The store ANSWERED the pointer read, so it is reachable and the
+   * fail-open argument does not apply. Only one narrow case may still
+   * serve the cache. */
+  function snapshotLoadFailed(
+    reference: string,
+    pointer: { id: string; routeRevision: number },
+    hit: SnapshotCacheEntry | undefined,
+    error: unknown,
+  ): SnapshotLookup {
+    const detail = error instanceof Error ? error.message : String(error);
+    // Malformed state (fleetSnapshotSchema rejecting corrupt jsonb) is
+    // deliberately surfaced by the repo layer. Serving stale routing on
+    // top of it would mask a reachable-but-broken fleet indefinitely.
+    // Matched by name, not `instanceof`, to keep zod out of the
+    // server's dependencies for a single check.
+    const isMalformedState =
+      error instanceof Error && error.name === "ZodError";
+    if (!isMalformedState && hit?.routeRevision === pointer.routeRevision) {
+      // The pointer we just read matches the cached snapshot, so the
+      // ROUTING is provably current: only the refresh of non-routing
+      // state (slot states) failed. Serving it is the same trade the
+      // TTL already makes.
+      return markStale(reference, pointer.id, hit, detail);
+    }
+    // Either the pointer MOVED (a promotion committed; serving the old
+    // active would defeat the very failover the pointer records) or the
+    // state is corrupt, or we have nothing cached. Fail closed.
+    console.error(
+      `cannot load a fresh snapshot for fleet ${reference} (pointer revision ${String(pointer.routeRevision)}): ${detail}`,
+    );
+    return { ok: false, reason: "unavailable", detail };
+  }
+
   /** Serve the last known snapshot for `reference`, or report that the
-   * state store is unreachable and nothing was cached. */
+   * state store is unreachable and this process cached nothing for that
+   * fleet. */
   function failOpen(reference: string, error: unknown): SnapshotLookup {
     const detail = error instanceof Error ? error.message : String(error);
     const fleetId = fleetIdByReference.get(reference);
     const hit = fleetId === undefined ? undefined : snapshotCache.get(fleetId);
-    if (!hit || fleetId === undefined) {
-      // Cold cache: a process that never saw this fleet cannot invent
-      // its routing. This is why the server must NOT be restarted
-      // during a state-store outage, and why /healthz stays green (a
-      // failing liveness probe would destroy the cache that is keeping
-      // traffic alive).
+    if (fleetId === undefined || hit === undefined) {
+      // Nothing cached for THIS fleet: a process that never saw it
+      // cannot invent its routing. This is why the server must NOT be
+      // restarted during a state-store outage, and why /healthz stays
+      // green (a failing liveness probe would destroy the cache that is
+      // keeping traffic alive).
       console.error(
         `state store unreachable and no cached routing for fleet ${reference}: ${detail}`,
       );
       return { ok: false, reason: "unavailable", detail };
     }
+    return markStale(reference, fleetId, hit, detail);
+  }
+
+  function markStale(
+    reference: string,
+    fleetId: string,
+    hit: SnapshotCacheEntry,
+    detail: string,
+  ): SnapshotLookup {
     if (!staleFleetIds.has(fleetId)) {
       staleFleetIds.add(fleetId);
       console.warn(
-        `state store unreachable; serving fleet ${reference} from the last known routing (revision ${String(hit.routeRevision)}): ${detail}`,
+        `serving fleet ${reference} from the last known routing (revision ${String(hit.routeRevision)}): ${detail}`,
       );
     }
     return { ok: true, snapshot: hit.snapshot, isStale: true };
@@ -386,11 +463,11 @@ export function createApp(dependencies: AppDependencies) {
         if (lookup.reason === "not_found") {
           return c.json(errorBody("fleet_not_found", "no such fleet"), 404);
         }
-        // Fail-open had nothing to fall back on (cold cache).
+        // Fail-open had nothing usable to fall back on.
         return c.json(
           errorBody(
             "state_store_unavailable",
-            `the fleet state store is unreachable and this process has no cached routing for ${fleetReference}`,
+            `cannot resolve routing for fleet ${fleetReference} from the state store, and this process has no usable cached routing for it`,
           ),
           503,
         );

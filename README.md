@@ -175,9 +175,12 @@ script reads `DATABASE_URL` and optionally `HARU_FLEET_LAYOUT`.
   marks the response `X-Haru-Routing: stale`. That is safe rather than
   merely convenient: the routing pointer cannot move while the database
   is down (a promotion needs the very CAS that is failing), so the
-  cached route is still the correct one. Only a process that never saw
-  the fleet has nothing to fall back on, and answers `503
-  state_store_unavailable`.
+  cached route is still the correct one. Unreachability is the ONLY
+  failure that licenses it: if the store answers but its state cannot
+  be used (a promotion moved the pointer and the fresh snapshot will
+  not load, or the persisted state is malformed) chat fails CLOSED with
+  `503 state_store_unavailable`, as it does for a fleet this process
+  never cached.
 
 ## vLLM requirements (supervisor hosts)
 
