@@ -31,9 +31,11 @@ export const ERROR_CODES = {
    * store is unreachable and the fleet was never cached by this
    * process, or the store answered but its state is unusable (a
    * promotion moved the pointer and the fresh snapshot will not load,
-   * or the fleet's persisted state is malformed). A process holding a
-   * cached snapshot for the fleet keeps serving instead of raising
-   * this (see the fail-open path in haru-server's `cachedSnapshot`).
+   * or the fleet's persisted state is malformed). A cached snapshot
+   * does NOT preclude this code: an entry whose routing is known to be
+   * superseded (or whose fleet's state is corrupt) is quarantined
+   * rather than served, so a warm process can still raise it (see the
+   * fail-open path in haru-server's `cachedSnapshot`).
    */
   stateStoreUnavailable: "state_store_unavailable",
 } as const;

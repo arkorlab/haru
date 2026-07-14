@@ -176,11 +176,15 @@ script reads `DATABASE_URL` and optionally `HARU_FLEET_LAYOUT`.
   merely convenient: the routing pointer cannot move while the database
   is down (a promotion needs the very CAS that is failing), so the
   cached route is still the correct one. Unreachability is the ONLY
-  failure that licenses it: if the store answers but its state cannot
-  be used (a promotion moved the pointer and the fresh snapshot will
-  not load, or the persisted state is malformed) chat fails CLOSED with
-  `503 state_store_unavailable`, as it does for a fleet this process
-  never cached.
+  failure that licenses serving UNVERIFIED routing: if the store
+  answers but its state cannot be used (a promotion moved the pointer
+  and the fresh snapshot will not load, or the persisted state is
+  malformed) chat fails CLOSED with `503 state_store_unavailable`, as
+  it does for a fleet this process never cached. One reachable-store
+  case also carries the header: when the pointer read proves the cached
+  routing is still current and only the refresh of non-routing state
+  failed, chat serves the cache marked stale. The header therefore
+  means "served without a fresh snapshot", not "the store is down".
 
 ## vLLM requirements (supervisor hosts)
 

@@ -470,7 +470,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
         },
         body: chatBody,
       });
-    return { chat, ...broken };
+    return { app, chat, ...broken };
   }
 
   it("keeps serving the last known routing, past the cache TTL", async () => {
@@ -569,6 +569,23 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     const byUuid = await chat(fleetId);
     expect(byUuid.status).toBe(200);
     expect(byUuid.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+  });
+
+  it("reaches a uuid-warmed cache by slug during an outage", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const fleetId = (await getFleetSnapshot(database, "default"))!.id;
+
+    // Warm through the UUID only: reaching the entry by slug depends on
+    // the loaded snapshot revealing its slug, not on any request
+    // spelling seen so far.
+    expect((await chat(fleetId)).status).toBe(200);
+
+    breakIt();
+    const bySlug = await chat("default");
+    expect(bySlug.status).toBe(200);
+    expect(bySlug.headers.get("x-haru-routing")).toBe("stale");
     expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
   });
 
@@ -1092,5 +1109,89 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     // not to the slug owner's routing under the wrong key.
     expect((await chat(goneId)).status).toBe(503);
     expect(chatCalls).toHaveLength(0);
+  });
+
+  it("stamps the stale marker on error responses served from a stale snapshot", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { app, chat, breakIt } = failOpenApp({ chatCalls });
+    expect((await chat()).status).toBe(200);
+
+    // An error decided FROM the stale snapshot (unserved model) must
+    // still tell the operator the routing that produced it was stale.
+    breakIt();
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: JSON.stringify({ model: "unserved-model", messages: [] }),
+    });
+    expect(response.status).toBe(404);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("model_not_found");
+    expect(response.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("stamps the stale marker on a 499 client disconnect during an outage", async () => {
+    let isUpstreamHanging = false;
+    let wasUpstreamAborted = false;
+    const healthyFetch = buildFakeFetch({
+      supervisors: {
+        [ALPHA_SUPERVISOR]: fakeSupervisorState({ sleeping: false }),
+        [BETA_SUPERVISOR]: fakeSupervisorState(),
+      },
+    });
+    // Same hanging upstream as the healthy-store 499 test, switchable so
+    // the warming request can complete first.
+    const hangingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        const abort = () => {
+          wasUpstreamAborted = true;
+          const reason: unknown = init?.signal?.reason;
+          reject(reason instanceof Error ? reason : new Error("aborted"));
+        };
+        if (init?.signal?.aborted) {
+          abort();
+          return;
+        }
+        init?.signal?.addEventListener("abort", abort);
+      });
+    const broken = breakableDatabase(database);
+    const app = chatApp({
+      database: broken.database,
+      fetchFn: (input, init) =>
+        isUpstreamHanging
+          ? hangingFetch(input, init)
+          : healthyFetch(input, init),
+      config: { chatHeaderTimeoutMs: 60_000 },
+    });
+    const request = (signal?: AbortSignal) =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+        signal,
+      });
+    expect((await request()).status).toBe(200);
+
+    // Outage + hanging upstream: the client walks away pre-headers. The
+    // bare 499 is built outside c.json, so its stale marker rides the
+    // manual header set - the path this test pins.
+    broken.breakIt();
+    isUpstreamHanging = true;
+    const client = new AbortController();
+    const pending = request(client.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    client.abort();
+    const response = await pending;
+    expect(response.status).toBe(499);
+    expect(response.headers.get("x-haru-routing")).toBe("stale");
+    expect(wasUpstreamAborted).toBe(true);
   });
 });

@@ -73,6 +73,23 @@
 - 意図する修正: 参照をキーにした遷移型ログ (初回失敗でログ、次の
   成功でクリア)。`staleFleetIds` と同じ作法。
 
+### pointer 読み取りの部分失敗は「id は否認済み」という半分の判定を捨てる
+
+- 場所: `packages/db/src/repo/snapshots.ts` (`lookupFleetByReference`)。
+  消費側は `services/haru-server/src/app.ts` の `cachedSnapshot` /
+  `failOpen`。
+- 現状: UUID 形の参照は 2 つのクエリを順に実行する。by-id クエリが
+  空結果で成功し (store がその id を否認した直後)、slug フォール
+  バックのクエリが throw した場合、呼び出し側には throw しか見えず
+  fail-open する。その結果、id-first のキャッシュ探索が、1 クエリ前に
+  store が否認したフリートを配信しうる。
+- 先送りの理由: 1 リクエスト内の 2 サブクエリの間で store が落ち、
+  かつ参照が「削除直後でこのプロセスにまだキャッシュされている
+  フリート」を指す必要がある。次の成功読み取りでキャッシュは治る。
+- 意図する修正: pointer 読み取りから部分的な証拠を表面化する
+  (「id 側は否認済み」を運ぶ型付きエラー)。`failOpen` は alias 経路を
+  保ちつつ id キーの探索をスキップできる。
+
 ### キャッシュミス経路で fleet 行を二重取得している
 
 - 場所: `services/haru-server/src/app.ts` (`cachedSnapshot`) が

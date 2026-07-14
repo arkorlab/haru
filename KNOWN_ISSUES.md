@@ -75,6 +75,24 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   first failure, clear on the next success), mirroring
   `staleFleetIds`.
 
+### A partial pointer read discards the id-disclaimed half of its verdict
+
+- Where: `packages/db/src/repo/snapshots.ts` (`lookupFleetByReference`)
+  as consumed by `cachedSnapshot` / `failOpen` in
+  `services/haru-server/src/app.ts`.
+- Current: a UUID-shaped reference runs two sequential queries. When
+  the by-id query succeeds with an empty result (the store just
+  disclaimed the id) and the slug-fallback query then throws, the
+  caller sees only a throw and fails open, so the id-first cache probe
+  can serve a fleet the store disclaimed one query earlier.
+- Why deferred: it needs the store to die between the two sub-queries
+  of a single request AND the reference to name a just-deleted fleet
+  this process still has cached; the next successful read heals the
+  cache.
+- Intended fix: surface partial evidence from the pointer read (a
+  typed error carrying "the id half was disclaimed") so `failOpen` can
+  skip the id-keyed probe while still honoring the alias path.
+
 ### Cache-miss path refetches the fleet row
 
 - Where: `services/haru-server/src/app.ts` (`cachedSnapshot`) calling
