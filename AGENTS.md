@@ -72,8 +72,15 @@ Dependency graph (enforce it when adding imports):
   `sky` exec) between a read and its dependent write.
 - `fleets.activeDomainId` is the single routing pointer; `switchActive` is the
   only writer and takes an optional `requireRunningOperationId` (single-
-  statement EXISTS guard) so a tick racing a concurrent timeout-failure cannot
-  commit routing for a failed operation.
+  statement EXISTS + `FOR UPDATE` guard) so a tick racing a concurrent
+  timeout-failure cannot commit routing for a failed operation. That same
+  statement also sets `operations.routingCommitted` on the driving operation,
+  atomically with the pointer move: the `failOperation` `target_not_routed`
+  guard keys off THAT column (not a `fleets`-pointer subquery) because under
+  READ COMMITTED a fail blocked on the locked operation row re-checks the row's
+  own columns on unblock but keeps its snapshot for correlated subqueries - so
+  a pointer subquery would let a fail land on a promotion that already went
+  live (the switch-commits-first race).
 - `operations` has a partial unique index enforcing one in-flight operation
   per fleet; `createOperation` joins the in-flight row on conflict.
   `sourceDomainId` records the active pointer at creation - post-commit

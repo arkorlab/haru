@@ -25,6 +25,14 @@ export const serverEnvironmentSchema = z.object({
     .positive()
     .max(2_147_483_647)
     .optional(),
+  /** Max chat request body size in bytes (413 above it; default 32
+   * MiB). Raise for very large multimodal or long-context payloads. */
+  HARU_CHAT_MAX_BODY_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(2_147_483_647)
+    .optional(),
   /** Reconcile loop interval; unset disables the background loop. */
   HARU_RECONCILE_INTERVAL_MS: z.coerce
     .number()

@@ -149,6 +149,7 @@ separate `HARU_SUPERVISOR_TOKEN`.
 | `HARU_DEFAULT_FLEET` | Fleet used by `/v1/chat/completions` without an `X-Haru-Fleet` header. |
 | `HARU_CHAT_HEADER_TIMEOUT_MS` | TTFB bound for the chat proxy (default 30000). Raise it for long **non-streaming** completions: their response headers only arrive after full generation. Any value is honored exactly: chat traffic runs on a dedicated dispatcher with undici's own headers/body idle timers disabled, so the bound is not capped at 300s and a streaming body that goes quiet mid-generation is never severed by the transport. |
 | `HARU_SNAPSHOT_CACHE_TTL_MS` | Fleet snapshot cache TTL on the chat hot path (default 2000). Routing-pointer moves surface immediately regardless (every request revalidates against the fleet's route revision); this only bounds slot-state staleness. |
+| `HARU_CHAT_MAX_BODY_BYTES` | Max chat request body size in bytes (default 33554432 = 32 MiB); a larger body gets `413 payload_too_large`. The proxy must buffer the whole body to read `model` and forward it byte-identically, so this caps per-request memory. Raise it for very large multimodal or long-context payloads. |
 | `HARU_RECONCILE_INTERVAL_MS` | Enables the background reconcile loop at this interval. **Unset means no loop**: heartbeats, `autoFailover`, and operation progress then only run when something POSTs `/v1/fleets/:id/reconcile` (e.g. external cron). |
 | `HARU_RECONCILE_FLEETS` | Comma-separated fleet slugs the loop reconciles (falls back to `HARU_DEFAULT_FLEET`). |
 

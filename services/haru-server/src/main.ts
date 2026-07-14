@@ -40,6 +40,7 @@ const app = createApp({
     defaultFleet: environment.HARU_DEFAULT_FLEET,
     chatHeaderTimeoutMs: environment.HARU_CHAT_HEADER_TIMEOUT_MS,
     snapshotCacheTtlMs: environment.HARU_SNAPSHOT_CACHE_TTL_MS,
+    chatMaxBodyBytes: environment.HARU_CHAT_MAX_BODY_BYTES,
   },
 });
 
