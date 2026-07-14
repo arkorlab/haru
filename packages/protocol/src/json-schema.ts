@@ -17,13 +17,21 @@ export const configSchemasByFile: Record<string, z.ZodType> = {
 /**
  * Convert one operator-config schema to a JSON Schema with haru's fixed
  * options, so the generator and the drift test always agree.
+ *
+ * `io: "input"` is essential: these schemas validate the config an
+ * operator AUTHORS, where a field with a `.default()` (provider,
+ * useSpot, sleepLevel, ...) is OPTIONAL. The default "output" mode
+ * describes the PARSED value, where every defaulted field is always
+ * present and thus `required` - which would make an editor wrongly flag
+ * a valid layout that omits a default (including the shipped example).
+ *
  * `unrepresentable: "any"` degrades the cross-field refinements JSON
  * Schema cannot express (dup-slug, dup-(gpuIndex,kind), unique model
  * names) to an unconstrained node rather than throwing - the structural
  * shape is what an editor needs; the loader still enforces the rest.
  */
 export function toConfigJsonSchema(schema: z.ZodType): unknown {
-  return z.toJSONSchema(schema, { unrepresentable: "any" });
+  return z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
 }
 
 /** Byte-exact serialization the generator writes and the test asserts. */

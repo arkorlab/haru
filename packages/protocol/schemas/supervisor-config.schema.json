@@ -38,12 +38,19 @@
                       "maximum": 65535
                     }
                   },
-                  "required": ["name", "port"],
+                  "required": [
+                    "name",
+                    "port"
+                  ],
                   "additionalProperties": false
                 }
               }
             },
-            "required": ["kind", "gpuIndex", "models"],
+            "required": [
+              "kind",
+              "gpuIndex",
+              "models"
+            ],
             "additionalProperties": false
           },
           {
@@ -71,13 +78,20 @@
                 "minLength": 1
               }
             },
-            "required": ["kind", "gpuIndex", "command", "checkpointDir"],
+            "required": [
+              "kind",
+              "gpuIndex",
+              "command",
+              "checkpointDir"
+            ],
             "additionalProperties": false
           }
         ]
       }
     }
   },
-  "required": ["slots"],
+  "required": [
+    "slots"
+  ],
   "additionalProperties": false
 }

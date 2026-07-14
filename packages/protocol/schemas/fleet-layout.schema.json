@@ -107,7 +107,6 @@
               "maximum": 9007199254740991
             }
           },
-          "required": ["prompt", "maxTokens"],
           "additionalProperties": false
         }
       },
@@ -128,14 +127,21 @@
           "provider": {
             "default": "static",
             "type": "string",
-            "enum": ["skypilot", "skyserve", "static"]
+            "enum": [
+              "skypilot",
+              "skyserve",
+              "static"
+            ]
           },
           "placement": {
             "type": "object",
             "properties": {
               "cloud": {
                 "type": "string",
-                "enum": ["aws", "gcp"]
+                "enum": [
+                  "aws",
+                  "gcp"
+                ]
               },
               "region": {
                 "type": "string",
@@ -159,9 +165,7 @@
             "required": [
               "cloud",
               "region",
-              "accelerator",
-              "acceleratorCount",
-              "useSpot"
+              "accelerator"
             ],
             "additionalProperties": false
           },
@@ -200,7 +204,10 @@
                             "format": "uri"
                           }
                         },
-                        "required": ["name", "servingUrl"],
+                        "required": [
+                          "name",
+                          "servingUrl"
+                        ],
                         "additionalProperties": false
                       }
                     },
@@ -215,7 +222,11 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": ["kind", "models", "sleepLevel", "gpuIndex"],
+                  "required": [
+                    "kind",
+                    "models",
+                    "gpuIndex"
+                  ],
                   "additionalProperties": false
                 },
                 {
@@ -243,18 +254,30 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": ["kind", "command", "checkpointDir", "gpuIndex"],
+                  "required": [
+                    "kind",
+                    "command",
+                    "checkpointDir",
+                    "gpuIndex"
+                  ],
                   "additionalProperties": false
                 }
               ]
             }
           }
         },
-        "required": ["slug", "provider", "placement", "slots"],
+        "required": [
+          "slug",
+          "placement",
+          "slots"
+        ],
         "additionalProperties": false
       }
     }
   },
-  "required": ["slug", "domains"],
+  "required": [
+    "slug",
+    "domains"
+  ],
   "additionalProperties": false
 }
