@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { storedSlugSchema } from "./enums.js";
+import { slugSchema } from "./enums.js";
 import { httpUrlSchema, modelBindingSchema } from "./fleet.js";
 
 /**
@@ -22,7 +22,7 @@ export type RouteModel = z.infer<typeof routeModelSchema>;
  */
 export const routeTargetSchema = z.object({
   domainId: z.uuid(),
-  domainSlug: storedSlugSchema,
+  domainSlug: slugSchema,
   /** OpenAI-compatible base URL for the domain, null if not yet known. */
   endpointUrl: httpUrlSchema.nullable(),
   /**
@@ -40,7 +40,7 @@ export type RouteTarget = z.infer<typeof routeTargetSchema>;
 
 export const routeIntentSchema = z.object({
   fleetId: z.uuid(),
-  fleetSlug: storedSlugSchema,
+  fleetSlug: slugSchema,
   /**
    * Monotonic revision, bumped on every active-pointer move. Consumers
    * can cache-bust or order updates on it.

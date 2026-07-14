@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { chatCompletionRequestSchema } from "./chat.js";
-import { operationStepSchema, slugSchema, storedSlugSchema } from "./enums.js";
+import { operationStepSchema, slugSchema } from "./enums.js";
 import { errorBody } from "./errors.js";
 import {
   domainRole,
@@ -37,23 +37,6 @@ describe("slugSchema", () => {
     expect(() => slugSchema.parse("alpha-")).toThrow();
     expect(() => slugSchema.parse("a--b")).toThrow();
     expect(() => slugSchema.parse("-")).toThrow();
-  });
-});
-
-describe("storedSlugSchema (read-back tolerance)", () => {
-  it("accepts legacy slugs the tightened input slugSchema now rejects", () => {
-    // These were writable under the original slugSchema, so they can sit
-    // in a live DB; reading a snapshot / route intent back must not throw
-    // just because the INPUT contract was later tightened.
-    for (const legacy of ["prod-", "us--east", "a--b"]) {
-      expect(() => slugSchema.parse(legacy)).toThrow();
-      expect(storedSlugSchema.parse(legacy)).toBe(legacy);
-    }
-  });
-
-  it("still rejects a leading hyphen and empty (never writable)", () => {
-    expect(() => storedSlugSchema.parse("-x")).toThrow();
-    expect(() => storedSlugSchema.parse("")).toThrow();
   });
 });
 
