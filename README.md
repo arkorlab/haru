@@ -198,6 +198,30 @@ ever constructs `/v1/chat/completions` paths). Verify the endpoint
 paths against your deployed vLLM version; this repo pins its
 behaviour in `services/haru-supervisor/src/vllm-client.ts`.
 
+## Training command contract (supervisor hosts)
+
+A training slot's `command` is spawned verbatim, with no arguments
+appended and no per-run input channel: `POST /v1/training/start`
+carries no body, so the trainer is expected to find its own work
+(poll a queue, read a config file, whatever it likes). The supervisor
+only tells it *where* and *on which GPU* to run, through exactly two
+environment variables added to the child's env:
+
+| Variable | Meaning |
+| --- | --- |
+| `HARU_CHECKPOINT_DIR` | The slot's `checkpointDir`. The trainer must checkpoint here and resume from it on start: a promotion stops the run with SIGTERM plus a grace period, and anything not checkpointed is lost. |
+| `HARU_GPU_INDEX` | The slot's `gpuIndex`. The trainer must pin itself to it (e.g. `CUDA_VISIBLE_DEVICES`). |
+
+`HARU_GPU_INDEX` is not a convenience: a trainer that guessed would
+take GPU 0, and on a standby domain GPU 0 is typically an **inference**
+GPU holding a sleeping vLLM. Training there would fight the wake path
+for VRAM and wedge the next promotion.
+
+The run must also tolerate being killed at any moment (SIGTERM, then
+SIGKILL after the grace period) and being restarted later on a
+different host, resuming from the checkpoint directory. Failover speed
+always wins over a clean training tail.
+
 ## Trying the vertical slice (no GPUs required)
 
 Domains with `provider: "static"` skip the drivers entirely, so the
