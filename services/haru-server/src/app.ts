@@ -93,6 +93,13 @@ type SnapshotLookup =
 /** Marks a chat response served from a stale (fail-open) snapshot. */
 const STALE_ROUTING_HEADER = "x-haru-routing";
 
+/** Lowercase a UUID-shaped reference. The fail-open cache is keyed by the
+ * canonical (lowercase) ids Postgres returns, while the database itself
+ * accepts a uuid in any case, so both spellings must reach the same entry. */
+function canonicalReference(reference: string): string {
+  return isFleetIdShaped(reference) ? reference.toLowerCase() : reference;
+}
+
 export function createApp(dependencies: AppDependencies) {
   const database = dependencies.database;
   const config = dependencies.config ?? {};
@@ -164,7 +171,11 @@ export function createApp(dependencies: AppDependencies) {
    * prevent. A process with no cached snapshot for the fleet has
    * nothing to serve and reports `unavailable`.
    */
-  async function cachedSnapshot(reference: string): Promise<SnapshotLookup> {
+  async function cachedSnapshot(rawReference: string): Promise<SnapshotLookup> {
+    // Every cache key and alias is canonical: the database accepts a
+    // UUID in either case but stores (and returns) the lowercase id, so
+    // an uppercase reference must not miss a warm cache.
+    const reference = canonicalReference(rawReference);
     let pointer;
     try {
       pointer = await getFleetRoutePointer(database, reference);
@@ -181,6 +192,15 @@ export function createApp(dependencies: AppDependencies) {
       // an alias this request did not use.
       forgetFleetByReference(reference);
       return { ok: false, reason: "not_found" };
+    }
+    if (isFleetIdShaped(reference) && pointer.id !== reference) {
+      // A UUID-shaped reference that did NOT resolve by id proves no
+      // fleet holds that id any more (the lookup is id-first), so it
+      // fell through to a fleet that merely uses the string as its slug.
+      // Anything still cached under that id belongs to a fleet that is
+      // gone: quarantine it, or cachedFor's id-first fast path would
+      // serve it during the next outage instead of the slug owner.
+      forgetFleet(reference);
     }
     rememberFleetReference(reference, pointer.id);
 
@@ -324,6 +344,12 @@ export function createApp(dependencies: AppDependencies) {
     fleetIdByReference.delete(reference);
     if (fleetId !== undefined) {
       forgetFleet(fleetId);
+    }
+    // A UUID-shaped reference IS a fleet id, and the cache is keyed by
+    // fleet id: an entry warmed through the slug has no alias under the
+    // uuid, so the lookup above would have missed it entirely.
+    if (isFleetIdShaped(reference)) {
+      forgetFleet(reference);
     }
   }
 

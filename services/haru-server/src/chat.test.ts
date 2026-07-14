@@ -663,6 +663,78 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(1);
   });
 
+  it("reaches the cache with an UPPERCASE uuid (the store accepts either case)", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const fleetId = (await getFleetSnapshot(database, "default"))!.id;
+    expect((await chat("default")).status).toBe(200);
+
+    // Cache keys are the canonical lowercase ids Postgres returns, but
+    // a uuid reference is valid in any case: both must resolve.
+    breakIt();
+    const upper = await chat(fleetId.toUpperCase());
+    expect(upper.status).toBe(200);
+    expect(upper.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+  });
+
+  it("evicts a slug-warmed cache when the deletion is observed through the uuid", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const fleetId = (await getFleetSnapshot(database, "default"))!.id;
+    expect((await chat("default")).status).toBe(200);
+
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // The healthy request that observes the deletion uses the UUID form,
+    // which no alias points at (the cache was warmed through the slug):
+    // it must still evict the entry, which is keyed BY that uuid.
+    expect((await chat(fleetId)).status).toBe(404);
+
+    breakIt();
+    const bySlug = await chat("default");
+    expect(bySlug.status).toBe(503);
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("quarantines the old id owner when a uuid reference falls through to a slug", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    expect((await chat("default")).status).toBe(200);
+    expect(chatCalls[0]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+
+    // The id owner is deleted and a DIFFERENT fleet takes that string as
+    // its slug (the slug charset admits UUID-shaped slugs). Its active
+    // domain is beta, so the two fleets are distinguishable by the
+    // upstream they route to.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    const slugOwner = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
+    slugOwner.slug = goneId;
+    slugOwner.activeDomainSlug = "beta";
+    await applyFleetLayout(database, slugOwner);
+
+    // Healthy: the id lookup finds nothing, so the string resolves by
+    // slug to the new fleet.
+    expect((await chat(goneId)).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // During an outage the id-first fast path must NOT resurrect the
+    // deleted fleet that used to own the id.
+    breakIt();
+    const stale = await chat(goneId);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
   it("keeps id-first resolution when another fleet's slug is UUID-shaped", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });
