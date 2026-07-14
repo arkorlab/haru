@@ -550,6 +550,18 @@ describe("joinUrl", () => {
       "https://host.example/base/evil.example",
     );
   });
+
+  it("does not let leading backslashes swap the origin", () => {
+    // The WHATWG URL parser treats a backslash like a slash on http(s),
+    // so a backslash-led path against an origin-only base (e.g. a
+    // supervisor 127.0.0.1 URL) must not resolve to another host.
+    expect(joinUrl("https://host.example", String.raw`\\evil.example/x`)).toBe(
+      "https://host.example/evil.example/x",
+    );
+    expect(joinUrl("https://host.example", String.raw`/\evil.example`)).toBe(
+      "https://host.example/evil.example",
+    );
+  });
 });
 
 describe("errorBody", () => {

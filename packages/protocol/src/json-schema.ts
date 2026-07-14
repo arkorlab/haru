@@ -6,7 +6,7 @@ import { supervisorConfigSchema } from "./supervisor.js";
 /**
  * The operator-authored config schemas, keyed by the basename of the
  * bundled JSON Schema file that describes them. `scripts/generate-
- * schemas.ts` writes these files; `json-schema.test.ts` drift-checks the
+ * schemas.mjs` writes these files; `json-schema.test.ts` drift-checks the
  * committed output against a fresh conversion so the two never diverge.
  */
 export const configSchemasByFile: Record<string, z.ZodType> = {
