@@ -25,21 +25,20 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   populated from the execFile error and include them in the SkyCliError
   / gpu error strings.
 
-### Chat snapshot cache entries are never evicted
+### Chat snapshot cache has no size cap
 
 - Where: `services/haru-server/src/app.ts` (`snapshotCache`).
-- Current: entries are overwritten on next access but never deleted;
-  a fleet that stops existing (or stops being queried) pins its last
+- Current: entries are dropped when the store reports the fleet gone,
+  and quarantined when they are learned to be unusable (`forgetFleet`),
+  but a fleet that simply stops being queried pins its last
   FleetSnapshot for process lifetime. Bounded by the number of distinct
   fleets ever served.
-- Why deferred: fleets are few and long-lived in this slice; there is
-  no fleet-delete API yet to hook.
-- Intended fix: drop the entry when the per-request pointer lookup
-  returns null, plus a small LRU cap. Careful: only a NULL lookup may
-  evict. A lookup that THROWS means the state store is unreachable, and
-  the entry is exactly what the chat proxy's fail-open path serves from
-  (see `failOpen` in the same file) - evicting there would re-break the
-  data path on every state-store outage.
+- Why deferred: fleets are few and long-lived in this slice.
+- Intended fix: a small LRU cap. Careful: eviction must stay driven by
+  what the store SAYS (a null lookup, an unusable snapshot), never by a
+  lookup that THROWS - a throw means the store is unreachable and the
+  entry is exactly what the chat proxy's fail-open path serves from
+  (see `failOpen` in the same file).
 
 ### Cache-miss path refetches the fleet row
 

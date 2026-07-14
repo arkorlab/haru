@@ -13,6 +13,18 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Whether a fleet reference is UUID-shaped, i.e. whether
+ * `lookupFleetByReference` resolves it by ID BEFORE falling back to
+ * slug. Exported because any consumer that resolves references without
+ * the database (haru-server's fail-open snapshot cache) must reproduce
+ * the same id-first rule: the slug charset admits UUID-shaped slugs, so
+ * one fleet's slug can collide with another fleet's id.
+ */
+export function isFleetIdShaped(reference: string): boolean {
+  return UUID_RE.test(reference);
+}
+
+/**
  * Resolve a fleet reference: by id when it is UUID-shaped, falling
  * back to slug. Two separate lookups (never `id = ref OR slug = ref`):
  * the slug charset admits UUID-shaped slugs, and a single OR query
@@ -25,7 +37,7 @@ async function lookupFleetByReference<T>(
   runQuery: (where: SQL) => Promise<T[]>,
   reference: string,
 ): Promise<T | null> {
-  if (UUID_RE.test(reference)) {
+  if (isFleetIdShaped(reference)) {
     const byId = await runQuery(eq(fleets.id, reference));
     if (byId[0]) {
       return byId[0];

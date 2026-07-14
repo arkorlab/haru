@@ -11,6 +11,7 @@ import {
   createOperation,
   getFleetRoutePointer,
   getFleetSnapshot,
+  isFleetIdShaped,
   toOperationSnapshot,
 } from "@haru/db";
 import {
@@ -111,11 +112,12 @@ export function createApp(dependencies: AppDependencies) {
   // immediately no matter which process moved it; the TTL only bounds
   // non-routing staleness (slot states).
   const snapshotCache = new Map<string, SnapshotCacheEntry>();
-  // Reference (slug or UUID) -> fleet id, learned from every
-  // successful pointer lookup. The cache above is keyed by fleet id,
-  // which is the RESULT of the very query that fails when the state
-  // store is down, so the fail-open path needs this index to find the
-  // entry from the caller's raw reference.
+  // Reference (slug or uuid) -> fleet id, learned from every successful
+  // lookup. The cache above is keyed by fleet id, which is the RESULT of
+  // the very query that fails when the state store is down, so the
+  // fail-open path needs this index to resolve the caller's raw
+  // reference without a database. `cachedFor` reads it with the same
+  // id-first rule the database uses.
   const fleetIdByReference = new Map<string, string>();
   // Fleets currently being served from a stale snapshot. Only used to
   // log the transitions (entering / leaving fail-open) instead of once
@@ -174,10 +176,10 @@ export function createApp(dependencies: AppDependencies) {
     }
     if (!pointer) {
       // The fleet genuinely does not exist. NOT the same signal as a
-      // throw: never treat this as an outage, and never serve a cached
-      // snapshot for it. Forgetting the alias also stops a reused slug
-      // from resolving to the deleted fleet's id during a later outage.
-      fleetIdByReference.delete(reference);
+      // throw: never treat this as an outage. Forget it wholesale, or a
+      // later outage would resurrect a deleted fleet's routing through
+      // an alias this request did not use.
+      forgetFleetByReference(reference);
       return { ok: false, reason: "not_found" };
     }
     rememberFleetReference(reference, pointer.id);
@@ -202,7 +204,7 @@ export function createApp(dependencies: AppDependencies) {
     }
     if (!snapshot) {
       // The fleet vanished between the two reads.
-      fleetIdByReference.delete(reference);
+      forgetFleet(pointer.id);
       return { ok: false, reason: "not_found" };
     }
     snapshotCache.set(pointer.id, {
@@ -210,21 +212,17 @@ export function createApp(dependencies: AppDependencies) {
       routeRevision: snapshot.routeRevision,
       expiresAtMs: nowMs + snapshotCacheTtlMs,
     });
-    // The snapshot carries the fleet's other accepted reference form,
-    // so a slug-warmed cache is reachable by UUID during an outage and
-    // vice versa.
-    rememberFleetReference(snapshot.slug, snapshot.id);
+    // The snapshot reveals the fleet's other accepted reference form, so
+    // a slug-warmed cache is reachable by uuid during an outage and vice
+    // versa. A UUID-SHAPED slug is deliberately NOT indexed: the healthy
+    // lookup resolves such a string by id first, and letting it alias the
+    // slug's owner would route the id owner's traffic to the wrong fleet
+    // during an outage (see isFleetIdShaped in @haru/db).
+    if (!isFleetIdShaped(snapshot.slug)) {
+      rememberFleetReference(snapshot.slug, snapshot.id);
+    }
     markFresh(snapshot.id);
     return { ok: true, snapshot, isStale: false };
-  }
-
-  /** Index every accepted reference form (the caller's, the canonical
-   * id, and the slug once a snapshot reveals it) onto the fleet id the
-   * cache is keyed by: the fail-open path has no working query left to
-   * resolve one form into the other. */
-  function rememberFleetReference(reference: string, fleetId: string): void {
-    fleetIdByReference.set(reference, fleetId);
-    fleetIdByReference.set(fleetId, fleetId);
   }
 
   /** The store ANSWERED the pointer read, so it is reachable and the
@@ -240,20 +238,25 @@ export function createApp(dependencies: AppDependencies) {
     // Malformed state (fleetSnapshotSchema rejecting corrupt jsonb) is
     // deliberately surfaced by the repo layer. Serving stale routing on
     // top of it would mask a reachable-but-broken fleet indefinitely.
-    // Matched by name, not `instanceof`, to keep zod out of the
-    // server's dependencies for a single check.
+    // Matched by name, not `instanceof`, to keep zod out of the server's
+    // dependencies for a single check.
     const isMalformedState =
       error instanceof Error && error.name === "ZodError";
     if (!isMalformedState && hit?.routeRevision === pointer.routeRevision) {
       // The pointer we just read matches the cached snapshot, so the
       // ROUTING is provably current: only the refresh of non-routing
-      // state (slot states) failed. Serving it is the same trade the
-      // TTL already makes.
+      // state (slot states) failed. Serving it is the same trade the TTL
+      // already makes.
       return markStale(reference, pointer.id, hit, detail);
     }
     // Either the pointer MOVED (a promotion committed; serving the old
     // active would defeat the very failover the pointer records) or the
-    // state is corrupt, or we have nothing cached. Fail closed.
+    // state is corrupt, or we cached nothing. Fail closed - and QUARANTINE
+    // the entry: we have now LEARNED that its routing is superseded (or
+    // its fleet unusable), so a later pure outage must not resurrect it
+    // through failOpen, which cannot tell a trustworthy entry from one we
+    // already know is wrong.
+    forgetFleet(pointer.id);
     console.error(
       `cannot load a fresh snapshot for fleet ${reference} (pointer revision ${String(pointer.routeRevision)}): ${detail}`,
     );
@@ -261,24 +264,67 @@ export function createApp(dependencies: AppDependencies) {
   }
 
   /** Serve the last known snapshot for `reference`, or report that the
-   * state store is unreachable and this process cached nothing for that
-   * fleet. */
+   * state store is unreachable and this process cached nothing usable
+   * for that fleet. */
   function failOpen(reference: string, error: unknown): SnapshotLookup {
     const detail = error instanceof Error ? error.message : String(error);
-    const fleetId = fleetIdByReference.get(reference);
-    const hit = fleetId === undefined ? undefined : snapshotCache.get(fleetId);
-    if (fleetId === undefined || hit === undefined) {
-      // Nothing cached for THIS fleet: a process that never saw it
-      // cannot invent its routing. This is why the server must NOT be
-      // restarted during a state-store outage, and why /healthz stays
-      // green (a failing liveness probe would destroy the cache that is
-      // keeping traffic alive).
+    const cached = cachedFor(reference);
+    if (!cached) {
+      // Nothing cached for THIS fleet: a process that never saw it cannot
+      // invent its routing. This is why the server must NOT be restarted
+      // during a state-store outage, and why /healthz stays green (a
+      // failing liveness probe would destroy the cache that is keeping
+      // traffic alive).
       console.error(
         `state store unreachable and no cached routing for fleet ${reference}: ${detail}`,
       );
       return { ok: false, reason: "unavailable", detail };
     }
-    return markStale(reference, fleetId, hit, detail);
+    return markStale(reference, cached.fleetId, cached.entry, detail);
+  }
+
+  /** Resolve a reference against the cache with the SAME id-first rule
+   * the database lookup uses: a UUID-shaped reference is a fleet id
+   * before it is anybody's slug. */
+  function cachedFor(
+    reference: string,
+  ): { fleetId: string; entry: SnapshotCacheEntry } | undefined {
+    if (isFleetIdShaped(reference)) {
+      const byId = snapshotCache.get(reference);
+      if (byId) {
+        return { fleetId: reference, entry: byId };
+      }
+    }
+    const fleetId = fleetIdByReference.get(reference);
+    const entry =
+      fleetId === undefined ? undefined : snapshotCache.get(fleetId);
+    return fleetId !== undefined && entry !== undefined
+      ? { fleetId, entry }
+      : undefined;
+  }
+
+  function rememberFleetReference(reference: string, fleetId: string): void {
+    fleetIdByReference.set(reference, fleetId);
+  }
+
+  /** Drop a fleet from every index. Used when the store reports the
+   * fleet gone, and to quarantine an entry we have learned is unusable. */
+  function forgetFleet(fleetId: string): void {
+    snapshotCache.delete(fleetId);
+    staleFleetIds.delete(fleetId);
+    for (const [reference, id] of fleetIdByReference) {
+      if (id === fleetId) {
+        fleetIdByReference.delete(reference);
+      }
+    }
+  }
+
+  function forgetFleetByReference(reference: string): void {
+    const fleetId = fleetIdByReference.get(reference);
+    fleetIdByReference.delete(reference);
+    if (fleetId !== undefined) {
+      forgetFleet(fleetId);
+    }
   }
 
   function markStale(

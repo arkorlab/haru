@@ -161,10 +161,17 @@ Dependency graph (enforce it when adding imports):
   - `/healthz` must never touch the database: a red liveness probe would
     restart the process and destroy the cache that is keeping traffic alive.
   - A pointer lookup that THROWS must never be conflated with one returning
-    `null` (`null` = the fleet is gone, evict its alias; a throw = the store is
-    down, keep the entry). The cache is keyed by fleet id, so every accepted
-    reference form (slug AND uuid) is indexed onto it - the fail-open path has
-    no working query left to resolve one form into the other.
+    `null` (`null` = the fleet is gone, `forgetFleet` it wholesale; a throw =
+    the store is down, keep the entry). Eviction is driven only by what the
+    store SAYS: a gone fleet, or an entry we LEARNED is unusable (its pointer
+    moved, its state is corrupt) is quarantined so a later pure outage cannot
+    resurrect routing we already know is wrong.
+  - The cache is keyed by fleet id, so every accepted reference form is indexed
+    onto it - the fail-open path has no working query left to resolve one form
+    into the other. That index must reproduce the database's ID-FIRST rule
+    (`isFleetIdShaped` in @haru/db): the slug charset admits UUID-shaped slugs,
+    so one fleet's slug can collide with another's id, and a slug alias must
+    never shadow the id owner.
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.

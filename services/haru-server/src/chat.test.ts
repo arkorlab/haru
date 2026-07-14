@@ -619,6 +619,74 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
   });
 
+  it("quarantines the cache when it learns the pointer moved (no later resurrection)", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakAfterSelects, breakIt } = failOpenApp({ chatCalls });
+    expect((await chat()).status).toBe(200);
+
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+
+    // Pointer read sees revision N+1, snapshot load fails: fail closed.
+    breakAfterSelects(1);
+    expect((await chat()).status).toBe(503);
+
+    // The store now goes away entirely. The entry we already KNOW is
+    // superseded must not come back through fail-open: routing there
+    // would defeat the promotion we just observed.
+    breakIt();
+    const afterOutage = await chat();
+    expect(afterOutage.status).toBe(503);
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("forgets every alias of a fleet the store reports gone", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const fleetId = (await getFleetSnapshot(database, "default"))!.id;
+    expect((await chat("default")).status).toBe(200);
+
+    // The fleet is deleted. The healthy request that observes it must
+    // drop the snapshot AND every alias, not just the spelling it used.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    expect((await chat("default")).status).toBe(404);
+
+    // A later outage must not resurrect the deleted fleet through the
+    // uuid alias.
+    breakIt();
+    const byUuid = await chat(fleetId);
+    expect(byUuid.status).toBe(503);
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("keeps id-first resolution when another fleet's slug is UUID-shaped", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const idOwner = (await getFleetSnapshot(database, "default"))!.id;
+
+    // A second fleet whose SLUG is the first fleet's ID (the slug charset
+    // admits UUID-shaped slugs). The database resolves that string by id
+    // first, so it belongs to the id owner; the cache must agree.
+    const collidingLayout = testLayout() as { slug: string };
+    collidingLayout.slug = idOwner;
+    await applyFleetLayout(database, collidingLayout);
+
+    // Warm BOTH fleets, the colliding one through its slug.
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat(idOwner)).status).toBe(200);
+
+    breakIt();
+    // The string is a fleet ID first: fail-open must serve the id owner
+    // (revision 2 = the seeded default fleet), not the slug owner.
+    const response = await chat(idOwner);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-haru-routing")).toBe("stale");
+  });
+
   it("fails CLOSED on malformed persisted state instead of masking it", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     let nowMs = Date.now();
