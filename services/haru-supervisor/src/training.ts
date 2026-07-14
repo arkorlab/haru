@@ -14,7 +14,15 @@ export interface ChildHandle {
 
 export type SpawnFunction = (
   command: readonly string[],
-  options: { checkpointDir: string },
+  options: {
+    checkpointDir: string;
+    /** Which physical GPU this slot owns. The trainer needs it to pin
+     * itself (CUDA_VISIBLE_DEVICES): without it a slot on GPU 1 would
+     * default to cuda:0, which on a standby domain is an INFERENCE GPU
+     * with a sleeping vLLM on it - the training process would fight the
+     * wake path for VRAM and wedge the next promotion. */
+    gpuIndex: number;
+  },
 ) => ChildHandle;
 
 /**
@@ -32,15 +40,18 @@ export class TrainingRun {
   private stateValue: TrainingRunState = "idle";
   private readonly command: readonly string[];
   private readonly checkpointDirectory: string;
+  private readonly gpuIndex: number;
   private readonly spawnFunction: SpawnFunction;
 
   constructor(
     command: readonly string[],
     checkpointDirectory: string,
+    gpuIndex: number,
     spawnFunction: SpawnFunction,
   ) {
     this.command = command;
     this.checkpointDirectory = checkpointDirectory;
+    this.gpuIndex = gpuIndex;
     this.spawnFunction = spawnFunction;
   }
 
@@ -84,6 +95,7 @@ export class TrainingRun {
     }
     const child = this.spawnFunction(this.command, {
       checkpointDir: this.checkpointDirectory,
+      gpuIndex: this.gpuIndex,
     });
     this.child = child;
     this.stateValue = "running";

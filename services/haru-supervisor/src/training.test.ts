@@ -40,7 +40,11 @@ function fakeChild(pid: number): FakeChild {
 
 let children: FakeChild[];
 let spawnFunction: SpawnFunction;
-let spawnedWith: { command: readonly string[]; checkpointDir: string }[];
+let spawnedWith: {
+  command: readonly string[];
+  checkpointDir: string;
+  gpuIndex: number;
+}[];
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -48,7 +52,11 @@ beforeEach(() => {
   spawnedWith = [];
   let pid = 100;
   spawnFunction = (command, options) => {
-    spawnedWith.push({ command, checkpointDir: options.checkpointDir });
+    spawnedWith.push({
+      command,
+      checkpointDir: options.checkpointDir,
+      gpuIndex: options.gpuIndex,
+    });
     pid += 1;
     const child = fakeChild(pid);
     children.push(child);
@@ -64,6 +72,7 @@ function run(): TrainingRun {
   return new TrainingRun(
     ["python", "train.py", "--resume"],
     "/checkpoints/run",
+    1,
     spawnFunction,
   );
 }
@@ -78,6 +87,9 @@ describe("TrainingRun", () => {
     expect(spawnedWith[0]).toEqual({
       command: ["python", "train.py", "--resume"],
       checkpointDir: "/checkpoints/run",
+      // The slot's GPU, not a default: a trainer that guessed cuda:0
+      // would land on the inference GPU.
+      gpuIndex: 1,
     });
     expect(training.pids).toEqual([101]);
   });

@@ -53,6 +53,11 @@ const realSpawn: SpawnFunction = (command, options) => {
       ...process.env,
       // The trainer must checkpoint here and resume from it on start.
       HARU_CHECKPOINT_DIR: options.checkpointDir,
+      // Which GPU this slot owns. A trainer that had to guess would take
+      // cuda:0, and on a standby domain that is an INFERENCE GPU with a
+      // sleeping vLLM on it: the run would fight the wake path for VRAM
+      // and wedge the next promotion.
+      HARU_GPU_INDEX: String(options.gpuIndex),
     },
   });
   return {
