@@ -129,11 +129,24 @@ Dependency graph (enforce it when adding imports):
   bearer-authenticated API is the only external control surface, and the chat
   proxy only ever constructs `/v1/chat/completions` paths.
 - The chat proxy forwards the request body as **raw text** (byte-identical,
-  vendor extensions survive) and copies only `content-type` back; the abort
-  timer bounds TTFB only, never the streaming body, and a pre-header client
-  disconnect aborts the upstream (bare 499 back). `model` is a lowercase
-  routing key (schema-enforced on bindings) resolved through the same
-  per-model predicate route intent reports (`findRoutableBinding` in core).
+  vendor extensions survive) and copies only `content-type` back (plus
+  `X-Haru-Routing: stale` on the fail-open path); the abort timer bounds TTFB
+  only, never the streaming body, and a pre-header client disconnect aborts
+  the upstream (bare 499 back). `model` is a lowercase routing key
+  (schema-enforced on bindings) resolved through the same per-model predicate
+  route intent reports (`findRoutableBinding` in core).
+- **The DATA path fails open, the CONTROL path fails closed.** When the state
+  store is unreachable, `cachedSnapshot` serves the last snapshot this process
+  saw (`X-Haru-Routing: stale`; `503 state_store_unavailable` only on a cold
+  cache), because the routing pointer CANNOT move while the database is down -
+  `switchActive` needs the very CAS that is failing - so the cached route is
+  still correct. The TTL deliberately does not bound that path. Control routes
+  (route-intent, fleet GET, promote/demote/reconcile) keep failing. Two
+  corollaries: `/healthz` must never touch the database (a red liveness probe
+  would restart the process and destroy the cache that is keeping traffic
+  alive), and a thrown pointer lookup must never be conflated with a `null`
+  one (`null` = the fleet is gone, evictable; a throw = the store is down,
+  keep the entry).
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.

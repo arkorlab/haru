@@ -8,6 +8,7 @@ import { createTestDatabase } from "@haru/db/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
+import { breakableDatabase } from "./failing-database.test-helper.js";
 import {
   buildFakeFetch,
   fakeSupervisorState,
@@ -408,5 +409,129 @@ describe("POST /v1/chat/completions", () => {
 
     expect((await request()).status).toBe(200);
     expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+});
+
+/**
+ * Fail-open: the DATA path must survive a state-store outage. The
+ * routing pointer cannot move while the database is down (switchActive
+ * needs the very CAS that is failing), so the cached routing is still
+ * correct, and serving it beats 5xx-ing a healthy inference path
+ * because the control database is sick.
+ */
+describe("POST /v1/chat/completions with an unreachable state store", () => {
+  function failOpenApp(options: {
+    chatCalls?: FakeUpstreamCall[];
+    nowMs?: () => number;
+    snapshotCacheTtlMs?: number;
+  }) {
+    const broken = breakableDatabase(database);
+    const app = createApp({
+      database: broken.database,
+      now: options.nowMs ? () => new Date(options.nowMs!()) : undefined,
+      config:
+        options.snapshotCacheTtlMs === undefined
+          ? {}
+          : { snapshotCacheTtlMs: options.snapshotCacheTtlMs },
+      fetchFn: buildFakeFetch({
+        supervisors: {
+          [ALPHA_SUPERVISOR]: fakeSupervisorState({ sleeping: false }),
+          [BETA_SUPERVISOR]: fakeSupervisorState(),
+        },
+        chatCalls: options.chatCalls,
+      }),
+    });
+    const chat = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+      });
+    return { chat, ...broken };
+  }
+
+  it("keeps serving the last known routing, past the cache TTL", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat, breakIt } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+
+    // Warm the cache while the store is healthy.
+    const warm = await chat();
+    expect(warm.status).toBe(200);
+    expect(warm.headers.get("x-haru-routing")).toBeNull();
+
+    // The state store goes away.
+    breakIt();
+    const stale = await chat();
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+
+    // The cache TTL deliberately does NOT bound the fail-open path:
+    // capping it would take a healthy inference path down just because
+    // the control database is unwell.
+    nowMs += 60_000;
+    const wayPastTtl = await chat();
+    expect(wayPastTtl.status).toBe(200);
+    expect(wayPastTtl.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls).toHaveLength(3);
+  });
+
+  it("fails closed with 503 state_store_unavailable on a cold cache", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    // A process that never saw this fleet cannot invent its routing:
+    // an outage during a cold start is not survivable, which is why the
+    // server must not be restarted mid-outage.
+    breakIt();
+    const response = await chat();
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("state_store_unavailable");
+    // Nothing was proxied: we never guessed an upstream.
+    expect(chatCalls).toHaveLength(0);
+  });
+
+  it("returns to fresh routing (and sees a missed pointer move) once the store is back", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt, heal } = failOpenApp({ chatCalls });
+    expect((await chat()).status).toBe(200);
+
+    breakIt();
+    // A promotion committed by ANOTHER process while this one is blind
+    // (the test drives the real handle). The stale path cannot see it.
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+    for (const [from, to] of [
+      ["sleeping", "waking"],
+      ["waking", "probing"],
+      ["probing", "serving"],
+    ] as const) {
+      await transitionDomainSlots(database, betaId, "inference", [from], to);
+    }
+
+    const blind = await chat();
+    expect(blind.status).toBe(200);
+    expect(blind.headers.get("x-haru-routing")).toBe("stale");
+    // Still the OLD active: that is the honest consequence of being
+    // unable to read the pointer.
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+
+    // The store comes back: the per-request revision check picks the
+    // move up immediately and the stale marker disappears.
+    heal();
+    const fresh = await chat();
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers.get("x-haru-routing")).toBeNull();
+    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
   });
 });

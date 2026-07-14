@@ -35,7 +35,11 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Why deferred: fleets are few and long-lived in this slice; there is
   no fleet-delete API yet to hook.
 - Intended fix: drop the entry when the per-request pointer lookup
-  returns null, plus a small LRU cap.
+  returns null, plus a small LRU cap. Careful: only a NULL lookup may
+  evict. A lookup that THROWS means the state store is unreachable, and
+  the entry is exactly what the chat proxy's fail-open path serves from
+  (see `failOpen` in the same file) - evicting there would re-break the
+  data path on every state-store outage.
 
 ### Cache-miss path refetches the fleet row
 

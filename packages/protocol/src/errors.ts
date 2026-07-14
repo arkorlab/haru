@@ -23,6 +23,13 @@ export const ERROR_CODES = {
   upstreamTimeout: "upstream_timeout",
   /** The supervisor received SIGTERM; no new work is accepted. */
   shuttingDown: "shutting_down",
+  /**
+   * The fleet state store is unreachable AND nothing was cached, so
+   * the chat proxy cannot even fall back to the last known routing.
+   * A warm process keeps serving instead of raising this (see the
+   * fail-open path in haru-server's `cachedSnapshot`).
+   */
+  stateStoreUnavailable: "state_store_unavailable",
 } as const;
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 
