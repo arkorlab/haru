@@ -40,9 +40,12 @@ function chatApp(options: {
   chatCalls?: FakeUpstreamCall[];
   fetchFn?: typeof fetch;
   config?: Record<string, unknown>;
+  database?: HaruDatabase;
+  now?: () => Date;
 }) {
   return createApp({
-    database,
+    database: options.database ?? database,
+    now: options.now,
     config: options.config ?? {},
     fetchFn:
       options.fetchFn ??
@@ -446,20 +449,17 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     snapshotCacheTtlMs?: number;
   }) {
     const broken = breakableDatabase(database);
-    const app = createApp({
+    // Same wiring as chatApp (the fleet posture must not drift between
+    // the healthy suite and this one), with the breakable handle and an
+    // injectable clock swapped in.
+    const app = chatApp({
+      chatCalls: options.chatCalls,
       database: broken.database,
       now: options.nowMs ? () => new Date(options.nowMs!()) : undefined,
       config:
         options.snapshotCacheTtlMs === undefined
           ? {}
           : { snapshotCacheTtlMs: options.snapshotCacheTtlMs },
-      fetchFn: buildFakeFetch({
-        supervisors: {
-          [ALPHA_SUPERVISOR]: fakeSupervisorState({ sleeping: false }),
-          [BETA_SUPERVISOR]: fakeSupervisorState(),
-        },
-        chatCalls: options.chatCalls,
-      }),
     });
     const chat = (fleetReference = "default") =>
       app.request("/v1/chat/completions", {
@@ -718,6 +718,51 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect((await chat(uuidSlug)).status).toBe(200);
   });
 
+  it("keeps the slug owner's cache when an UPPERCASE spelling of its uuid-shaped slug 404s", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const uuidSlug = "0f5c2f5e-9d55-4b5e-8f8e-1c2d3e4f5a6b";
+    const slugOwner = testLayout() as { slug: string };
+    slugOwner.slug = uuidSlug;
+    await applyFleetLayout(database, slugOwner);
+
+    // Warm through the exact spelling the store matches.
+    expect((await chat(uuidSlug)).status).toBe(200);
+
+    // The uppercase spelling names no fleet (the id probe misses in any
+    // case, the slug fallback is case-sensitive). That verdict is about
+    // the UPPERCASE string only: it must not evict the live fleet that
+    // owns the lowercase slug, or one 404-producing request would strip
+    // the fleet's outage protection.
+    expect((await chat(uuidSlug.toUpperCase())).status).toBe(404);
+
+    breakIt();
+    const stale = await chat(uuidSlug);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls).toHaveLength(2);
+  });
+
+  it("does not resolve an UPPERCASE spelling of a uuid-shaped slug during an outage", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const uuidSlug = "0f5c2f5e-9d55-4b5e-8f8e-1c2d3e4f5a6b";
+    const slugOwner = testLayout() as { slug: string };
+    slugOwner.slug = uuidSlug;
+    await applyFleetLayout(database, slugOwner);
+    expect((await chat(uuidSlug)).status).toBe(200);
+
+    // The healthy store 404s this exact spelling (case-sensitive slug
+    // match), so fail-open must not invent a resolution for it: serving
+    // stale preserves known routing, it does not widen the reference
+    // grammar.
+    breakIt();
+    expect((await chat(uuidSlug.toUpperCase())).status).toBe(503);
+    // The spelling the store actually matched still fails open.
+    expect((await chat(uuidSlug)).status).toBe(200);
+    expect(chatCalls).toHaveLength(2);
+  });
+
   it("forgets the previous fleet when a slug is rebound to a new one", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });
@@ -810,26 +855,45 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
 
   it("keeps id-first resolution when another fleet's slug is UUID-shaped", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
-    const { chat, breakIt } = failOpenApp({ chatCalls });
+    const { chat, breakIt, heal } = failOpenApp({ chatCalls });
     const idOwner = (await getFleetSnapshot(database, "default"))!.id;
 
     // A second fleet whose SLUG is the first fleet's ID (the slug charset
-    // admits UUID-shaped slugs). The database resolves that string by id
-    // first, so it belongs to the id owner; the cache must agree.
-    const collidingLayout = testLayout() as { slug: string };
+    // admits UUID-shaped slugs), routable to beta so the two fleets are
+    // distinguishable by the upstream they proxy to.
+    const collidingLayout = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
     collidingLayout.slug = idOwner;
+    collidingLayout.activeDomainSlug = "beta";
     await applyFleetLayout(database, collidingLayout);
+    const collidingId = (await database.select().from(schema.fleets)).find(
+      (fleet) => fleet.slug === idOwner,
+    )!.id;
 
-    // Warm BOTH fleets, the colliding one through its slug.
-    expect((await chat("default")).status).toBe(200);
-    expect((await chat(idOwner)).status).toBe(200);
+    // Warm ONLY the slug owner, through its own id (its slug is shadowed
+    // by the id owner in the healthy lookup, so this is the only spelling
+    // that reaches it).
+    expect((await chat(collidingId)).status).toBe(200);
+    expect(chatCalls[0]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
 
+    // The string is a fleet ID first, and the id owner was never cached:
+    // serving the slug owner instead would route the id owner's traffic
+    // to the wrong fleet, so fail-open must have nothing for it.
     breakIt();
-    // The string is a fleet ID first: fail-open must serve the id owner
-    // (revision 2 = the seeded default fleet), not the slug owner.
-    const response = await chat(idOwner);
-    expect(response.status).toBe(200);
-    expect(response.headers.get("x-haru-routing")).toBe("stale");
+    expect((await chat(idOwner)).status).toBe(503);
+
+    // Warm the id owner too: the same outage request now serves IT (the
+    // seeded default fleet on alpha), never the slug owner on beta.
+    heal();
+    expect((await chat(idOwner)).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
+    breakIt();
+    const stale = await chat(idOwner);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[2]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
   });
 
   it("fails CLOSED on malformed persisted state instead of masking it", async () => {
@@ -855,5 +919,178 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
       ((await response.json()) as { error: { code: string } }).error.code,
     ).toBe("state_store_unavailable");
     expect(chatCalls).toHaveLength(1);
+  });
+
+  it("does not let a failed reload evict the fresh entry a concurrent request cached", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
+    expect((await chat()).status).toBe(200);
+
+    // A promotion commits: revision 2, beta serving.
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+    for (const [from, to] of [
+      ["sleeping", "waking"],
+      ["waking", "probing"],
+      ["probing", "serving"],
+    ] as const) {
+      await transitionDomainSlots(database, betaId, "inference", [from], to);
+    }
+
+    // Request A reads the moved pointer, then freezes inside its snapshot
+    // load (access 1 = pointer read, access 2 = fleet row).
+    const gate = gateSelect(2);
+    const requestA = chat();
+    await gate.reached;
+
+    // Request B completes the full healthy cycle meanwhile and caches the
+    // fresh revision-2 snapshot.
+    expect((await chat()).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // A's load now fails. Judging by the entry A saw BEFORE its load
+    // would quarantine (and 503 past) B's fresh entry; the entry cached
+    // NOW matches the pointer A read, so A must serve it and keep it.
+    gate.fail();
+    const responseA = await requestA;
+    expect(responseA.status).toBe(200);
+    expect(responseA.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // The fresh entry survived: a full outage still fails open.
+    breakIt();
+    const outage = await chat();
+    expect(outage.status).toBe(200);
+    expect(outage.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[3]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
+  it("does not let a slow reload overwrite a newer revision cached concurrently", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat, breakIt, gateSelect } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+    expect((await chat()).status).toBe(200);
+
+    // TTL expiry forces a reload at the UNMOVED pointer: request A reads
+    // the revision-1 fleet row, then freezes before its domain query
+    // (accesses: 1 pointer, 2 fleet row, 3 subquery builder, 4 domains).
+    nowMs += 1001;
+    const gate = gateSelect(4);
+    const requestA = chat();
+    await gate.reached;
+
+    // A promotion commits (revision 2, beta serving) and request B caches
+    // the fresh revision-2 snapshot.
+    const snapshot = await getFleetSnapshot(database, "default");
+    const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
+    const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
+    await switchActive(database, snapshot!.id, alphaId, betaId);
+    for (const [from, to] of [
+      ["sleeping", "waking"],
+      ["waking", "probing"],
+      ["probing", "serving"],
+    ] as const) {
+      await transitionDomainSlots(database, betaId, "inference", [from], to);
+    }
+    expect((await chat()).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // A's stale (revision-1) load completes LAST. Last-completer-wins
+    // would put the superseded routing back into the fail-open cache.
+    gate.proceed();
+    expect((await requestA).status).toBe(200);
+
+    breakIt();
+    const outage = await chat();
+    expect(outage.status).toBe(200);
+    expect(outage.headers.get("x-haru-routing")).toBe("stale");
+    // The newer revision won: outage traffic follows the promotion.
+    expect(chatCalls[3]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
+  it("does not re-publish a snapshot loaded before the fleet was forgotten", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat, breakIt, gateSelect } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+    expect((await chat()).status).toBe(200);
+
+    // TTL expiry forces a reload: request A reads the fleet row, then
+    // freezes before its domain query.
+    nowMs += 1001;
+    const gate = gateSelect(4);
+    const requestA = chat();
+    await gate.reached;
+
+    // The fleet is deleted, and request B observes it: 404 plus a
+    // wholesale forget of the entry and its aliases.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    expect((await chat()).status).toBe(404);
+
+    // A's pre-deletion read completes LAST. Publishing it would put the
+    // deleted fleet's entry (and its alias) back for fail-open to serve.
+    gate.proceed();
+    expect((await requestA).status).toBe(503);
+
+    breakIt();
+    const outage = await chat();
+    expect(outage.status).toBe(503);
+    // state_store_unavailable = nothing cached (correct); a resurrected
+    // entry would surface as no_active_domain served stale instead.
+    expect(
+      ((await outage.json()) as { error: { code: string } }).error.code,
+    ).toBe("state_store_unavailable");
+    expect(outage.headers.get("x-haru-routing")).toBeNull();
+    expect(chatCalls).toHaveLength(1);
+  });
+
+  it("never caches a slug-fallback snapshot under the id the pointer named", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+
+    // Request A resolves the pointer to the id owner, then freezes before
+    // its snapshot load (access 1 = pointer read by id, access 2 = fleet
+    // row).
+    const gate = gateSelect(2);
+    const requestA = chat(goneId);
+    await gate.reached;
+
+    // The id owner is deleted and a DIFFERENT fleet takes the string as
+    // its slug.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    const slugOwner = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
+    slugOwner.slug = goneId;
+    slugOwner.activeDomainSlug = "beta";
+    await applyFleetLayout(database, slugOwner);
+
+    // A's fleet-row read now falls through to the slug owner: a snapshot
+    // that does NOT belong to the id A's pointer named. Cached under that
+    // id it would be invisible to every eviction (the owner's uuid-shaped
+    // slug is never aliased and its own id differs), so A must drop it.
+    gate.proceed();
+    expect((await requestA).status).toBe(404);
+
+    breakIt();
+    // Nothing was poisoned: the id resolves to nothing during the outage,
+    // not to the slug owner's routing under the wrong key.
+    expect((await chat(goneId)).status).toBe(503);
+    expect(chatCalls).toHaveLength(0);
   });
 });

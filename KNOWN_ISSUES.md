@@ -40,6 +40,41 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   entry is exactly what the chat proxy's fail-open path serves from
   (see `failOpen` in the same file).
 
+### Outage detection latency on the chat path is unbounded
+
+- Where: `services/haru-server/src/app.ts` (`cachedSnapshot` calling
+  `getFleetRoutePointer`).
+- Current: the pointer read has no timeout or AbortSignal and there is
+  no memoized outage state, so during a hang-mode outage (the store
+  accepts TCP but never answers) every chat request waits for the
+  transport's own failure before fail-open engages, potentially the
+  full undici header timeout, paid per request as time-to-first-byte.
+  A fast-fail outage (connection refused) is near-instant and
+  unaffected.
+- Why deferred: a detection bound is a design decision (fixed budget
+  vs config knob vs circuit breaker) and this slice deliberately adds
+  no new env knobs; the common outage mode (endpoint down) fails fast.
+- Intended fix: a small fixed AbortSignal budget around the pointer
+  read (well above healthy p99), optionally with a short-lived "store
+  is down" memo so consecutive requests skip straight to the cache.
+  Both must preserve the rule that only a FAILING pointer read
+  licenses fail-open.
+
+### Fail-closed chat errors log once per request
+
+- Where: `services/haru-server/src/app.ts` (`failOpen` cold-cache
+  branch and `snapshotLoadFailed`).
+- Current: stale-serving transitions are deduplicated via
+  `staleFleetIds`, but the two fail-closed 503 paths `console.error`
+  on every request: an outage with a cold (or quarantined) fleet logs
+  per request, and a fleet with corrupt persisted state logs per
+  reload attempt until the data is repaired.
+- Why deferred: dedup needs per-reference bookkeeping with a clearing
+  rule; the flood only occurs while requests are already failing.
+- Intended fix: transition-style logging keyed by reference (log on
+  first failure, clear on the next success), mirroring
+  `staleFleetIds`.
+
 ### Cache-miss path refetches the fleet row
 
 - Where: `services/haru-server/src/app.ts` (`cachedSnapshot`) calling

@@ -148,16 +148,18 @@ Dependency graph (enforce it when adding imports):
   the database is down - `switchActive` needs the very CAS that is failing -
   so the cached route is still correct. The TTL deliberately does not bound
   that path. Control routes (route-intent, fleet GET, promote/demote/reconcile)
-  keep failing. Three corollaries, all load-bearing:
+  keep failing. Six corollaries, all load-bearing:
   - The argument rests on "we have no evidence the routing changed", so a
     FAILING POINTER READ is the only thing that licenses fail-open. Once the
     pointer read succeeds the store is reachable, and a snapshot load that then
     fails must fail CLOSED whenever the pointer's revision MOVED (serving the
     old route would defeat the promotion that just committed) or the state is
-    malformed (`fleetSnapshotSchema` rejecting corrupt jsonb - never mask it).
-    Only a revision-MATCHING cached snapshot may still be served: its routing
-    is provably current and just its slot states are stale, which is the trade
-    the TTL already makes.
+    malformed (`MalformedFleetStateError` from @haru/db, the typed wrapper for
+    `fleetSnapshotSchema` rejecting corrupt jsonb - never mask it). Only a
+    revision-MATCHING cached snapshot may still be served - judged against the
+    entry cached NOW, not one captured before the load: its routing is provably
+    current and just its slot states are stale, which is the trade the TTL
+    already makes.
   - `/healthz` must never touch the database: a red liveness probe would
     restart the process and destroy the cache that is keeping traffic alive.
   - A pointer lookup that THROWS must never be conflated with one returning
@@ -166,12 +168,22 @@ Dependency graph (enforce it when adding imports):
     store SAYS: a gone fleet, or an entry we LEARNED is unusable (its pointer
     moved, its state is corrupt) is quarantined so a later pure outage cannot
     resurrect routing we already know is wrong.
+  - A verdict only covers the SPELLING the store judged. Uuid-ID identity is
+    case-insensitive (lowercase for id-keyed cache operations), but slug and
+    alias identity is case-SENSITIVE: a 404 for `0F5C...` must never evict -
+    and an outage must never serve - the live fleet whose slug is the
+    lowercase form (`canonicalReference` in haru-server documents the split).
   - The cache is keyed by fleet id, so every accepted reference form is indexed
     onto it - the fail-open path has no working query left to resolve one form
     into the other. That index must reproduce the database's ID-FIRST rule
     (`isFleetIdShaped` in @haru/db): the slug charset admits UUID-shaped slugs,
     so one fleet's slug can collide with another's id, and a slug alias must
     never shadow the id owner.
+  - A snapshot load that OVERLAPS a store verdict must not publish its result:
+    a forget while the read was in flight (`cacheGeneration`), a concurrently
+    cached NEWER revision, and a slug-fallback row whose id differs from the
+    pointer's all mean the slower load lost - the map keeps the later
+    knowledge, and only the response is built from the losing snapshot.
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.

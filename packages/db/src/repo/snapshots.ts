@@ -13,6 +13,21 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Persisted fleet state failed `fleetSnapshotSchema` validation
+ * (corrupt jsonb in a spec/placement/policy column). Thrown by
+ * `getFleetSnapshot` so consumers can tell "the data is broken" from
+ * "the store is unreachable" without inspecting a validation-library
+ * error by name; the original validation error rides on `cause`.
+ */
+export class MalformedFleetStateError extends Error {
+  constructor(cause: unknown) {
+    super("persisted fleet state failed validation");
+    this.name = "MalformedFleetStateError";
+    this.cause = cause;
+  }
+}
+
+/**
  * Whether a fleet reference is UUID-shaped, i.e. whether
  * `lookupFleetByReference` resolves it by ID BEFORE falling back to
  * slug. Exported because any consumer that resolves references without
@@ -90,7 +105,8 @@ export async function getFleetRoutePointer(
  * Load the full read model of a fleet (a fleet lookup, then domains
  * and slots in parallel; no transaction). The result is validated
  * through the protocol schema so malformed jsonb (spec/placement/
- * policy) surfaces here instead of deep inside a consumer.
+ * policy) surfaces here, as `MalformedFleetStateError`, instead of
+ * deep inside a consumer.
  */
 export async function getFleetSnapshot(
   database: HaruDatabase,
@@ -121,7 +137,7 @@ export async function getFleetSnapshot(
   // Group once instead of filtering the full slot list per domain.
   const slotsByDomain = Map.groupBy(slotRows, (s) => s.domainId);
 
-  return fleetSnapshotSchema.parse({
+  return parseSnapshot({
     id: fleet.id,
     slug: fleet.slug,
     displayName: fleet.displayName,
@@ -149,4 +165,12 @@ export async function getFleetSnapshot(
       })),
     })),
   });
+}
+
+function parseSnapshot(candidate: unknown): FleetSnapshot {
+  try {
+    return fleetSnapshotSchema.parse(candidate);
+  } catch (error) {
+    throw new MalformedFleetStateError(error);
+  }
 }

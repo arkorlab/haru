@@ -12,6 +12,7 @@ import {
   getFleetRoutePointer,
   getFleetSnapshot,
   isFleetIdShaped,
+  MalformedFleetStateError,
   toOperationSnapshot,
 } from "@haru/db";
 import {
@@ -93,9 +94,12 @@ type SnapshotLookup =
 /** Marks a chat response served from a stale (fail-open) snapshot. */
 const STALE_ROUTING_HEADER = "x-haru-routing";
 
-/** Lowercase a UUID-shaped reference. The fail-open cache is keyed by the
- * canonical (lowercase) ids Postgres returns, while the database itself
- * accepts a uuid in any case, so both spellings must reach the same entry. */
+/** Lowercase a UUID-shaped reference. Licensed ONLY for uuid-ID identity:
+ * the database accepts a uuid in any case and returns the lowercase id the
+ * fail-open cache is keyed by. Slug and alias identity is case-SENSITIVE
+ * (slugs are lowercase by schema), so a store verdict about one spelling
+ * says nothing about a fleet whose SLUG is the lowercase form - never
+ * canonicalize a reference before a slug-side operation. */
 function canonicalReference(reference: string): string {
   return isFleetIdShaped(reference) ? reference.toLowerCase() : reference;
 }
@@ -130,6 +134,10 @@ export function createApp(dependencies: AppDependencies) {
   // log the transitions (entering / leaving fail-open) instead of once
   // per request, which would flood the log on a busy fleet.
   const staleFleetIds = new Set<string>();
+  // Bumped by every forgetFleet. A snapshot load that started before a
+  // forget must not publish its result: the forget was a store verdict
+  // (fleet gone, routing superseded) that the in-flight read predates.
+  let cacheGeneration = 0;
 
   const reconcilerDependencies = {
     database,
@@ -172,14 +180,14 @@ export function createApp(dependencies: AppDependencies) {
    * nothing to serve and reports `unavailable`.
    */
   async function cachedSnapshot(rawReference: string): Promise<SnapshotLookup> {
-    // Cache keys and aliases are canonical: the database accepts a uuid
-    // in either case but stores (and returns) the lowercase id, which is
-    // what the cache is keyed by, so an uppercase reference must not miss
-    // a warm cache. The STORE lookup keeps the raw string: its slug
-    // fallback is case-SENSITIVE (slugs are lowercase by schema), so
-    // lowercasing first would let an uppercase uuid that names no fleet
-    // resolve to a fleet merely using the lowercase form as its slug.
-    const reference = canonicalReference(rawReference);
+    // The raw spelling and the canonical (lowercased-if-uuid-shaped) form
+    // are deliberately BOTH in play, per role: uuid-ID identity is
+    // case-insensitive, so id-keyed cache operations use the canonical
+    // form; slug and alias identity is case-sensitive, so the store
+    // lookup, the alias map and slug-side evictions always use the raw
+    // string. Mixing them up lets a verdict about one spelling evict or
+    // serve a fleet the store was never asked about.
+    const canonical = canonicalReference(rawReference);
     let pointer;
     try {
       pointer = await getFleetRoutePointer(database, rawReference);
@@ -187,26 +195,31 @@ export function createApp(dependencies: AppDependencies) {
       // The state store is unreachable. This is the one failure the
       // fail-open argument covers, because it is also the proof that
       // the routing pointer cannot have moved.
-      return failOpen(reference, error);
+      return failOpen(rawReference, error);
     }
     if (!pointer) {
       // The fleet genuinely does not exist. NOT the same signal as a
-      // throw: never treat this as an outage. Forget it wholesale, or a
-      // later outage would resurrect a deleted fleet's routing through
-      // an alias this request did not use.
-      forgetFleetByReference(reference);
+      // throw: never treat this as an outage. Forget everything this RAW
+      // spelling can name, or a later outage would resurrect a deleted
+      // fleet's routing through an alias this request did not use.
+      forgetFleetByReference(rawReference);
       return { ok: false, reason: "not_found" };
     }
-    if (isFleetIdShaped(reference) && pointer.id !== reference) {
+    if (isFleetIdShaped(rawReference) && pointer.id !== canonical) {
       // A UUID-shaped reference that did NOT resolve by id proves no
       // fleet holds that id any more (the lookup is id-first), so it
       // fell through to a fleet that merely uses the string as its slug.
       // Anything still cached under that id belongs to a fleet that is
       // gone: quarantine it, or cachedFor's id-first fast path would
       // serve it during the next outage instead of the slug owner.
-      forgetFleet(reference);
+      forgetFleet(canonical);
     }
-    rememberFleetReference(reference, pointer.id);
+    if (pointer.id !== canonical) {
+      // Learn the alias only when the reference is not the fleet id
+      // itself: cachedFor's id-first probe already reaches the entry
+      // from either uuid spelling, so a self-alias would be dead weight.
+      rememberFleetReference(rawReference, pointer.id);
+    }
 
     const nowMs = now().getTime();
     const hit = snapshotCache.get(pointer.id);
@@ -220,32 +233,51 @@ export function createApp(dependencies: AppDependencies) {
       return { ok: true, snapshot: hit.snapshot, isStale: false };
     }
 
+    const generationBeforeLoad = cacheGeneration;
     let snapshot;
     try {
       snapshot = await getFleetSnapshot(database, pointer.id);
     } catch (error) {
-      return snapshotLoadFailed(reference, pointer, hit, error);
+      return snapshotLoadFailed(rawReference, pointer, error);
     }
-    if (!snapshot) {
-      // The fleet vanished between the two reads.
+    if (snapshot?.id !== pointer.id) {
+      // The fleet vanished between the two reads. A slug-fallback hit on
+      // a DIFFERENT fleet proves the same thing (nobody holds this id),
+      // and its snapshot must never be cached under an id it does not
+      // own: nothing but a not_found observed through the right spelling
+      // could ever evict it.
       forgetFleet(pointer.id);
       return { ok: false, reason: "not_found" };
     }
-    snapshotCache.set(pointer.id, {
-      snapshot,
-      routeRevision: snapshot.routeRevision,
-      expiresAtMs: nowMs + snapshotCacheTtlMs,
-    });
-    // The snapshot reveals the fleet's other accepted reference form, so
-    // a slug-warmed cache is reachable by uuid during an outage and vice
-    // versa. A UUID-SHAPED slug is deliberately NOT indexed: the healthy
-    // lookup resolves such a string by id first, and letting it alias the
-    // slug's owner would route the id owner's traffic to the wrong fleet
-    // during an outage (see isFleetIdShaped in @haru/db).
-    if (!isFleetIdShaped(snapshot.slug)) {
-      rememberFleetReference(snapshot.slug, snapshot.id);
+    // Publish only when this load did not lose a race: a forget while
+    // our reads were in flight was a store verdict (fleet gone, routing
+    // superseded) that the read predates, and a concurrent request may
+    // have cached a NEWER revision than the one we started loading.
+    // Either way the map must keep the later knowledge; the response
+    // built from this snapshot is still fine.
+    const existing = snapshotCache.get(pointer.id);
+    const didLoseRace =
+      cacheGeneration !== generationBeforeLoad ||
+      (existing !== undefined &&
+        existing.routeRevision > snapshot.routeRevision);
+    if (!didLoseRace) {
+      snapshotCache.set(pointer.id, {
+        snapshot,
+        routeRevision: snapshot.routeRevision,
+        expiresAtMs: nowMs + snapshotCacheTtlMs,
+      });
+      // The snapshot reveals the fleet's other accepted reference form,
+      // so a slug-warmed cache is reachable by uuid during an outage and
+      // vice versa. A UUID-SHAPED slug is deliberately NOT indexed: the
+      // healthy lookup resolves such a string by id first, and letting
+      // it alias the slug's owner would route the id owner's traffic to
+      // the wrong fleet during an outage (see isFleetIdShaped in
+      // @haru/db).
+      if (!isFleetIdShaped(snapshot.slug)) {
+        rememberFleetReference(snapshot.slug, snapshot.id);
+      }
+      markFresh(snapshot.id);
     }
-    markFresh(snapshot.id);
     return { ok: true, snapshot, isStale: false };
   }
 
@@ -255,32 +287,41 @@ export function createApp(dependencies: AppDependencies) {
   function snapshotLoadFailed(
     reference: string,
     pointer: { id: string; routeRevision: number },
-    hit: SnapshotCacheEntry | undefined,
     error: unknown,
   ): SnapshotLookup {
     const detail = error instanceof Error ? error.message : String(error);
     // Malformed state (fleetSnapshotSchema rejecting corrupt jsonb) is
-    // deliberately surfaced by the repo layer. Serving stale routing on
-    // top of it would mask a reachable-but-broken fleet indefinitely.
-    // Matched by name, not `instanceof`, to keep zod out of the server's
-    // dependencies for a single check.
-    const isMalformedState =
-      error instanceof Error && error.name === "ZodError";
-    if (!isMalformedState && hit?.routeRevision === pointer.routeRevision) {
+    // deliberately surfaced by the repo layer as a typed error. Serving
+    // stale routing on top of it would mask a reachable-but-broken fleet
+    // indefinitely.
+    const isMalformedState = error instanceof MalformedFleetStateError;
+    // Judge the entry cached NOW, not one captured before the load: a
+    // concurrent request may have refreshed it while our read was in
+    // flight, and its fresh work must be neither bypassed nor evicted.
+    const current = snapshotCache.get(pointer.id);
+    if (!isMalformedState && current?.routeRevision === pointer.routeRevision) {
       // The pointer we just read matches the cached snapshot, so the
       // ROUTING is provably current: only the refresh of non-routing
       // state (slot states) failed. Serving it is the same trade the TTL
       // already makes.
-      return markStale(reference, pointer.id, hit, detail);
+      return markStale(reference, pointer.id, current, detail);
     }
-    // Either the pointer MOVED (a promotion committed; serving the old
-    // active would defeat the very failover the pointer records) or the
-    // state is corrupt, or we cached nothing. Fail closed - and QUARANTINE
-    // the entry: we have now LEARNED that its routing is superseded (or
-    // its fleet unusable), so a later pure outage must not resurrect it
-    // through failOpen, which cannot tell a trustworthy entry from one we
-    // already know is wrong.
-    forgetFleet(pointer.id);
+    if (
+      current === undefined ||
+      current.routeRevision <= pointer.routeRevision
+    ) {
+      // Either the pointer MOVED (a promotion committed; serving the old
+      // active would defeat the very failover the pointer records) or the
+      // state is corrupt, or we cached nothing. Fail closed - and
+      // QUARANTINE the entry: we have now LEARNED that its routing is
+      // superseded (or its fleet unusable), so a later pure outage must
+      // not resurrect it through failOpen, which cannot tell a
+      // trustworthy entry from one we already know is wrong. An entry
+      // whose revision is NEWER than the pointer we read is the one
+      // exception: it was published from a later store state than ours,
+      // and this verdict does not cover it.
+      forgetFleet(pointer.id);
+    }
     console.error(
       `cannot load a fresh snapshot for fleet ${reference} (pointer revision ${String(pointer.routeRevision)}): ${detail}`,
     );
@@ -307,19 +348,24 @@ export function createApp(dependencies: AppDependencies) {
     return markStale(reference, cached.fleetId, cached.entry, detail);
   }
 
-  /** Resolve a reference against the cache with the SAME id-first rule
-   * the database lookup uses: a UUID-shaped reference is a fleet id
-   * before it is anybody's slug. */
+  /** Resolve a RAW reference against the cache with the SAME rules the
+   * database lookup uses: a UUID-shaped reference is a fleet id before
+   * it is anybody's slug, and uuid identity alone is case-insensitive.
+   * The alias fallback keeps the raw spelling because it stands in for
+   * the store's case-SENSITIVE slug match: serving an uppercase
+   * spelling the healthy store would 404 is inventing a resolution,
+   * not preserving one. */
   function cachedFor(
-    reference: string,
+    rawReference: string,
   ): { fleetId: string; entry: SnapshotCacheEntry } | undefined {
-    if (isFleetIdShaped(reference)) {
-      const byId = snapshotCache.get(reference);
+    if (isFleetIdShaped(rawReference)) {
+      const canonical = rawReference.toLowerCase();
+      const byId = snapshotCache.get(canonical);
       if (byId) {
-        return { fleetId: reference, entry: byId };
+        return { fleetId: canonical, entry: byId };
       }
     }
-    const fleetId = fleetIdByReference.get(reference);
+    const fleetId = fleetIdByReference.get(rawReference);
     const entry =
       fleetId === undefined ? undefined : snapshotCache.get(fleetId);
     return fleetId !== undefined && entry !== undefined
@@ -341,8 +387,11 @@ export function createApp(dependencies: AppDependencies) {
   }
 
   /** Drop a fleet from every index. Used when the store reports the
-   * fleet gone, and to quarantine an entry we have learned is unusable. */
+   * fleet gone, and to quarantine an entry we have learned is unusable.
+   * Bumps the generation so an in-flight snapshot load that predates
+   * the verdict cannot re-publish what was just dropped. */
   function forgetFleet(fleetId: string): void {
+    cacheGeneration += 1;
     snapshotCache.delete(fleetId);
     staleFleetIds.delete(fleetId);
     for (const [reference, id] of fleetIdByReference) {
@@ -352,11 +401,16 @@ export function createApp(dependencies: AppDependencies) {
     }
   }
 
-  /** The store says this reference names no fleet. Leave NOTHING behind
-   * that a later outage could serve: the alias, the entry keyed by the
-   * reference itself (a uuid-shaped reference IS a fleet id), and any
-   * cached fleet whose SLUG is that reference - uuid-shaped slugs are
-   * deliberately never aliased, so only the snapshots know them. */
+  /** The store says this RAW reference spelling names no fleet. Leave
+   * NOTHING behind that a later outage could serve through it: the
+   * alias, the entry keyed by the id form (uuid identity is
+   * case-insensitive, so that part of the verdict covers the canonical
+   * spelling), and any cached fleet whose SLUG is that exact string -
+   * uuid-shaped slugs are deliberately never aliased, so only the
+   * snapshots know them. Slug identity is case-SENSITIVE: this must
+   * receive the spelling the store actually judged, never a
+   * canonicalized one, or a 404 for `0F5C...` would evict the live
+   * fleet whose slug is the lowercase form. */
   function forgetFleetByReference(reference: string): void {
     const fleetId = fleetIdByReference.get(reference);
     fleetIdByReference.delete(reference);
@@ -364,13 +418,17 @@ export function createApp(dependencies: AppDependencies) {
       forgetFleet(fleetId);
     }
     if (isFleetIdShaped(reference)) {
-      forgetFleet(reference);
-    }
-    const slugOwners = [...snapshotCache]
-      .filter(([, entry]) => entry.snapshot.slug === reference)
-      .map(([id]) => id);
-    for (const id of slugOwners) {
-      forgetFleet(id);
+      forgetFleet(reference.toLowerCase());
+      // Only a UUID-SHAPED slug can be missing from the alias map (it is
+      // never indexed); for any other spelling the alias above was the
+      // only way in, so the scan would be dead work on every unknown-
+      // fleet request.
+      const slugOwners = [...snapshotCache]
+        .filter(([, entry]) => entry.snapshot.slug === reference)
+        .map(([id]) => id);
+      for (const id of slugOwners) {
+        forgetFleet(id);
+      }
     }
   }
 
@@ -391,7 +449,10 @@ export function createApp(dependencies: AppDependencies) {
 
   function markFresh(fleetId: string): void {
     if (staleFleetIds.delete(fleetId)) {
-      console.warn(`state store reachable again; fleet ${fleetId} is fresh`);
+      // Neutral wording: a stale spell can also come from a failed
+      // snapshot REFRESH while the store stayed reachable, so this must
+      // not claim an outage ended.
+      console.warn(`fleet ${fleetId} is serving fresh routing again`);
     }
   }
 
@@ -556,11 +617,14 @@ export function createApp(dependencies: AppDependencies) {
         if (lookup.reason === "not_found") {
           return c.json(errorBody("fleet_not_found", "no such fleet"), 404);
         }
-        // Fail-open had nothing usable to fall back on.
+        // Fail-open had nothing usable to fall back on. The detail
+        // distinguishes an unreachable store (transient, wait it out)
+        // from malformed persisted state (permanent until repaired) for
+        // the operator reading the response.
         return c.json(
           errorBody(
             "state_store_unavailable",
-            `cannot resolve routing for fleet ${fleetReference} from the state store, and this process has no usable cached routing for it`,
+            `cannot resolve routing for fleet ${fleetReference} from the state store, and this process has no usable cached routing for it: ${lookup.detail}`,
           ),
           503,
         );

@@ -39,6 +39,40 @@
   意味し、そのエントリこそ chat proxy の fail-open 経路が配信する
   当のものだから (同ファイルの `failOpen`)。
 
+### chat 経路の障害検知レイテンシに上限がない
+
+- 場所: `services/haru-server/src/app.ts` (`cachedSnapshot` が
+  `getFleetRoutePointer` を呼ぶ箇所)。
+- 現状: pointer 読み取りに timeout / AbortSignal がなく、障害状態の
+  メモ化もない。そのためハング型の障害 (TCP は受けるが応答しない)
+  では、fail-open が発動する前に毎リクエストがトランスポート自身の
+  失敗を待つ (最悪 undici のヘッダータイムアウトまで、リクエスト
+  ごとに TTFB として支払う)。即時失敗型の障害 (connection refused)
+  はほぼ即座で影響なし。
+- 先送りの理由: 検知の上限は設計判断 (固定バジェット / 設定ノブ /
+  サーキットブレーカー) であり、このスライスは意図的に新しい env
+  ノブを増やさない。よくある障害モード (エンドポイント停止) は
+  即時失敗する。
+- 意図する修正: pointer 読み取りへの小さな固定 AbortSignal
+  バジェット (健全時 p99 より十分上)。加えて短寿命の「store 停止中」
+  メモで後続リクエストを直接キャッシュへ向かわせてもよい。いずれも
+  「fail-open を許可するのは pointer 読み取りの失敗だけ」という
+  規則を保つこと。
+
+### fail-closed の chat エラーはリクエストごとにログされる
+
+- 場所: `services/haru-server/src/app.ts` (`failOpen` のコールド
+  キャッシュ分岐と `snapshotLoadFailed`)。
+- 現状: stale 配信の遷移は `staleFleetIds` で重複排除済みだが、
+  fail-closed の 503 経路 2 つは毎リクエスト `console.error` する:
+  コールド (または隔離済み) フリートへの障害中リクエストは
+  リクエストごとに、永続状態が壊れたフリートはデータ修復まで
+  リロード試行ごとにログが出る。
+- 先送りの理由: 重複排除には参照ごとの状態とクリア規則が必要で、
+  洪水はリクエストが既に失敗している間しか起きない。
+- 意図する修正: 参照をキーにした遷移型ログ (初回失敗でログ、次の
+  成功でクリア)。`staleFleetIds` と同じ作法。
+
 ### キャッシュミス経路で fleet 行を二重取得している
 
 - 場所: `services/haru-server/src/app.ts` (`cachedSnapshot`) が
