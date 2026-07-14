@@ -42,6 +42,9 @@ export const fleetLayoutSchema = z
   // Strict: the top-level operator layout rejects unknown keys so a
   // typo'd field is a config-time error, not a silently ignored one.
   .strictObject({
+    /** Optional pointer to the bundled JSON Schema, so an editor can
+     * validate / autocomplete the layout. Ignored by the loader. */
+    $schema: z.string().optional(),
     slug: slugSchema,
     displayName: z.string().min(1).optional(),
     /** Slug of the domain that starts active; must name a domain below. */

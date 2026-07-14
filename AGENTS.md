@@ -19,6 +19,9 @@ pnpm db:generate    # drizzle-kit generate -> committed under packages/db/drizzl
 pnpm db:push        # apply schema to $DATABASE_URL (Neon)
 pnpm db:seed        # seed a fleet from a layout JSON (--config path or HARU_FLEET_LAYOUT)
 
+pnpm schemas:generate  # regenerate committed JSON Schemas for operator configs
+                       # (packages/protocol/schemas); drift-checked by a vitest test
+
 pnpm dev --filter=@haru/server       # via turbo (^build deps first), then tsx watch
 pnpm dev --filter=@haru/supervisor   # GPU-host agent; same ^build-then-watch shape
 ```

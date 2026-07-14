@@ -12,12 +12,14 @@ import {
   trainingSlotSpecSchema,
 } from "./fleet.js";
 import { fleetLayoutSchema } from "./layout.js";
+import { demoteRequestSchema, promoteRequestSchema } from "./operations.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
 import {
   probeRequestSchema,
   supervisorConfigSchema,
   trainingStopRequestSchema,
+  vllmTargetRequestSchema,
 } from "./supervisor.js";
 import { joinUrl } from "./url.js";
 
@@ -376,6 +378,15 @@ describe("fleetLayoutSchema", () => {
       }),
     ).not.toThrow();
   });
+
+  it("accepts an optional $schema pointer for editor integration", () => {
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        $schema: "../../protocol/schemas/fleet-layout.schema.json",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("probeRequestSchema", () => {
@@ -397,6 +408,34 @@ describe("trainingStopRequestSchema", () => {
     );
     expect(() =>
       trainingStopRequestSchema.parse({ graceMs: 2_147_483_648 }),
+    ).toThrow();
+  });
+});
+
+describe("internal request DTOs are strict", () => {
+  it("rejects unknown keys on control-API request bodies", () => {
+    // Server control API (client and server ship together).
+    expect(() =>
+      promoteRequestSchema.parse({
+        targetDomainId: "00000000-0000-4000-8000-00000000000a",
+        force: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      demoteRequestSchema.parse({
+        targetDomainId: "00000000-0000-4000-8000-00000000000a",
+        extra: 1,
+      }),
+    ).toThrow();
+    // Supervisor inbound (server is the only caller).
+    expect(() =>
+      vllmTargetRequestSchema.parse({ gpuIndex: 0, all: true }),
+    ).toThrow();
+    expect(() =>
+      trainingStopRequestSchema.parse({ graceMs: 5000, hard: true }),
+    ).toThrow();
+    expect(() =>
+      probeRequestSchema.parse({ prompt: "ping", prmpt: "typo" }),
     ).toThrow();
   });
 });
