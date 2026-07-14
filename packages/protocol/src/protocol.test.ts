@@ -321,6 +321,33 @@ describe("joinUrl", () => {
       "http://127.0.0.1:8701/healthz",
     );
   });
+
+  it("preserves a query string on the base URL", () => {
+    expect(
+      joinUrl(
+        "https://gw.example/vllm?api-version=2024",
+        "/v1/chat/completions",
+      ),
+    ).toBe("https://gw.example/vllm/v1/chat/completions?api-version=2024");
+  });
+
+  it("keeps a query the path carries and merges base params", () => {
+    expect(joinUrl("http://127.0.0.1:9000?tenant=a", "/sleep?level=1")).toBe(
+      "http://127.0.0.1:9000/sleep?level=1&tenant=a",
+    );
+  });
+
+  it("lets a path param override a same-named base param", () => {
+    expect(joinUrl("https://host.example?level=9", "/sleep?level=1")).toBe(
+      "https://host.example/sleep?level=1",
+    );
+  });
+
+  it("preserves repeated base query keys", () => {
+    expect(joinUrl("https://host.example?tag=a&tag=b", "/v1/status")).toBe(
+      "https://host.example/v1/status?tag=a&tag=b",
+    );
+  });
 });
 
 describe("errorBody", () => {

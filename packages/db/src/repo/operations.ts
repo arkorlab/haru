@@ -202,16 +202,20 @@ export async function completeOperation(
  * already advanced or completed the step) cannot fail an operation
  * for a step that is no longer running.
  *
- * `guard: "target_not_routed"` further blocks the failure while the
- * fleet's routing pointer sits on the operation's target. This closes
- * the switch_active commit race: the routing CAS and the step advance
- * are separate statements, so a timeout tick that read a stale
- * pointer could otherwise land its failure in between - routing on
- * the new active with the operation recorded failed and post-commit
- * cleanup skipped. With the guard the failure matches zero rows, the
- * timeout tick re-reads, and both ticks converge on done. Correlated
- * to the operation row inside the statement, so it needs no extra
- * parameters.
+ * `guard: "target_not_routed"` further blocks the failure once the
+ * operation has committed routing (`routingCommitted = true`, stamped
+ * by switchActive atomically with the pointer move). This closes the
+ * switch_active commit race: the routing CAS and the step advance are
+ * separate statements, so a timeout tick that read a stale pointer
+ * could otherwise land its failure in between - routing on the new
+ * active with the operation recorded failed and post-commit cleanup
+ * skipped. Guarding on the operation's OWN `routingCommitted` column
+ * (not a `fleets` pointer subquery) is what makes the guard reliable:
+ * under READ COMMITTED a fail blocked on the locked operation row
+ * re-checks that row's columns on unblock (so a just-set
+ * routingCommitted is seen), whereas a correlated subquery keeps the
+ * pre-commit snapshot. With the guard the failure matches zero rows,
+ * the timeout tick re-reads, and both ticks converge on done.
  */
 export async function failOperation(
   database: HaruDatabase,
@@ -220,15 +224,6 @@ export async function failOperation(
   fromStep?: OperationStep,
   guard?: "target_not_routed",
 ): Promise<OperationRow | null> {
-  const targetRouted = database
-    .select({ one: sql`1` })
-    .from(fleets)
-    .where(
-      and(
-        eq(fleets.id, operations.fleetId),
-        eq(fleets.activeDomainId, operations.targetDomainId),
-      ),
-    );
   const rows = await database
     .update(operations)
     .set({
@@ -244,7 +239,9 @@ export async function failOperation(
         ...(fromStep === undefined
           ? []
           : [eq(operations.currentStep, fromStep)]),
-        ...(guard === "target_not_routed" ? [notExists(targetRouted)] : []),
+        ...(guard === "target_not_routed"
+          ? [eq(operations.routingCommitted, false)]
+          : []),
       ),
     )
     .returning();
@@ -277,15 +274,6 @@ export async function failOperationWithPromotionCleanup(
   for (const state of FAILED_PROMOTION_SLOT_STATES) {
     assertSlotTransition("inference", state, "failed");
   }
-  const targetRouted = database
-    .select({ one: sql`1` })
-    .from(fleets)
-    .where(
-      and(
-        eq(fleets.id, operations.fleetId),
-        eq(fleets.activeDomainId, operations.targetDomainId),
-      ),
-    );
   const failQuery = database
     .update(operations)
     .set({
@@ -301,7 +289,13 @@ export async function failOperationWithPromotionCleanup(
         ...(fromStep === undefined
           ? []
           : [eq(operations.currentStep, fromStep)]),
-        ...(guard === "target_not_routed" ? [notExists(targetRouted)] : []),
+        // Same EPQ-safe guard as failOperation: refuse once this
+        // operation committed routing. This gates the whole statement -
+        // when it matches zero rows the slot cleanup CTE below joins an
+        // empty failed_operation and touches nothing.
+        ...(guard === "target_not_routed"
+          ? [eq(operations.routingCommitted, false)]
+          : []),
       ),
     )
     .returning();

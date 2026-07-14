@@ -91,6 +91,15 @@ async function createPostgresTestDatabase(
   const testUrl = new URL(adminUrl);
   testUrl.pathname = `/${databaseName}`;
   const pool = new pg.Pool({ connectionString: testUrl.href });
+  // pg REQUIRES a pool error listener: without one, an error on an idle
+  // client is re-thrown as an unhandled exception that fails the whole
+  // vitest run. Teardown's `DROP DATABASE ... WITH (FORCE)` can race a
+  // still-closing idle connection and terminate it (57P01), which then
+  // surfaces here - a per-test-db teardown detail, never a test signal.
+  pool.on("error", () => {
+    // Swallowed: the database is being torn down; the connection dying
+    // is expected, and the drop below is the authoritative cleanup.
+  });
   try {
     const database = drizzleNodePostgres({ client: pool, schema });
     await migrateNodePostgres(database, { migrationsFolder });
