@@ -9,8 +9,10 @@ import { z } from "zod";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const timeoutMsSchema = z.number().int().positive().max(MAX_TIMEOUT_MS);
 
-/** Synthetic inference probe configuration. */
-export const probePolicySchema = z.object({
+/** Synthetic inference probe configuration. Strict: this is
+ * operator-authored config, so a misspelled key must fail at parse
+ * time rather than be silently dropped. */
+export const probePolicySchema = z.strictObject({
   prompt: z.string().min(1).default("ping"),
   maxTokens: z.number().int().positive().default(4),
 });
@@ -25,8 +27,13 @@ export type ProbePolicy = z.infer<typeof probePolicySchema>;
  * moment the reconciler enters the step. Training checkpointing is
  * best-effort inside `trainingStopGraceMs`; failover is never blocked
  * waiting for a perfect checkpoint.
+ *
+ * Strict: a misspelled key (e.g. `autoFailver`) must be a config-time
+ * error, not a silently dropped field that leaves a safety setting
+ * like `autoFailover` at its default. `.partial()` in the layout
+ * schema inherits this strictness.
  */
-export const fleetPolicySchema = z.object({
+export const fleetPolicySchema = z.strictObject({
   /** Automatically promote a standby when the active goes stale. */
   autoFailover: z.boolean().default(false),
   /** Active domain heartbeat staleness threshold. */

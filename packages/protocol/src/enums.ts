@@ -90,12 +90,17 @@ export const operationStepSchema = z.enum([
 ]);
 export type OperationStep = z.infer<typeof operationStepSchema>;
 
-/** URL-safe identifier used for fleet and domain slugs. */
+/**
+ * URL-safe identifier used for fleet and domain slugs. Hyphens are
+ * strictly interior: no leading, trailing, or consecutive hyphens, so
+ * a slug is always a valid DNS label component (drivers derive
+ * SkyPilot cluster / SkyServe service names from it).
+ */
 export const slugSchema = z
   .string()
   .min(1)
   .max(63)
-  .regex(/^[a-z0-9][a-z0-9-]*$/, {
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
     message: "slug must be lowercase alphanumeric with inner hyphens",
   });
 export type Slug = z.infer<typeof slugSchema>;

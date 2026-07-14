@@ -25,8 +25,11 @@ export function isBearerTokenValid(
   }
   // The auth scheme is case-insensitive per RFC 9110 ("bearer x" is
   // as valid as "Bearer x"); the credential itself is not. A bearer
-  // credential is a single b64token (no interior whitespace).
-  const match = /^bearer +(\S+)$/i.exec(authorizationHeader ?? "");
+  // credential is a single b64token (no interior whitespace). Accept
+  // RFC 9110 optional whitespace (SP / HTAB) around it so a
+  // tab-separated or trailing-padded header from a lenient client is
+  // not spuriously rejected; the credential capture stays `\S+`.
+  const match = /^bearer[ \t]+(\S+)[ \t]*$/i.exec(authorizationHeader ?? "");
   const presented = match?.[1] ?? "";
   return presented !== "" && isSameSecret(presented, expectedToken);
 }

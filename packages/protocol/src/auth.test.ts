@@ -37,4 +37,14 @@ describe("isBearerTokenValid", () => {
     expect(isBearerTokenValid("Basic s3cret", "s3cret")).toBe(false);
     expect(isBearerTokenValid("Bearer ", "s3cret")).toBe(false);
   });
+
+  it("tolerates RFC 9110 optional whitespace around the credential", () => {
+    // Tab as the scheme/credential separator, and trailing SP/HTAB.
+    expect(isBearerTokenValid("Bearer\ts3cret", "s3cret")).toBe(true);
+    expect(isBearerTokenValid("Bearer s3cret ", "s3cret")).toBe(true);
+    expect(isBearerTokenValid("Bearer   s3cret\t", "s3cret")).toBe(true);
+    // Interior whitespace is still not part of the credential.
+    expect(isBearerTokenValid("Bearer s3 cret", "s3cret")).toBe(false);
+    expect(isBearerTokenValid("Bearer s3 cret", "s3")).toBe(false);
+  });
 });

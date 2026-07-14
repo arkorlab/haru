@@ -9,7 +9,9 @@ import { slotKindSchema } from "./enums.js";
  * their admin endpoints (sleep/wake) are private, local-only controls
  * that are never exposed beyond the supervisor.
  */
-export const supervisorInferenceModelConfigSchema = z.object({
+// Strict: HARU_SUPERVISOR_CONFIG is operator-authored, so a misspelled
+// key must fail at load time rather than be silently dropped.
+export const supervisorInferenceModelConfigSchema = z.strictObject({
   name: z.string().min(1),
   /** Local port of the vLLM server for this model on 127.0.0.1. */
   port: z.number().int().min(1).max(65_535),
@@ -18,13 +20,13 @@ export type SupervisorInferenceModelConfig = z.infer<
   typeof supervisorInferenceModelConfigSchema
 >;
 
-export const supervisorInferenceSlotConfigSchema = z.object({
+export const supervisorInferenceSlotConfigSchema = z.strictObject({
   kind: z.literal("inference"),
   gpuIndex: z.number().int().nonnegative(),
   models: z.array(supervisorInferenceModelConfigSchema).min(1),
 });
 
-export const supervisorTrainingSlotConfigSchema = z.object({
+export const supervisorTrainingSlotConfigSchema = z.strictObject({
   kind: z.literal("training"),
   gpuIndex: z.number().int().nonnegative(),
   command: z.array(z.string().min(1)).min(1),
@@ -38,7 +40,7 @@ export const supervisorSlotConfigSchema = z.discriminatedUnion("kind", [
 export type SupervisorSlotConfig = z.infer<typeof supervisorSlotConfigSchema>;
 
 export const supervisorConfigSchema = z
-  .object({
+  .strictObject({
     slots: z.array(supervisorSlotConfigSchema).min(1),
   })
   // The supervisor keys training runs by gpuIndex; a duplicate
