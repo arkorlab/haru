@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   jsonb,
@@ -38,5 +40,7 @@ export const slots = pgTable(
   (t) => [
     unique("uq_slots_domain_gpu_kind").on(t.domainId, t.gpuIndex, t.kind),
     index("idx_slots_domain").on(t.domainId),
+    // A GPU index is a physical device ordinal; never negative.
+    check("slots_gpu_index_nonnegative", sql`${t.gpuIndex} >= 0`),
   ],
 );
