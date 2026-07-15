@@ -24,8 +24,9 @@ export type ProbePolicy = z.infer<typeof probePolicySchema>;
 /** Storage form of the probe config: like probePolicySchema but WITHOUT
  * the inner defaults, so a `{ probe: { prompt } }` layout patch does not
  * bake in the sibling maxTokens (a plain `.partial()` still fires each
- * field's `.default()`). */
-const probePolicyPatchSchema = z.strictObject({
+ * field's `.default()`). Exported for the drift-guard test that keeps
+ * its key set in lockstep with probePolicySchema. */
+export const probePolicyPatchSchema = z.strictObject({
   prompt: probePromptSchema.optional(),
   maxTokens: probeMaxTokensSchema.optional(),
 });

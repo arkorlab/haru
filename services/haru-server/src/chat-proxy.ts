@@ -42,11 +42,15 @@ export async function proxyChatCompletion(
   headerTimeoutMs: number,
   clientSignal?: AbortSignal,
 ): Promise<ChatProxyResult> {
-  // joinUrl preserves any path prefix on servingUrl (deployments
-  // behind path-routing gateways); `new URL("/x", base)` would drop it.
-  const url = joinUrl(servingUrl, "/v1/chat/completions");
   let upstream: Response;
   try {
+    // joinUrl preserves any path prefix on servingUrl (deployments
+    // behind path-routing gateways); `new URL("/x", base)` would drop
+    // it. Built INSIDE the try so its origin-swap guard throwing on a
+    // misconfigured servingUrl (a `//host` pathname) folds into the same
+    // 502 upstream_unreachable the other supervisor callers produce,
+    // never an opaque 500.
+    const url = joinUrl(servingUrl, "/v1/chat/completions");
     upstream = await fetchWithTimeout(
       fetchFunction,
       url,

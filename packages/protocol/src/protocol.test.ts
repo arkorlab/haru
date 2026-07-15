@@ -17,6 +17,8 @@ import { placementSpecSchema } from "./placement.js";
 import {
   fleetPolicyPatchSchema,
   fleetPolicySchema,
+  probePolicyPatchSchema,
+  probePolicySchema,
   resolveFleetPolicy,
 } from "./policy.js";
 import {
@@ -410,6 +412,13 @@ describe("fleetLayoutSchema", () => {
     // operator-tunable setting would be silently rejected at layout time.
     expect(new Set(Object.keys(fleetPolicyPatchSchema.shape))).toEqual(
       new Set(Object.keys(fleetPolicySchema.shape)),
+    );
+    // ...and the nested probe patch, or a new probe field (e.g. a
+    // temperature) would be silently rejected inside a layout's
+    // `policy.probe` while both top-level shapes still share the `probe`
+    // key and this guard stayed green.
+    expect(new Set(Object.keys(probePolicyPatchSchema.shape))).toEqual(
+      new Set(Object.keys(probePolicySchema.shape)),
     );
   });
 

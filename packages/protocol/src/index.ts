@@ -1,6 +1,7 @@
 export * from "./auth.js";
 export * from "./chat.js";
 export * from "./enums.js";
+export * from "./environment.js";
 export * from "./errors.js";
 export * from "./exec.js";
 export * from "./http.js";

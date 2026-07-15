@@ -491,12 +491,15 @@ export function createApp(dependencies: AppDependencies) {
 
   // A client that aborts or truncates its upload before we respond
   // leaves nothing to send a body to. Reading such a request (in the
-  // body-size gate or `c.req.text()`) rejects, which would otherwise
-  // reach Hono's default handler as a misleading 500; answer with a bare
-  // nginx-style 499 instead (the client is already gone). Anything else
-  // is a genuine server fault and keeps the 500.
+  // body-size gate or `c.req.text()`) rejects with the request signal
+  // already aborted (@hono/node-server ties it to the socket), which
+  // would otherwise reach Hono's default handler as a misleading 500;
+  // answer with a bare nginx-style 499 instead. Still log it: a genuine
+  // server fault that merely coincides with a client disconnect must not
+  // vanish. Anything with a live client is a real 500.
   app.onError((error, c) => {
     if (c.req.raw.signal.aborted) {
+      console.error("request aborted by the client:", error);
       return new Response(null, { status: 499 });
     }
     console.error("unhandled request error:", error);
@@ -682,17 +685,12 @@ export function createApp(dependencies: AppDependencies) {
       }
 
       // Keep the raw text so unknown fields forward byte-identically;
-      // parse only to extract the model name. Read OUTSIDE the JSON
-      // try/catch below so a failed body read is not mislabelled as a
-      // 400 "invalid JSON": an inbound stream can only fail because the
-      // client aborted or truncated the upload, which is a bare 499 (the
-      // client is gone and never sees any response) - not a server 500.
-      let bodyText: string;
-      try {
-        bodyText = await c.req.text();
-      } catch {
-        return new Response(null, { status: 499 });
-      }
+      // parse only to extract the model name. A failed read here means
+      // the client aborted/truncated the upload (the body-size gate above
+      // has already buffered it, so this only rejects on a live abort);
+      // the request signal is aborted, so app.onError maps it to a bare
+      // 499, never the JSON-parse 400 below or a 500.
+      const bodyText = await c.req.text();
       let model: string;
       try {
         model = chatCompletionRequestSchema.parse(JSON.parse(bodyText)).model;
