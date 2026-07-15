@@ -15,8 +15,10 @@ try {
 const environment = loadServerEnvironment(process.env);
 const database = createDatabase(environment.DATABASE_URL);
 
-const isAuthenticated =
-  environment.HARU_API_TOKEN !== undefined && environment.HARU_API_TOKEN !== "";
+// environment.ts parses HARU_API_TOKEN with blankableString, which maps
+// a blank/whitespace value to undefined, so a defined value here is
+// already a real, non-empty token.
+const isAuthenticated = environment.HARU_API_TOKEN !== undefined;
 if (!isAuthenticated) {
   console.warn(
     "HARU_API_TOKEN is not set: the API is UNAUTHENTICATED and will " +

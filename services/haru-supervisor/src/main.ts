@@ -2,18 +2,12 @@ import { spawn } from "node:child_process";
 
 import { defaultExec, type ExecFunction } from "@haru/protocol";
 import { serve } from "@hono/node-server";
-import { z } from "zod";
 
 import { createSupervisorApp } from "./app.js";
 import { loadSupervisorConfig } from "./config.js";
+import { loadSupervisorEnvironment } from "./environment.js";
 
 import type { SpawnFunction } from "./training.js";
-
-const environmentSchema = z.object({
-  PORT: z.coerce.number().int().min(1).max(65_535).default(8701),
-  HARU_SUPERVISOR_TOKEN: z.string().optional(),
-  HARU_SUPERVISOR_CONFIG: z.string().min(1),
-});
 
 // Mirror the server / seed / drizzle entrypoints: load the repo-root
 // .env so a developer's local vars (HARU_SUPERVISOR_CONFIG,
@@ -25,12 +19,13 @@ try {
   // No .env file; rely on the process environment.
 }
 
-const environment = environmentSchema.parse(process.env);
+const environment = loadSupervisorEnvironment(process.env);
 const config = loadSupervisorConfig(environment.HARU_SUPERVISOR_CONFIG);
 
-const isAuthenticated =
-  environment.HARU_SUPERVISOR_TOKEN !== undefined &&
-  environment.HARU_SUPERVISOR_TOKEN !== "";
+// environment.ts parses HARU_SUPERVISOR_TOKEN with blankableString,
+// which maps a blank/whitespace value to undefined, so a defined value
+// here is already a real, non-empty token.
+const isAuthenticated = environment.HARU_SUPERVISOR_TOKEN !== undefined;
 if (!isAuthenticated) {
   console.warn(
     "HARU_SUPERVISOR_TOKEN is not set: the control API is UNAUTHENTICATED " +

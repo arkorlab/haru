@@ -94,6 +94,29 @@ type SnapshotLookup =
 /** Marks a chat response served from a stale (fail-open) snapshot. */
 const STALE_ROUTING_HEADER = "x-haru-routing";
 
+/**
+ * Body cap for the control POSTs (promote/demote). They carry a tiny
+ * JSON object ({ targetDomainId }), but like the chat path they buffer
+ * the whole body before validating it, so an authenticated caller could
+ * otherwise stream an unbounded body straight into memory. 16 KiB is
+ * generous for a UUID payload; the chat path keeps its own, larger,
+ * configurable cap.
+ */
+const CONTROL_MAX_BODY_BYTES = 16 * 1024;
+
+/** Shared 413 gate for the control POSTs, mirroring the chat path. */
+const controlBodyLimit = bodyLimit({
+  maxSize: CONTROL_MAX_BODY_BYTES,
+  onError: (c) =>
+    c.json(
+      errorBody(
+        "payload_too_large",
+        `request body exceeds the ${String(CONTROL_MAX_BODY_BYTES)}-byte limit`,
+      ),
+      413,
+    ),
+});
+
 /** Lowercase a UUID-shaped reference. Licensed ONLY for uuid-ID identity:
  * the database accepts a uuid in any case and returns the lowercase id the
  * fail-open cache is keyed by. Slug and alias identity is case-SENSITIVE
@@ -466,6 +489,23 @@ export function createApp(dependencies: AppDependencies) {
 
   const app = new Hono();
 
+  // A client that aborts or truncates its upload before we respond
+  // leaves nothing to send a body to. Reading such a request (in the
+  // body-size gate or `c.req.text()`) rejects with the request signal
+  // already aborted (@hono/node-server ties it to the socket), which
+  // would otherwise reach Hono's default handler as a misleading 500;
+  // answer with a bare nginx-style 499 instead. Still log it: a genuine
+  // server fault that merely coincides with a client disconnect must not
+  // vanish. Anything with a live client is a real 500.
+  app.onError((error, c) => {
+    if (c.req.raw.signal.aborted) {
+      console.error("request aborted by the client:", error);
+      return new Response(null, { status: 499 });
+    }
+    console.error("unhandled request error:", error);
+    return c.json(errorBody("internal_error", "internal server error"), 500);
+  });
+
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   app.use("/v1/*", bearerAuth(config.apiToken));
@@ -565,7 +605,7 @@ export function createApp(dependencies: AppDependencies) {
     };
   }
 
-  app.post("/v1/fleets/:fleetId/promote", async (c) => {
+  app.post("/v1/fleets/:fleetId/promote", controlBodyLimit, async (c) => {
     const body: unknown = await readJsonBody(c.req, null);
     const parsed = promoteRequestSchema.safeParse(body);
     if (!parsed.success) {
@@ -579,7 +619,7 @@ export function createApp(dependencies: AppDependencies) {
     return c.json(result.body as Record<string, unknown>, result.status);
   });
 
-  app.post("/v1/fleets/:fleetId/demote", async (c) => {
+  app.post("/v1/fleets/:fleetId/demote", controlBodyLimit, async (c) => {
     const body: unknown = await readJsonBody(c.req, null);
     const parsed = demoteRequestSchema.safeParse(body);
     if (!parsed.success) {
@@ -645,7 +685,11 @@ export function createApp(dependencies: AppDependencies) {
       }
 
       // Keep the raw text so unknown fields forward byte-identically;
-      // parse only to extract the model name.
+      // parse only to extract the model name. A failed read here means
+      // the client aborted/truncated the upload (the body-size gate above
+      // has already buffered it, so this only rejects on a live abort);
+      // the request signal is aborted, so app.onError maps it to a bare
+      // 499, never the JSON-parse 400 below or a 500.
       const bodyText = await c.req.text();
       let model: string;
       try {

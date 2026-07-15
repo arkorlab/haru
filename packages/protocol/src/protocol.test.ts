@@ -14,7 +14,13 @@ import {
 import { fleetLayoutSchema } from "./layout.js";
 import { demoteRequestSchema, promoteRequestSchema } from "./operations.js";
 import { placementSpecSchema } from "./placement.js";
-import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
+import {
+  fleetPolicyPatchSchema,
+  fleetPolicySchema,
+  probePolicyPatchSchema,
+  probePolicySchema,
+  resolveFleetPolicy,
+} from "./policy.js";
 import {
   probeRequestSchema,
   supervisorConfigSchema,
@@ -361,9 +367,9 @@ describe("fleetLayoutSchema", () => {
         ],
       }),
     ).toThrow();
-    // Nested-policy typo: proves `fleetPolicySchema.partial()` keeps the
-    // strictness, so a misspelled safety setting inside a layout's
-    // `policy` is still a config-time error.
+    // Nested-policy typo: proves `fleetPolicyPatchSchema` keeps the full
+    // schema's strictness, so a misspelled safety setting inside a
+    // layout's `policy` is still a config-time error.
     expect(() =>
       fleetLayoutSchema.parse({
         ...validLayout,
@@ -377,6 +383,43 @@ describe("fleetLayoutSchema", () => {
         policy: { autoFailover: true },
       }),
     ).not.toThrow();
+  });
+
+  it("stores only operator-provided policy keys (no baked defaults)", () => {
+    // A plain `.partial()` would fire each field's inner `.default()` and
+    // persist all eleven defaults, freezing the fleet against any later
+    // default change. Only the provided key must survive.
+    const parsed = fleetLayoutSchema.parse({
+      ...validLayout,
+      policy: { autoFailover: true },
+    });
+    expect(parsed.policy).toEqual({ autoFailover: true });
+    // A nested probe patch must not bake in the sibling maxTokens either.
+    const withProbe = fleetLayoutSchema.parse({
+      ...validLayout,
+      policy: { probe: { prompt: "hi" } },
+    });
+    expect(withProbe.policy).toEqual({ probe: { prompt: "hi" } });
+    // An omitted policy stays undefined; resolveFleetPolicy fills current
+    // defaults on read.
+    const noPolicy = fleetLayoutSchema.parse(validLayout);
+    expect(noPolicy.policy).toBeUndefined();
+  });
+
+  it("keeps the policy patch schema key set in lockstep with the full policy", () => {
+    // Drift guard: fleetPolicyPatchSchema is authored by hand, so a field
+    // added to fleetPolicySchema must be added to the patch too, or a new
+    // operator-tunable setting would be silently rejected at layout time.
+    expect(new Set(Object.keys(fleetPolicyPatchSchema.shape))).toEqual(
+      new Set(Object.keys(fleetPolicySchema.shape)),
+    );
+    // ...and the nested probe patch, or a new probe field (e.g. a
+    // temperature) would be silently rejected inside a layout's
+    // `policy.probe` while both top-level shapes still share the `probe`
+    // key and this guard stayed green.
+    expect(new Set(Object.keys(probePolicyPatchSchema.shape))).toEqual(
+      new Set(Object.keys(probePolicySchema.shape)),
+    );
   });
 
   it("accepts an optional $schema pointer for editor integration", () => {
@@ -561,6 +604,28 @@ describe("joinUrl", () => {
     expect(joinUrl("https://host.example", String.raw`/\evil.example`)).toBe(
       "https://host.example/evil.example",
     );
+  });
+
+  it("does not let an embedded tab/newline/CR swap the origin", () => {
+    // The WHATWG URL parser STRIPS ASCII tab/LF/CR before parsing the
+    // authority, so a control char could re-form `//` after the leading
+    // slash collapse. joinUrl removes them up front, so these resolve to
+    // a plain path on the base host instead of swapping to evil.example.
+    for (const control of ["\t", "\n", "\r"]) {
+      expect(
+        joinUrl("https://host.example", `${control}//evil.example/x`),
+      ).toBe("https://host.example/evil.example/x");
+      expect(
+        joinUrl("https://host.example", `/${control}/evil.example/x`),
+      ).toBe("https://host.example/evil.example/x");
+    }
+  });
+
+  it("refuses a base whose own pathname would swap the host", () => {
+    // A `//a/` pathname on the base parses as protocol-relative when the
+    // suffix is appended, moving the host to `a`; the origin backstop
+    // catches what the path-side collapse cannot. Fail closed.
+    expect(() => joinUrl("https://host.example//a/", "x")).toThrow(/origin/);
   });
 });
 

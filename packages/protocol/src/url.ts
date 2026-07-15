@@ -13,14 +13,32 @@
 export function joinUrl(baseUrl: string, path: string): string {
   const base = new URL(baseUrl);
   const prefix = base.pathname.replace(/\/+$/, "");
+  // The WHATWG URL parser STRIPS ASCII tab (0x09), LF (0x0A) and CR
+  // (0x0D) from a URL string before it parses the authority, so a
+  // `path` like `\t//evil.example/x` or `/\t/evil.example/x` would fuse
+  // its remaining slashes into a `//` protocol-relative reference AFTER
+  // the leading-slash collapse below and swap the base's origin. Remove
+  // them up front so the collapse sees the real structure.
+  const withoutUrlWhitespace = path.replaceAll(/[\t\n\r]/g, "");
   // Collapse any leading slashes AND backslashes to exactly one forward
   // slash. A `path` like `//evil.example/x` - or `\\evil.example/x`,
   // which the WHATWG URL parser normalizes to `//` on http/https - would
   // otherwise be parsed as protocol-relative and swap the base's
   // host/origin against an origin-only base. Every caller passes a
   // code-literal path today, so this is defense in depth.
-  const suffix = `/${path.replace(/^[\\/]+/, "")}`;
+  const suffix = `/${withoutUrlWhitespace.replace(/^[\\/]+/, "")}`;
   const joined = new URL(`${prefix}${suffix}`, base);
+  // Final backstop: joinUrl must NEVER change the origin (it only
+  // appends a path/query onto the base). Anything that still moved the
+  // host - a `//host` pathname on the base itself, or any residual
+  // protocol-relative fusion the collapse missed - is a
+  // misconfiguration or an injection attempt, not a routable URL; fail
+  // closed rather than emit a request to the wrong host.
+  if (joined.origin !== base.origin) {
+    throw new Error(
+      `joinUrl refused to change origin (${base.origin} -> ${joined.origin})`,
+    );
+  }
   // Re-apply the base query params that `new URL` dropped. Snapshot the
   // path's OWN keys first so a same-named base param is skipped (path
   // wins on conflict) while EVERY value the base carries for other keys
