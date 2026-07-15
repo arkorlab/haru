@@ -22,8 +22,9 @@ try {
 const environment = loadSupervisorEnvironment(process.env);
 const config = loadSupervisorConfig(environment.HARU_SUPERVISOR_CONFIG);
 
-// blankableString already maps a blank/whitespace token to undefined,
-// so a defined value is a real, non-empty token.
+// environment.ts parses HARU_SUPERVISOR_TOKEN with blankableString,
+// which maps a blank/whitespace value to undefined, so a defined value
+// here is already a real, non-empty token.
 const isAuthenticated = environment.HARU_SUPERVISOR_TOKEN !== undefined;
 if (!isAuthenticated) {
   console.warn(

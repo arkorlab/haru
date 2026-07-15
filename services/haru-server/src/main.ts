@@ -15,8 +15,9 @@ try {
 const environment = loadServerEnvironment(process.env);
 const database = createDatabase(environment.DATABASE_URL);
 
-// blankableString already maps a blank/whitespace token to undefined,
-// so a defined value is a real, non-empty token.
+// environment.ts parses HARU_API_TOKEN with blankableString, which maps
+// a blank/whitespace value to undefined, so a defined value here is
+// already a real, non-empty token.
 const isAuthenticated = environment.HARU_API_TOKEN !== undefined;
 if (!isAuthenticated) {
   console.warn(
