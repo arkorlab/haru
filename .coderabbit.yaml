@@ -1,13 +1,16 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
-# CodeRabbit configuration, ported from the arkorlab/arkor org standard and
-# tuned for the STRICTEST possible review.
+# CodeRabbit configuration, ported from our shared org-standard baseline and
+# tuned for the STRICTEST possible review. (This repo is public, so AGENTS.md
+# forbids naming the private consumer repos this baseline is shared with.)
 #
 # Every knob below is deliberately set to its most rigorous value:
-#   - assertive profile + request-changes workflow + error-level pre-merge checks
-#     are the hard merge gate (the failing commit status is a signal, not the gate)
-#   - title and linked-issue pre-merge checks escalated to "error"; description
-#     and docstring coverage only warn, to match CONTRIBUTING.md's lenient stance
+#   - assertive profile + request-changes workflow + an error-level PR-title
+#     check are the hard merge gate (the failing commit status is a signal, not
+#     the gate)
+#   - the PR-title pre-merge check is escalated to "error"; description,
+#     docstring coverage and linked-issue assessment only warn, to match
+#     CONTRIBUTING.md's lenient stance
 #   - every linter / security / secret scanner enabled (including ones off by default),
 #     with each tool's own level pushed to its strictest (languagetool picky, phpstan max)
 #   - documented repo conventions (bilingual EN/JA docs parity, the two-linter
@@ -88,14 +91,20 @@ reviews:
     simplify:
       enabled: true
 
-  # Pre-merge gate. Title and linked-issue assessment block merge on failure.
-  # Description only warns: CONTRIBUTING.md explicitly says a sparse PR
-  # description is OK and is handled with review follow-ups, so blocking on it
-  # would contradict the documented contributor promise. Docstring coverage
-  # targets 100% but only warns too, since the existing TS code doesn't JSDoc
-  # every function and AGENTS.md's docs conventions govern the bilingual
-  # README/guide pairs and schema-change migrations, not a docstring on every
-  # symbol.
+  # Pre-merge gate. Only the PR title blocks merge on failure. Description,
+  # docstring coverage AND linked-issue assessment only warn, to match this
+  # repo's deliberately lenient contributor policy:
+  #   - CONTRIBUTING.md explicitly says a sparse PR description is OK and is
+  #     handled with review follow-ups, so blocking on it would contradict the
+  #     documented contributor promise.
+  #   - CONTRIBUTING.md welcomes issues but only asks contributors to open one
+  #     FIRST for non-trivial changes; a trivial PR with no linked issue is a
+  #     supported flow, and CodeRabbit can't reliably tell the two apart, so an
+  #     error-level issue gate would request-changes on valid contributions.
+  #   - Docstring coverage targets 100% but only warns, since the existing TS
+  #     code doesn't JSDoc every function and AGENTS.md's docs conventions
+  #     govern the bilingual README/guide pairs and schema-change migrations,
+  #     not a docstring on every symbol.
   pre_merge_checks:
     # Left at the default (false): restricting overrides to requested reviewers
     # while auto_assign_reviewers is off can dead-end a PR with no requested
@@ -110,7 +119,7 @@ reviews:
     description:
       mode: "warning"
     issue_assessment:
-      mode: "error"
+      mode: "warning"
 
   # Every static-analysis, linter, secret, and security tool ON, each at its
   # strictest level. Explicitly enumerated so an upstream default flip can't
@@ -238,16 +247,20 @@ reviews:
 chat:
   # No ASCII art; keep responses focused.
   art: false
-  # Restrict chat to org members. With Jira/Linear integrations on "auto",
-  # letting non-members trigger auto-replies would let external users on a
-  # public PR make the bot query and summarize internal issue context.
+  # Restrict chat to org members regardless: this is a defense-in-depth default
+  # even though the private issue-tracker integrations below are off.
   allow_non_org_members: false
   auto_reply: true
+  # This repo is PUBLIC and its contributor flow runs on GitHub issues (see
+  # CONTRIBUTING.md), not a private tracker. Disable the Jira/Linear lookups so
+  # an org member can't trigger a bot reply that publishes private issue titles
+  # or summaries into a public PR thread. Flip these back on deliberately only
+  # if a tracker is ever wired into the public flow.
   integrations:
     jira:
-      usage: "auto"
+      usage: "disabled"
     linear:
-      usage: "auto"
+      usage: "disabled"
 
 knowledge_base:
   opt_out: false
@@ -275,9 +288,12 @@ knowledge_base:
     scope: "auto"
   pull_requests:
     scope: "auto"
+  # Off for the same reason as the chat integrations above: a public repo whose
+  # flow lives on GitHub issues must not pull private-tracker context into
+  # review summaries.
   jira:
-    usage: "auto"
+    usage: "disabled"
   linear:
-    usage: "auto"
+    usage: "disabled"
   mcp:
     usage: "auto"
