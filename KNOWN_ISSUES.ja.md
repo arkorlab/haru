@@ -27,7 +27,9 @@
 
 ### chat スナップショットキャッシュにサイズ上限がない
 
-- 場所: `services/haru-server/src/app.ts` (`snapshotCache`)。
+- 場所: `services/haru-server/src/app.ts` (`snapshotCache`。加えて
+  同じ寿命を共有する `fleetIdByReference` / `forgottenGenerations`
+  マップ)。
 - 現状: store が「フリートは存在しない」と答えたときの削除と、
   使用不能と判明したエントリの隔離 (`forgetFleet`) は実装済み。
   ただし単に参照されなくなっただけのフリートは、最終 FleetSnapshot

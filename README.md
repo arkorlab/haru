@@ -175,7 +175,13 @@ script reads `DATABASE_URL` and optionally `HARU_FLEET_LAYOUT`.
   marks the response `X-Haru-Routing: stale`. That is safe rather than
   merely convenient: the routing pointer cannot move while the database
   is down (a promotion needs the very CAS that is failing), so the
-  cached route is still the correct one. Unreachability is the ONLY
+  cached route is still the correct one. That guarantee is scoped to a
+  FULL outage: in a partition where another process can still write,
+  the pointer can move while this process is blind, and chat keeps
+  routing to the previous active until the store is readable again
+  (those requests fail upstream as the old active is demoted - the same
+  outcome failing closed would give; see Known limitations).
+  Unreachability is the ONLY
   failure that licenses serving UNVERIFIED routing: if the store
   answers but its state cannot be used (a promotion moved the pointer
   and the fresh snapshot will not load, or the persisted state is

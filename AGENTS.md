@@ -180,10 +180,12 @@ Dependency graph (enforce it when adding imports):
     so one fleet's slug can collide with another's id, and a slug alias must
     never shadow the id owner.
   - A snapshot load that OVERLAPS a store verdict must not publish its result:
-    a forget while the read was in flight (`cacheGeneration`), a concurrently
-    cached NEWER revision, and a slug-fallback row whose id differs from the
-    pointer's all mean the slower load lost - the map keeps the later
-    knowledge, and only the response is built from the losing snapshot.
+    a forget of that fleet while the read was in flight (the per-fleet
+    `forgottenGenerations` counter - per fleet so an unrelated eviction cannot
+    suppress a concurrent publish), a concurrently cached NEWER revision, and a
+    slug-fallback row whose id differs from the pointer's all mean the slower
+    load lost - the map keeps the later knowledge, and only the response is
+    built from the losing snapshot.
 - Outbound URLs are built with `joinUrl` from `@haru/protocol`.
   `new URL("/path", base)` silently drops a path prefix on `base` - don't
   reintroduce it.

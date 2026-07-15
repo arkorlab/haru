@@ -137,39 +137,39 @@ export async function getFleetSnapshot(
   // Group once instead of filtering the full slot list per domain.
   const slotsByDomain = Map.groupBy(slotRows, (s) => s.domainId);
 
-  return parseSnapshot({
-    id: fleet.id,
-    slug: fleet.slug,
-    displayName: fleet.displayName,
-    activeDomainId: fleet.activeDomainId,
-    routeRevision: fleet.routeRevision,
-    policy: resolveFleetPolicy(fleet.policy),
-    domains: domainRows.map((d) => ({
-      id: d.id,
-      fleetId: d.fleetId,
-      slug: d.slug,
-      state: d.state,
-      provider: d.provider,
-      placement: d.placement,
-      supervisorUrl: d.supervisorUrl,
-      servingBaseUrl: d.servingBaseUrl,
-      lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
-      stateUpdatedAt: d.stateUpdatedAt.toISOString(),
-      slots: (slotsByDomain.get(d.id) ?? []).map((s) => ({
-        id: s.id,
-        domainId: s.domainId,
-        gpuIndex: s.gpuIndex,
-        kind: s.kind,
-        state: s.state,
-        spec: s.spec,
-      })),
-    })),
-  });
-}
-
-function parseSnapshot(candidate: unknown): FleetSnapshot {
+  // The WHOLE read-model construction is inside the wrap:
+  // resolveFleetPolicy parses the policy jsonb and the schema parse
+  // validates the rest, and consumers must see ONE typed error for any
+  // corrupt persisted state, whichever column it hides in.
   try {
-    return fleetSnapshotSchema.parse(candidate);
+    return fleetSnapshotSchema.parse({
+      id: fleet.id,
+      slug: fleet.slug,
+      displayName: fleet.displayName,
+      activeDomainId: fleet.activeDomainId,
+      routeRevision: fleet.routeRevision,
+      policy: resolveFleetPolicy(fleet.policy),
+      domains: domainRows.map((d) => ({
+        id: d.id,
+        fleetId: d.fleetId,
+        slug: d.slug,
+        state: d.state,
+        provider: d.provider,
+        placement: d.placement,
+        supervisorUrl: d.supervisorUrl,
+        servingBaseUrl: d.servingBaseUrl,
+        lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
+        stateUpdatedAt: d.stateUpdatedAt.toISOString(),
+        slots: (slotsByDomain.get(d.id) ?? []).map((s) => ({
+          id: s.id,
+          domainId: s.domainId,
+          gpuIndex: s.gpuIndex,
+          kind: s.kind,
+          state: s.state,
+          spec: s.spec,
+        })),
+      })),
+    });
   } catch (error) {
     throw new MalformedFleetStateError(error);
   }

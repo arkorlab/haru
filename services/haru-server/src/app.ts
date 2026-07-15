@@ -134,10 +134,15 @@ export function createApp(dependencies: AppDependencies) {
   // log the transitions (entering / leaving fail-open) instead of once
   // per request, which would flood the log on a busy fleet.
   const staleFleetIds = new Set<string>();
-  // Bumped by every forgetFleet. A snapshot load that started before a
-  // forget must not publish its result: the forget was a store verdict
-  // (fleet gone, routing superseded) that the in-flight read predates.
-  let cacheGeneration = 0;
+  // Bumped per fleet by forgetFleet. A snapshot load that started
+  // before a forget of ITS fleet must not publish its result: the
+  // forget was a store verdict (fleet gone, routing superseded) that
+  // the in-flight read predates. Scoped per fleet so an unrelated
+  // eviction cannot suppress a concurrent publish - a suppressed
+  // publish is only a cache miss, but a miss right before an outage is
+  // a lost fail-open. Grows with distinct forgotten fleet ids, the
+  // same order as the cache itself (see KNOWN_ISSUES: no size cap).
+  const forgottenGenerations = new Map<string, number>();
 
   const reconcilerDependencies = {
     database,
@@ -233,7 +238,7 @@ export function createApp(dependencies: AppDependencies) {
       return { ok: true, snapshot: hit.snapshot, isStale: false };
     }
 
-    const generationBeforeLoad = cacheGeneration;
+    const generationBeforeLoad = forgottenGenerations.get(pointer.id) ?? 0;
     let snapshot;
     try {
       snapshot = await getFleetSnapshot(database, pointer.id);
@@ -257,7 +262,7 @@ export function createApp(dependencies: AppDependencies) {
     // built from this snapshot is still fine.
     const existing = snapshotCache.get(pointer.id);
     const didLoseRace =
-      cacheGeneration !== generationBeforeLoad ||
+      (forgottenGenerations.get(pointer.id) ?? 0) !== generationBeforeLoad ||
       (existing !== undefined &&
         existing.routeRevision > snapshot.routeRevision);
     if (!didLoseRace) {
@@ -388,10 +393,13 @@ export function createApp(dependencies: AppDependencies) {
 
   /** Drop a fleet from every index. Used when the store reports the
    * fleet gone, and to quarantine an entry we have learned is unusable.
-   * Bumps the generation so an in-flight snapshot load that predates
-   * the verdict cannot re-publish what was just dropped. */
+   * Bumps the fleet's generation so an in-flight snapshot load that
+   * predates the verdict cannot re-publish what was just dropped. */
   function forgetFleet(fleetId: string): void {
-    cacheGeneration += 1;
+    forgottenGenerations.set(
+      fleetId,
+      (forgottenGenerations.get(fleetId) ?? 0) + 1,
+    );
     snapshotCache.delete(fleetId);
     staleFleetIds.delete(fleetId);
     for (const [reference, id] of fleetIdByReference) {

@@ -22,7 +22,7 @@ import {
 
 import type { FakeUpstreamCall } from "./fake-supervisor.test-helper.js";
 import type { HaruDatabase } from "@haru/db";
-import type { SlotSpec } from "@haru/protocol";
+import type { FleetPolicy, SlotSpec } from "@haru/protocol";
 
 let database: HaruDatabase;
 let close: () => Promise<void>;
@@ -938,6 +938,33 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(1);
   });
 
+  it("fails CLOSED when the fleet's persisted policy is corrupt", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    let nowMs = Date.now();
+    const { chat } = failOpenApp({
+      chatCalls,
+      nowMs: () => nowMs,
+      snapshotCacheTtlMs: 1000,
+    });
+    expect((await chat()).status).toBe(200);
+
+    // The policy jsonb is parsed by resolveFleetPolicy while the read
+    // model is BUILT, before the schema parse: it must be classified as
+    // malformed state exactly like a corrupt slot spec, not as a
+    // transient refresh failure the same-revision branch would mask by
+    // serving stale.
+    await database
+      .update(schema.fleets)
+      .set({ policy: { probeTimeoutMs: "corrupt" } as unknown as FleetPolicy });
+    nowMs += 1001;
+    const response = await chat();
+    expect(response.status).toBe(503);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("state_store_unavailable");
+    expect(chatCalls).toHaveLength(1);
+  });
+
   it("does not let a failed reload evict the fresh entry a concurrent request cached", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
@@ -1145,7 +1172,10 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
       },
     });
     // Same hanging upstream as the healthy-store 499 test, switchable so
-    // the warming request can complete first.
+    // the warming request can complete first. `upstreamReached` resolves
+    // once the abort listener is wired, so the test can abort
+    // deterministically instead of sleeping.
+    const upstreamReached = Promise.withResolvers<undefined>();
     const hangingFetch: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => {
         const abort = () => {
@@ -1158,6 +1188,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
           return;
         }
         init?.signal?.addEventListener("abort", abort);
+        upstreamReached.resolve(undefined);
       });
     const broken = breakableDatabase(database);
     const app = chatApp({
@@ -1187,7 +1218,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     isUpstreamHanging = true;
     const client = new AbortController();
     const pending = request(client.signal);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await upstreamReached.promise;
     client.abort();
     const response = await pending;
     expect(response.status).toBe(499);

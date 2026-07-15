@@ -27,7 +27,9 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 ### Chat snapshot cache has no size cap
 
-- Where: `services/haru-server/src/app.ts` (`snapshotCache`).
+- Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
+  `fleetIdByReference` and `forgottenGenerations` maps that share its
+  lifetime).
 - Current: entries are dropped when the store reports the fleet gone,
   and quarantined when they are learned to be unusable (`forgetFleet`),
   but a fleet that simply stops being queried pins its last
