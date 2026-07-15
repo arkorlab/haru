@@ -117,6 +117,27 @@ describe("createSkypilotDriver", () => {
     await expect(driver.launchDomain(SPEC)).rejects.toThrow("quota exceeded");
   });
 
+  it("surfaces the signal and exec message from a timeout kill", async () => {
+    // A `timeoutMs` kill resolves as a synthesized exit 1 with empty
+    // stderr; the signal/errorMessage must reach the SkyCliError message
+    // so it is not an opaque "exited 1".
+    const { exec } = recordingExec({
+      launch: {
+        code: 1,
+        stdout: "",
+        stderr: "",
+        signal: "SIGTERM",
+        errorMessage: "Command failed: timed out",
+      },
+    });
+    const driver = createSkypilotDriver({
+      exec,
+      writeTaskFile: () => Promise.resolve("/tmp/task.yaml"),
+    });
+    await expect(driver.launchDomain(SPEC)).rejects.toThrow("signal SIGTERM");
+    await expect(driver.launchDomain(SPEC)).rejects.toThrow("timed out");
+  });
+
   it("parses sky status json and finds the cluster", async () => {
     const { exec, calls } = recordingExec({
       status: {

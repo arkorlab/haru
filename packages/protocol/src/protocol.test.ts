@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { chatCompletionRequestSchema } from "./chat.js";
 import { operationStepSchema, slugSchema } from "./enums.js";
 import { errorBody } from "./errors.js";
+import { describeExecFailure } from "./exec.js";
 import {
   domainRole,
   inferenceSlotSpecSchema,
@@ -481,6 +482,21 @@ describe("internal request DTOs are strict", () => {
       probeRequestSchema.parse({ prompt: "ping", prmpt: "typo" }),
     ).toThrow();
   });
+
+  it("lowercases an uppercase targetDomainId (uuids are case-insensitive)", () => {
+    // Postgres stores domain ids lowercase and core matches with `===`,
+    // so the schema canonicalises regardless of caller.
+    expect(
+      promoteRequestSchema.parse({
+        targetDomainId: "0F5C1E2A-3B4C-4D5E-8F90-1A2B3C4D5E6F",
+      }).targetDomainId,
+    ).toBe("0f5c1e2a-3b4c-4d5e-8f90-1a2b3c4d5e6f");
+    expect(
+      demoteRequestSchema.parse({
+        targetDomainId: "0F5C1E2A-3B4C-4D5E-8F90-1A2B3C4D5E6F",
+      }).targetDomainId,
+    ).toBe("0f5c1e2a-3b4c-4d5e-8f90-1a2b3c4d5e6f");
+  });
 });
 
 describe("supervisorConfigSchema", () => {
@@ -634,5 +650,60 @@ describe("errorBody", () => {
     expect(errorBody("fleet_not_found", "no such fleet")).toEqual({
       error: { code: "fleet_not_found", message: "no such fleet" },
     });
+  });
+});
+
+describe("describeExecFailure", () => {
+  it("renders a plain non-zero exit with its stderr", () => {
+    expect(
+      describeExecFailure({
+        code: 9,
+        signal: null,
+        errorMessage: null,
+        stderr: "no devices",
+      }),
+    ).toBe("exited 9: no devices");
+  });
+
+  it("surfaces signal and errorMessage, and omits the colon when stderr is blank", () => {
+    expect(
+      describeExecFailure({
+        code: 1,
+        signal: "SIGTERM",
+        errorMessage: "Command failed: timed out",
+        stderr: "",
+      }),
+    ).toBe("exited 1 (Command failed: timed out, signal SIGTERM)");
+  });
+
+  it("drops a blank errorMessage instead of an empty parenthetical", () => {
+    expect(
+      describeExecFailure({
+        code: 1,
+        signal: null,
+        errorMessage: "",
+        stderr: "",
+      }),
+    ).toBe("exited 1");
+  });
+
+  it("caps stderr when a byte budget is given (after trimming)", () => {
+    expect(
+      describeExecFailure(
+        { code: 2, signal: null, errorMessage: null, stderr: "  abcdef  " },
+        { maxStderrBytes: 3 },
+      ),
+    ).toBe("exited 2: abc");
+  });
+
+  it("caps errorMessage too, so a downstream bound is never defeated", () => {
+    const long = "x".repeat(5000);
+    const message = describeExecFailure(
+      { code: 1, signal: "SIGTERM", errorMessage: long, stderr: long },
+      { maxStderrBytes: 500 },
+    );
+    // Both the parenthetical errorMessage and the stderr tail are bounded,
+    // not just result.stderr.
+    expect(message.length).toBeLessThan(1200);
   });
 });

@@ -4,11 +4,14 @@ import { z } from "zod";
  * Lifecycle of a GPU domain (one provisioned machine / cluster that
  * hosts a set of slots).
  *
- * provisioning -> ready | failed
+ * provisioning -> ready | degraded | failed
  * ready <-> degraded
  * ready | degraded -> failed
- * failed -> provisioning (relaunch)
- * ready | degraded | failed -> stopping -> stopped -> provisioning
+ * failed -> degraded (heartbeat rejoin) | provisioning (relaunch)
+ * ready | degraded | failed | provisioning -> stopping -> stopped -> provisioning
+ *
+ * The enforced edge table lives in @haru/core (domain-state.ts); this
+ * sketch must stay in step with it.
  */
 export const domainStateSchema = z.enum([
   "provisioning",

@@ -54,6 +54,21 @@ describe("healthz and auth", () => {
     expect(response.status).toBe(200);
   });
 
+  it("healthz never touches the database (stays 200 during a store outage)", async () => {
+    // A liveness probe that read the DB would go red during a state-store
+    // outage and get the process restarted - destroying the fail-open
+    // cache that is keeping the data path alive. Prove /healthz answers
+    // even when every query throws.
+    const { breakableDatabase } =
+      await import("./failing-database.test-helper.js");
+    const broken = breakableDatabase(database);
+    broken.breakIt();
+    const app = createApp({ database: broken.database, config: {} });
+    const response = await app.request("/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
   it("rejects /v1 requests without the configured bearer token", async () => {
     const app = appWith({ apiToken: "secret" });
     const missing = await app.request("/v1/fleets/default");
@@ -143,6 +158,23 @@ describe("POST /v1/fleets/:fleetId/promote", () => {
     expect(second.status).toBe(202);
     const secondBody = await second.json();
     expect(secondBody.operation.id).toBe(firstBody.operation.id);
+  });
+
+  it("accepts an UPPERCASE targetDomainId (uuids are case-insensitive)", async () => {
+    const app = appWith();
+    const response = await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // A client that re-cases the id it was handed (UUIDs are
+      // case-insensitive) must not be spuriously 422'd against the
+      // lowercase id Postgres stores.
+      body: JSON.stringify({ targetDomainId: beta().id.toUpperCase() }),
+    });
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(body.status).toBe("accepted");
+    // The operation records the canonical (lowercase) id.
+    expect(body.operation.targetDomainId).toBe(beta().id);
   });
 
   it("409s a conflicting in-flight operation", async () => {

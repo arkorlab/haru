@@ -540,6 +540,8 @@ export function createApp(dependencies: AppDependencies) {
   async function handleOperationRequest(
     fleetReference: string,
     kind: OperationKind,
+    // Already lowercased by promote/demoteRequestSchema (uuids are
+    // case-insensitive; core matches domain ids with strict `===`).
     targetDomainId: string,
   ): Promise<{ status: 200 | 202 | 404 | 409 | 422; body: unknown }> {
     const snapshot = await getFleetSnapshot(database, fleetReference);

@@ -385,6 +385,14 @@ describe("failOperationWithPromotionCleanup", () => {
       .map((s) => s.state);
   };
 
+  const betaTrainingStates = async () => {
+    const after = await getFleetSnapshot(database, "default");
+    return after?.domains
+      .find((d) => d.slug === "beta")
+      ?.slots.filter((s) => s.kind === "training")
+      .map((s) => s.state);
+  };
+
   const promoteToBeta = async () => {
     const { createOperation, claimOperation } =
       await import("./repo/operations.js");
@@ -410,6 +418,57 @@ describe("failOperationWithPromotionCleanup", () => {
     );
     expect(failedRow?.state).toBe("failed");
     expect(await betaInferenceStates()).toEqual(["failed", "failed"]);
+    // A post-wake failure never touches training: stop_training already
+    // moved these slots to `idle`, so the recovery CTE matches nothing
+    // (it fires only on `stopping`). Guards against the CTE resurrecting
+    // training on a domain whose inference just went live.
+    expect(await betaTrainingStates()).toEqual(["idle", "idle"]);
+  });
+
+  it("restores the target's stranded stopping training slots on a stop_training failure", async () => {
+    // stop_training mirrors training -> stopping BEFORE its supervisor
+    // stop; a 403 / timeout there must not leave them stuck (the
+    // heartbeat mirror never touches `stopping`).
+    await transitionDomainSlots(
+      database,
+      beta().id,
+      "training",
+      ["idle"],
+      "training",
+    );
+    await transitionDomainSlots(
+      database,
+      beta().id,
+      "training",
+      ["training"],
+      "stopping",
+    );
+    const {
+      createOperation,
+      claimOperation,
+      failOperationWithPromotionCleanup,
+    } = await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "stop_training");
+    const failedRow = await failOperationWithPromotionCleanup(
+      database,
+      operation.id,
+      {
+        step: "stop_training",
+        code: "supervisor_unauthorized",
+        message: "403",
+      },
+      "stop_training",
+    );
+    expect(failedRow?.state).toBe("failed");
+    // Training back to the pre-stop posture; inference never touched
+    // (stop_training runs before the wake path).
+    expect(await betaTrainingStates()).toEqual(["training", "training"]);
+    expect(await betaInferenceStates()).toEqual(["sleeping", "sleeping"]);
   });
 
   it("cleans no slots when the fail CAS loses", async () => {

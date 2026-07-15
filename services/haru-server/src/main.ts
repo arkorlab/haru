@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createChatFetch } from "./chat-fetch.js";
 import { loadServerEnvironment } from "./environment.js";
-import { reconcileFleet } from "./reconciler/reconciler.js";
+import { startReconcileLoop } from "./reconcile-loop.js";
 
 try {
   process.loadEnvFile("../../.env");
@@ -59,8 +59,11 @@ const server = serve(
 );
 
 // Optional background reconcile loop. POST /v1/fleets/:id/reconcile
-// drives the same tick on demand (e.g. from cron or tests).
-let reconcileTimer: ReturnType<typeof setInterval> | undefined;
+// drives the same tick on demand (e.g. from cron or tests). The loop
+// wiring (per-fleet concurrency + hang watchdog) lives in
+// reconcile-loop.ts so it is unit-testable without this entrypoint's
+// top-level side effects.
+let stopReconcileLoop: (() => void) | undefined;
 if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
   const fleetReferences = (
     environment.HARU_RECONCILE_FLEETS ??
@@ -76,36 +79,18 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
         "set HARU_RECONCILE_FLEETS or HARU_DEFAULT_FLEET",
     );
   }
-  const dependencies = {
-    database,
-    fetchFn: fetch,
-    now: () => new Date(),
-    supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
-  };
-  // Skip a tick while the previous one is still running: a slow step
-  // (a probe can legitimately take the whole probe budget) must not
-  // pile up concurrent loops issuing duplicate GPU work - the DB CAS
-  // dedupes state transitions but not the supervisor calls themselves.
-  let isTickRunning = false;
-  reconcileTimer = setInterval(() => {
-    if (isTickRunning) {
-      return;
-    }
-    isTickRunning = true;
-    void (async () => {
-      try {
-        for (const reference of fleetReferences) {
-          try {
-            await reconcileFleet(dependencies, reference);
-          } catch (error) {
-            console.error(`reconcile ${reference} failed:`, error);
-          }
-        }
-      } finally {
-        isTickRunning = false;
-      }
-    })();
-  }, environment.HARU_RECONCILE_INTERVAL_MS);
+  stopReconcileLoop = startReconcileLoop(
+    {
+      database,
+      fetchFn: fetch,
+      now: () => new Date(),
+      supervisorToken: environment.HARU_SUPERVISOR_TOKEN,
+    },
+    {
+      fleetReferences,
+      intervalMs: environment.HARU_RECONCILE_INTERVAL_MS,
+    },
+  );
 }
 
 // Installing a SIGTERM handler suppresses Node's default
@@ -116,11 +101,9 @@ if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
 // production configuration, and a deploy there must also let
 // in-flight work finish instead of hard-killing active chat streams.
 process.on("SIGTERM", () => {
-  if (reconcileTimer !== undefined) {
-    // An in-flight tick's writes are re-entrant CASes, safe to
-    // abandon; only new ticks must stop.
-    clearInterval(reconcileTimer);
-  }
+  // An in-flight tick's writes are re-entrant CASes, safe to abandon;
+  // only new ticks must stop.
+  stopReconcileLoop?.();
   // Closing the listener lets the process exit naturally once the
   // event loop drains (no process.exit: in-flight work finishes).
   // Node >= 19 also closes idle keep-alive connections on close().

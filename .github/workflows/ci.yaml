@@ -38,6 +38,9 @@ jobs:
             echo "drizzle-kit generate reported an error (it exits 0 on failures)"
             exit 1
           fi
+          # Intent-to-add so a brand-new (untracked) migration file also
+          # trips the diff; plain `git diff` only sees tracked changes.
+          git add -N packages/db/drizzle
           git diff --exit-code packages/db/drizzle
       - run: pnpm typecheck
       - run: pnpm lint

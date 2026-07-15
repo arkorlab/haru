@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { defaultExec } from "@haru/protocol";
+import { defaultExec, describeExecFailure } from "@haru/protocol";
 
 import type { ExecFunction } from "@haru/protocol";
 
@@ -17,13 +17,30 @@ export class SkyCliError extends Error {
   readonly command: string;
   readonly code: number;
   readonly stderr: string;
+  readonly signal: NodeJS.Signals | null;
 
-  constructor(command: string, code: number, stderr: string) {
-    super(`${command} exited ${code}: ${stderr.trim().slice(0, 500)}`);
+  constructor(
+    command: string,
+    code: number,
+    stderr: string,
+    detail?: { signal?: NodeJS.Signals | null; errorMessage?: string | null },
+  ) {
+    // A timeout kill or missing binary would otherwise read as a bare
+    // "exited 1" with empty stderr; describeExecFailure surfaces the
+    // signal / exec message so the cause is visible (e.g. a timed-out
+    // `sky launch` whose cloud provisioning may still be running).
+    const signal = detail?.signal ?? null;
+    super(
+      `${command} ${describeExecFailure(
+        { code, signal, errorMessage: detail?.errorMessage ?? null, stderr },
+        { maxStderrBytes: 500 },
+      )}`,
+    );
     this.name = "SkyCliError";
     this.command = command;
     this.code = code;
     this.stderr = stderr;
+    this.signal = signal;
   }
 }
 
@@ -65,6 +82,7 @@ export function createSkyRunner(exec: ExecFunction = defaultExec): SkyRunner {
         `sky ${arguments_.join(" ")}`,
         result.code,
         result.stderr,
+        { signal: result.signal, errorMessage: result.errorMessage },
       );
     }
     return result.stdout;

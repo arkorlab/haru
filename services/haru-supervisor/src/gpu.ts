@@ -1,4 +1,5 @@
 import {
+  describeExecFailure,
   gpuMemorySchema,
   type ExecFunction,
   type GpuMemory,
@@ -20,14 +21,25 @@ const NVIDIA_SMI_ARGS = [
 export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
   const result = await exec("nvidia-smi", NVIDIA_SMI_ARGS);
   if (result.code !== 0) {
-    throw new Error(`nvidia-smi exited ${result.code}: ${result.stderr}`);
+    // Shared formatter surfaces a missing binary / timeout kill (signal +
+    // exec message) instead of an opaque "exited 1 with empty stderr".
+    throw new Error(`nvidia-smi ${describeExecFailure(result)}`);
   }
   const gpus = result.stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
     .map((line) => {
-      const [index, usedMiB, totalMiB] = line.split(",").map((v) => v.trim());
+      const fields = line.split(",").map((v) => v.trim());
+      if (fields.length !== 3) {
+        // The query pins three columns (index, used, total); a different
+        // count means the CSV shape drifted (driver change / injected
+        // header), which the NaN guard below could otherwise mask.
+        throw new TypeError(
+          `nvidia-smi returned ${String(fields.length)} columns, expected 3 (index, used, total): "${line}"`,
+        );
+      }
+      const [index, usedMiB, totalMiB] = fields;
       const parsed = {
         index: Number(index),
         usedMiB: Number(usedMiB),

@@ -13,18 +13,6 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 ## Deferred (post-review backlog)
 
-### defaultExec collapses spawn failures and timeout kills into exit 1
-
-- Where: `packages/protocol/src/exec.ts`.
-- Current: a missing binary (ENOENT) or a child killed by `timeoutMs`
-  resolves as `{code: 1, stdout: "", stderr: ""}`; callers (verify_gpu,
-  sky wrappers) report an empty-stderr "exited 1" that hides WHY.
-- Why deferred: pre-existing behavior faithfully hoisted; changing the
-  result shape touches every exec consumer's error mapping.
-- Intended fix: extend `ExecResult` with `signal`/`errorMessage` fields
-  populated from the execFile error and include them in the SkyCliError
-  / gpu error strings.
-
 ### Chat snapshot cache has no size cap
 
 - Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
@@ -111,18 +99,40 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 - Where: `services/haru-server/src/reconciler/reconciler.ts`
   (`applyStepResolution` failure path, `markFailedPromotionSlots`).
-- Current: a promote that stopped the target's training and then
-  failed before `switch_active` (e.g. `probe_failed`) marks the
-  target's inference slots failed and finishes. Nothing automatically
-  puts the target back into standby posture (vLLM asleep + training
-  running); a manual `POST /v1/fleets/:id/demote` of the target
-  restores it.
+- Current: a promote that failed AFTER waking the target (e.g.
+  `probe_failed`) marks the target's inference slots failed and
+  finishes. Nothing automatically puts the target back into standby
+  posture (vLLM asleep + training running); a manual `POST
+  /v1/fleets/:id/demote` of the target restores it. (A failure AT
+  `stop_training` is now handled:
+  `failOperationWithPromotionCleanup` restores the target's `stopping`
+  training slots to `training` in the same statement, so only the
+  post-wake inference-slot case remains.)
 - Why deferred: an automatic restore is a small operation of its own
   (sleep + start training with proofs); bolting it onto the failure
   path would run long supervisor calls outside the step machinery.
 - Intended fix: enqueue a demote of the failed target after the
   operation fails (reusing the existing demote steps), or an operator
   runbook note until then.
+
+### Re-applying a fleet layout never removes dropped domains or slots
+
+- Where: `packages/db/src/repo/layout.ts` (`applyFleetLayout`).
+- Current: layout apply is idempotent-additive (`ON CONFLICT DO
+  NOTHING`): existing rows are left untouched and new ones inserted, so
+  re-running a seed never resets live state. But a re-apply that DROPS
+  a domain or slot from the layout does not delete the removed rows -
+  they linger and can still be counted (e.g. a stale standby domain by
+  `detectFailover`'s viable-standby predicate).
+- Why deferred: deletion is not simple additive seeding - a dropped
+  domain might be the live active pointer or mid-operation, so safe
+  removal needs its own guarded teardown flow (and the drivers to
+  release the cloud resource). The seed path is deliberately
+  non-destructive.
+- Intended fix: a separate declarative reconcile that diffs the layout
+  against live rows and tears down removed domains/slots through the
+  guarded state machine (never a bare DELETE), or an operator runbook
+  for decommissioning until then.
 
 ### Postgres test lane replays migrations per test
 
@@ -151,3 +161,17 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   reconciler does not drive SkyServe provisioning yet.
 - Intended fix: switch to an output-format flag the moment upstream
   adds one to `sky serve status` (track the SkyPilot CLI reference).
+
+### SkyPilot getDomainStatus may throw instead of returning null for an unknown cluster
+
+- Where: `packages/driver-skypilot/src/driver.ts` (`getDomainStatus`).
+- Current: the method returns `null` only when the cluster is absent
+  from a SUCCESSFUL `sky status --output json` array. If `sky status`
+  exits non-zero for an unknown cluster (unverified against the pinned
+  version), `createSkyRunner` throws `SkyCliError` first, so a caller
+  treating "not found" as `null` would instead see an exception.
+- Why deferred: the exit semantics depend on the pinned SkyPilot
+  version, and the reconciler does not drive SkyPilot provisioning yet.
+- Intended fix: pin the "unknown cluster" behavior with a test against
+  the documented version and, if it exits non-zero, map that one case
+  to `null`.

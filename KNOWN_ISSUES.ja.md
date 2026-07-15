@@ -12,19 +12,6 @@
 
 ## 先送り (レビュー後のバックログ)
 
-### defaultExec は spawn 失敗と timeout kill を exit 1 に潰す
-
-- 場所: `packages/protocol/src/exec.ts`。
-- 現状: バイナリ不在 (ENOENT) や `timeoutMs` による kill が
-  `{code: 1, stdout: "", stderr: ""}` に解決され、呼び出し側
-  (verify_gpu、sky ラッパー) は「なぜか」が消えた空 stderr の
-  "exited 1" を報告する。
-- 先送りの理由: 既存挙動を忠実に hoist したもの。結果の形を変えると
-  全 exec 消費側のエラーマッピングに波及する。
-- 意図する修正: `ExecResult` に execFile エラー由来の
-  `signal`/`errorMessage` を追加し、SkyCliError / gpu エラー文字列に
-  含める。
-
 ### chat スナップショットキャッシュにサイズ上限がない
 
 - 場所: `services/haru-server/src/app.ts` (`snapshotCache`。加えて
@@ -107,16 +94,36 @@
 
 - 場所: `services/haru-server/src/reconciler/reconciler.ts`
   (`applyStepResolution` の失敗パス、`markFailedPromotionSlots`)。
-- 現状: ターゲットの学習を停止した後、`switch_active` 前に失敗した
-  promote (例: `probe_failed`) は、ターゲットの inference スロットを
-  failed にして終了する。standby 姿勢 (vLLM sleep + 学習稼働) へ
-  自動では戻らない。手動で `POST /v1/fleets/:id/demote` を叩けば
-  復旧する。
+- 現状: ターゲットを wake した後に失敗した promote (例:
+  `probe_failed`) は、ターゲットの inference スロットを failed に
+  して終了する。standby 姿勢 (vLLM sleep + 学習稼働) へ自動では
+  戻らない。手動で `POST /v1/fleets/:id/demote` を叩けば復旧する。
+  (`stop_training` での失敗は対応済み:
+  `failOperationWithPromotionCleanup` が同一文でターゲットの
+  `stopping` 学習スロットを `training` に戻すため、残るのは wake 後の
+  inference スロットのケースのみ。)
 - 先送りの理由: 自動復旧はそれ自体が小さなオペレーション (証明付き
   sleep + 学習開始) であり、失敗パスに直付けするとステップ機構の
   外で長い supervisor 呼び出しを走らせることになる。
 - 意図する修正: 操作失敗後に対象への demote をキューする (既存の
   demote ステップを再利用)。それまでは運用手順書に記載。
+
+### フリートレイアウトの再適用は削除されたドメイン/スロットを消さない
+
+- 場所: `packages/db/src/repo/layout.ts` (`applyFleetLayout`)。
+- 現状: レイアウト適用は冪等・追加専用 (`ON CONFLICT DO NOTHING`):
+  既存行は触らず新規行のみ挿入するので、シード再実行がライブ状態を
+  リセットすることはない。しかしレイアウトからドメインやスロットを
+  「削除」した再適用でも、消えた行は削除されず残り、なお数えられ得る
+  (例: 古い standby ドメインが `detectFailover` の viable-standby
+  述語に混入)。
+- 先送りの理由: 削除は単純な追加シードではない。落としたドメインが
+  ライブの active ポインタや操作中である可能性があり、安全な除去には
+  専用のガード付き teardown フロー (とクラウド資源を解放するための
+  ドライバー) が要る。シード経路は意図的に非破壊。
+- 意図する修正: レイアウトとライブ行を差分し、削除対象のドメイン/
+  スロットをガード付き状態機械経由で撤去する (素の DELETE は使わない)
+  独立した宣言的 reconcile。それまでは廃止用の運用手順書で対応。
 
 ### Postgres テストレーンはテストごとにマイグレーションを再実行する
 
@@ -145,3 +152,17 @@
   まだ SkyServe のプロビジョニングを駆動していない。
 - 意図する修正: 上流が `sky serve status` に出力フォーマットフラグを
   追加した時点で切り替える (SkyPilot CLI リファレンスを追跡)。
+
+### SkyPilot の getDomainStatus は未知クラスタで null でなく throw しうる
+
+- 場所: `packages/driver-skypilot/src/driver.ts` (`getDomainStatus`)。
+- 現状: このメソッドが `null` を返すのは、`sky status --output json`
+  が「成功」しつつ配列にクラスタが無い場合だけ。未知クラスタで
+  `sky status` が非ゼロ終了する場合 (pin したバージョンでは未検証)、
+  先に `createSkyRunner` が `SkyCliError` を throw するため、「未検出=
+  null」を期待する呼び出し側は例外を受け取る。
+- 先送りの理由: 終了コードの挙動は pin した SkyPilot バージョンに
+  依存し、reconciler はまだ SkyPilot のプロビジョニングを駆動しない。
+- 意図する修正: ドキュメント化されたバージョンに対する「未知クラスタ」
+  挙動をテストで固定し、非ゼロ終了ならそのケースだけ `null` に
+  マップする。
