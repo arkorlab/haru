@@ -50,5 +50,10 @@ export const domains = pgTable(
       "domains_provider_valid",
       sql`${t.provider} IN ('skypilot', 'skyserve', 'static')`,
     ),
+    // Defense in depth behind the app-layer slugSchema (see fleets.ts).
+    check(
+      "domains_slug_valid",
+      sql`${t.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND char_length(${t.slug}) <= 63`,
+    ),
   ],
 );

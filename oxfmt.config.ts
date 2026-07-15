@@ -4,7 +4,9 @@ import { defineConfig } from "oxfmt";
 // commas). `sortPackageJson` / `sortImports` stay disabled so
 // package.json key order stays as authored and import ordering stays
 // owned by ESLint's `import-x/order`. Markdown and YAML are excluded:
-// prose and workflow files are hand-managed.
+// prose and workflow files are hand-managed. The generated config JSON
+// Schemas are owned by their generator (JSON.stringify), so oxfmt must
+// not reformat them or `schemas:generate` output would fail the gate.
 export default defineConfig({
   printWidth: 80,
   tabWidth: 2,
@@ -13,5 +15,11 @@ export default defineConfig({
   trailingComma: "all",
   sortPackageJson: false,
   sortImports: false,
-  ignorePatterns: [".claude/**", "**/*.md", "**/*.yaml", "**/*.yml"],
+  ignorePatterns: [
+    ".claude/**",
+    "**/*.md",
+    "**/*.yaml",
+    "**/*.yml",
+    "packages/protocol/schemas/**",
+  ],
 });

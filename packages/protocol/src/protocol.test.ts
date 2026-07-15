@@ -6,13 +6,21 @@ import { errorBody } from "./errors.js";
 import {
   domainRole,
   inferenceSlotSpecSchema,
+  modelBindingSchema,
+  slotSnapshotSchema,
   slotSpecSchema,
   trainingSlotSpecSchema,
 } from "./fleet.js";
 import { fleetLayoutSchema } from "./layout.js";
+import { demoteRequestSchema, promoteRequestSchema } from "./operations.js";
 import { placementSpecSchema } from "./placement.js";
 import { fleetPolicySchema, resolveFleetPolicy } from "./policy.js";
-import { probeRequestSchema, trainingStopRequestSchema } from "./supervisor.js";
+import {
+  probeRequestSchema,
+  supervisorConfigSchema,
+  trainingStopRequestSchema,
+  vllmTargetRequestSchema,
+} from "./supervisor.js";
 import { joinUrl } from "./url.js";
 
 describe("slugSchema", () => {
@@ -25,6 +33,12 @@ describe("slugSchema", () => {
     expect(() => slugSchema.parse("Alpha")).toThrow();
     expect(() => slugSchema.parse("-alpha")).toThrow();
     expect(() => slugSchema.parse("")).toThrow();
+  });
+
+  it("rejects trailing and consecutive hyphens (hyphens are interior)", () => {
+    expect(() => slugSchema.parse("alpha-")).toThrow();
+    expect(() => slugSchema.parse("a--b")).toThrow();
+    expect(() => slugSchema.parse("-")).toThrow();
   });
 });
 
@@ -54,6 +68,18 @@ describe("placementSpecSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects an unknown key (strict operator config)", () => {
+    expect(() =>
+      placementSpecSchema.parse({
+        cloud: "aws",
+        region: "us-east-1",
+        accelerator: "SOME-GPU",
+        // A misspelled acceleratorCount must not be silently dropped.
+        acceleratorCnt: 4,
+      }),
+    ).toThrow();
+  });
 });
 
 describe("fleetPolicySchema", () => {
@@ -74,6 +100,13 @@ describe("fleetPolicySchema", () => {
     const policy = resolveFleetPolicy({ autoFailover: true });
     expect(policy.autoFailover).toBe(true);
     expect(policy.heartbeatStaleMs).toBe(30_000);
+  });
+
+  it("rejects a misspelled key instead of silently dropping it", () => {
+    // The whole point of strict: a typo'd safety setting must be a
+    // config-time error, not a silently-defaulted autoFailover=false.
+    expect(() => fleetPolicySchema.parse({ autoFailver: true })).toThrow();
+    expect(() => resolveFleetPolicy({ autoFailver: true })).toThrow();
   });
 });
 
@@ -106,6 +139,48 @@ describe("slotSpecSchema", () => {
 
   it("discriminates on kind", () => {
     expect(() => slotSpecSchema.parse({ kind: "other" })).toThrow();
+  });
+
+  it("rejects unknown keys on specs and model bindings (strict)", () => {
+    expect(() =>
+      inferenceSlotSpecSchema.parse({
+        kind: "inference",
+        models: [{ name: "example-chat", servingUrl: "http://127.0.0.1:8001" }],
+        sleepLvl: 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      modelBindingSchema.parse({
+        name: "example-chat",
+        servingUrl: "http://127.0.0.1:8001",
+        serving_url: "http://127.0.0.1:8002",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("slotSnapshotSchema", () => {
+  const inferenceSnapshot = {
+    id: "00000000-0000-4000-8000-00000000000a",
+    domainId: "00000000-0000-4000-8000-00000000000b",
+    gpuIndex: 0,
+    kind: "inference",
+    state: "serving",
+    spec: {
+      kind: "inference",
+      sleepLevel: 1,
+      models: [{ name: "example-chat", servingUrl: "http://127.0.0.1:8001" }],
+    },
+  };
+
+  it("accepts a slot whose kind matches its spec discriminant", () => {
+    expect(slotSnapshotSchema.parse(inferenceSnapshot).kind).toBe("inference");
+  });
+
+  it("rejects a row whose kind disagrees with its spec discriminant", () => {
+    expect(() =>
+      slotSnapshotSchema.parse({ ...inferenceSnapshot, kind: "training" }),
+    ).toThrow(/kind must match/);
   });
 });
 
@@ -259,6 +334,59 @@ describe("fleetLayoutSchema", () => {
       }),
     ).not.toThrow();
   });
+
+  it("rejects unknown keys at every level (strict, incl. extended slots)", () => {
+    const domain = validLayout.domains[0]!;
+    // Top-level typo.
+    expect(() =>
+      fleetLayoutSchema.parse({ ...validLayout, autoFailover: true }),
+    ).toThrow();
+    // Domain-level typo.
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [{ ...domain, superviorUrl: "http://127.0.0.1:8701" }],
+      }),
+    ).toThrow();
+    // Slot-level typo: proves the `.extend({ gpuIndex })` on the slot
+    // spec inherits strictness rather than reopening the object.
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        domains: [
+          {
+            ...domain,
+            slots: [{ ...domain.slots[0], sleepLvl: 1 }, domain.slots[1]],
+          },
+        ],
+      }),
+    ).toThrow();
+    // Nested-policy typo: proves `fleetPolicySchema.partial()` keeps the
+    // strictness, so a misspelled safety setting inside a layout's
+    // `policy` is still a config-time error.
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        policy: { autoFailver: true },
+      }),
+    ).toThrow();
+    // ...while a correctly-spelled partial policy is still accepted.
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        policy: { autoFailover: true },
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts an optional $schema pointer for editor integration", () => {
+    expect(() =>
+      fleetLayoutSchema.parse({
+        ...validLayout,
+        $schema: "../../protocol/schemas/fleet-layout.schema.json",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("probeRequestSchema", () => {
@@ -280,6 +408,69 @@ describe("trainingStopRequestSchema", () => {
     );
     expect(() =>
       trainingStopRequestSchema.parse({ graceMs: 2_147_483_648 }),
+    ).toThrow();
+  });
+});
+
+describe("internal request DTOs are strict", () => {
+  it("rejects unknown keys on control-API request bodies", () => {
+    // Server control API (client and server ship together).
+    expect(() =>
+      promoteRequestSchema.parse({
+        targetDomainId: "00000000-0000-4000-8000-00000000000a",
+        force: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      demoteRequestSchema.parse({
+        targetDomainId: "00000000-0000-4000-8000-00000000000a",
+        extra: 1,
+      }),
+    ).toThrow();
+    // Supervisor inbound (server is the only caller).
+    expect(() =>
+      vllmTargetRequestSchema.parse({ gpuIndex: 0, all: true }),
+    ).toThrow();
+    expect(() =>
+      trainingStopRequestSchema.parse({ graceMs: 5000, hard: true }),
+    ).toThrow();
+    expect(() =>
+      probeRequestSchema.parse({ prompt: "ping", prmpt: "typo" }),
+    ).toThrow();
+  });
+});
+
+describe("supervisorConfigSchema", () => {
+  const validConfig = {
+    slots: [
+      {
+        kind: "inference",
+        gpuIndex: 0,
+        models: [{ name: "example-chat", port: 8001 }],
+      },
+    ],
+  };
+
+  it("parses a valid config", () => {
+    expect(supervisorConfigSchema.parse(validConfig).slots).toHaveLength(1);
+  });
+
+  it("rejects unknown keys (strict operator config)", () => {
+    // Top-level typo.
+    expect(() =>
+      supervisorConfigSchema.parse({ ...validConfig, slotz: [] }),
+    ).toThrow();
+    // Model-level typo (proves nested strictness).
+    expect(() =>
+      supervisorConfigSchema.parse({
+        slots: [
+          {
+            kind: "inference",
+            gpuIndex: 0,
+            models: [{ name: "example-chat", port: 8001, prt: 8002 }],
+          },
+        ],
+      }),
     ).toThrow();
   });
 });
@@ -346,6 +537,29 @@ describe("joinUrl", () => {
   it("preserves repeated base query keys", () => {
     expect(joinUrl("https://host.example?tag=a&tag=b", "/v1/status")).toBe(
       "https://host.example/v1/status?tag=a&tag=b",
+    );
+  });
+
+  it("does not let a protocol-relative path swap the origin", () => {
+    // `//evil.example/x` must stay a path on the base host, never
+    // resolve as a protocol-relative URL to evil.example.
+    expect(joinUrl("https://host.example", "//evil.example/x")).toBe(
+      "https://host.example/evil.example/x",
+    );
+    expect(joinUrl("https://host.example/base", "///evil.example")).toBe(
+      "https://host.example/base/evil.example",
+    );
+  });
+
+  it("does not let leading backslashes swap the origin", () => {
+    // The WHATWG URL parser treats a backslash like a slash on http(s),
+    // so a backslash-led path against an origin-only base (e.g. a
+    // supervisor 127.0.0.1 URL) must not resolve to another host.
+    expect(joinUrl("https://host.example", String.raw`\\evil.example/x`)).toBe(
+      "https://host.example/evil.example/x",
+    );
+    expect(joinUrl("https://host.example", String.raw`/\evil.example`)).toBe(
+      "https://host.example/evil.example",
     );
   });
 });

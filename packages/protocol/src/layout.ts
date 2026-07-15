@@ -25,7 +25,10 @@ export const slotLayoutSchema = z.discriminatedUnion("kind", [
 ]);
 export type SlotLayout = z.infer<typeof slotLayoutSchema>;
 
-export const domainLayoutSchema = z.object({
+// Strict: operator-authored config. A misspelled key (e.g.
+// `supervisorUrl` -> `superviorUrl`) must fail at parse time rather
+// than silently leave the domain with a null control URL.
+export const domainLayoutSchema = z.strictObject({
   slug: slugSchema,
   provider: domainProviderSchema.default("static"),
   placement: placementSpecSchema,
@@ -36,7 +39,12 @@ export const domainLayoutSchema = z.object({
 export type DomainLayout = z.infer<typeof domainLayoutSchema>;
 
 export const fleetLayoutSchema = z
-  .object({
+  // Strict: the top-level operator layout rejects unknown keys so a
+  // typo'd field is a config-time error, not a silently ignored one.
+  .strictObject({
+    /** Optional pointer to the bundled JSON Schema, so an editor can
+     * validate / autocomplete the layout. Ignored by the loader. */
+    $schema: z.string().optional(),
     slug: slugSchema,
     displayName: z.string().min(1).optional(),
     /** Slug of the domain that starts active; must name a domain below. */

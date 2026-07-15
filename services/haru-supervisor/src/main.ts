@@ -15,6 +15,16 @@ const environmentSchema = z.object({
   HARU_SUPERVISOR_CONFIG: z.string().min(1),
 });
 
+// Mirror the server / seed / drizzle entrypoints: load the repo-root
+// .env so a developer's local vars (HARU_SUPERVISOR_CONFIG,
+// HARU_SUPERVISOR_TOKEN) are honored. Production injects env via the
+// orchestrator, where no .env exists and this is a no-op.
+try {
+  process.loadEnvFile("../../.env");
+} catch {
+  // No .env file; rely on the process environment.
+}
+
 const environment = environmentSchema.parse(process.env);
 const config = loadSupervisorConfig(environment.HARU_SUPERVISOR_CONFIG);
 
@@ -111,7 +121,7 @@ const server = serve(
  * the whole group. */
 const SHUTDOWN_TRAINING_GRACE_MS = 30_000;
 
-// Installing a SIGTERM handler suppresses Node's default
+// Installing these handlers suppresses Node's default
 // terminate-on-signal, so the handler must complete the shutdown
 // itself. Trainers MUST be stopped here: they run as detached process
 // groups, so an unstopped run would survive the restart holding GPU
@@ -119,21 +129,37 @@ const SHUTDOWN_TRAINING_GRACE_MS = 30_000;
 // start a second run beside it. beginShutdown also rejects any
 // /v1/training/start still draining through server.close(), so no
 // trainer can spawn after the stop sweep.
-process.on("SIGTERM", () => {
-  beginShutdown(SHUTDOWN_TRAINING_GRACE_MS);
-  // Closing the listener lets the process exit naturally once the
-  // event loop drains; the pending kill timers keep it alive until
-  // every trainer exited or was SIGKILLed.
-  server.close();
-  // Hard stop: a stuck client connection or an unkillable child (D
-  // state after SIGKILL) must not hold the process until the platform
-  // SIGKILLs it. By this point every trainer has had SIGTERM plus the
-  // full grace plus SIGKILL, so nothing orderly remains. unref() so
-  // the timer never keeps an otherwise-drained process alive.
-  const hardStop = setTimeout(() => {
-    console.error("shutdown did not drain in time; exiting");
-    // eslint-disable-next-line n/no-process-exit -- last resort after server.close() stalled
-    process.exit(1);
-  }, SHUTDOWN_TRAINING_GRACE_MS + 10_000);
-  hardStop.unref();
-});
+//
+// Handle SIGINT as well as SIGTERM: production stops via SIGTERM
+// (systemd/k8s), but Ctrl-C under `pnpm dev` / foreground debugging
+// delivers SIGINT, and Node's default SIGINT would terminate WITHOUT
+// running the trainer sweep - orphaning the detached process group on
+// the GPU exactly as the sweep exists to prevent. A mutable field
+// (not a rebindable top-level `let`) makes shutdown idempotent across
+// both signals: a second SIGTERM/SIGINT during teardown must not
+// schedule a second hardStop timer or re-close the listener.
+const shutdownState = { started: false };
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    if (shutdownState.started) {
+      return;
+    }
+    shutdownState.started = true;
+    beginShutdown(SHUTDOWN_TRAINING_GRACE_MS);
+    // Closing the listener lets the process exit naturally once the
+    // event loop drains; the pending kill timers keep it alive until
+    // every trainer exited or was SIGKILLed.
+    server.close();
+    // Hard stop: a stuck client connection or an unkillable child (D
+    // state after SIGKILL) must not hold the process until the platform
+    // SIGKILLs it. By this point every trainer has had SIGTERM plus the
+    // full grace plus SIGKILL, so nothing orderly remains. unref() so
+    // the timer never keeps an otherwise-drained process alive.
+    const hardStop = setTimeout(() => {
+      console.error("shutdown did not drain in time; exiting");
+      // eslint-disable-next-line n/no-process-exit -- last resort after server.close() stalled
+      process.exit(1);
+    }, SHUTDOWN_TRAINING_GRACE_MS + 10_000);
+    hardStop.unref();
+  });
+}

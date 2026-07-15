@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "activeDomainSlug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "autoFailover": {
+          "default": false,
+          "type": "boolean"
+        },
+        "heartbeatStaleMs": {
+          "default": 30000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "degradedGraceMs": {
+          "default": 60000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "trainingStopGraceMs": {
+          "default": 30000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "stopTrainingTimeoutMs": {
+          "default": 90000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "verifyGpuTimeoutMs": {
+          "default": 30000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "wakeTimeoutMs": {
+          "default": 120000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "probeTimeoutMs": {
+          "default": 60000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "switchActiveTimeoutMs": {
+          "default": 10000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "sleepTimeoutMs": {
+          "default": 60000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "startTrainingTimeoutMs": {
+          "default": 30000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483647
+        },
+        "probe": {
+          "default": {
+            "prompt": "ping",
+            "maxTokens": 4
+          },
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "default": "ping",
+              "type": "string",
+              "minLength": 1
+            },
+            "maxTokens": {
+              "default": 4,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "domains": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "provider": {
+            "default": "static",
+            "type": "string",
+            "enum": [
+              "skypilot",
+              "skyserve",
+              "static"
+            ]
+          },
+          "placement": {
+            "type": "object",
+            "properties": {
+              "cloud": {
+                "type": "string",
+                "enum": [
+                  "aws",
+                  "gcp"
+                ]
+              },
+              "region": {
+                "type": "string",
+                "minLength": 1
+              },
+              "accelerator": {
+                "type": "string",
+                "minLength": 1
+              },
+              "acceleratorCount": {
+                "default": 1,
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "useSpot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "cloud",
+              "region",
+              "accelerator"
+            ],
+            "additionalProperties": false
+          },
+          "supervisorUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "servingBaseUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "slots": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "inference"
+                    },
+                    "models": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "servingUrl": {
+                            "type": "string",
+                            "format": "uri"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "servingUrl"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "sleepLevel": {
+                      "default": 1,
+                      "type": "number",
+                      "const": 1
+                    },
+                    "gpuIndex": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "models",
+                    "gpuIndex"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "training"
+                    },
+                    "command": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "checkpointDir": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "gpuIndex": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "command",
+                    "checkpointDir",
+                    "gpuIndex"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "slug",
+          "placement",
+          "slots"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "slug",
+    "domains"
+  ],
+  "additionalProperties": false
+}
