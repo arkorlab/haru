@@ -22,9 +22,9 @@ try {
 const environment = loadSupervisorEnvironment(process.env);
 const config = loadSupervisorConfig(environment.HARU_SUPERVISOR_CONFIG);
 
-const isAuthenticated =
-  environment.HARU_SUPERVISOR_TOKEN !== undefined &&
-  environment.HARU_SUPERVISOR_TOKEN !== "";
+// blankableString already maps a blank/whitespace token to undefined,
+// so a defined value is a real, non-empty token.
+const isAuthenticated = environment.HARU_SUPERVISOR_TOKEN !== undefined;
 if (!isAuthenticated) {
   console.warn(
     "HARU_SUPERVISOR_TOKEN is not set: the control API is UNAUTHENTICATED " +
