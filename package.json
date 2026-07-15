@@ -14,7 +14,8 @@
     "db:generate": "pnpm --filter @haru/db db:generate",
     "db:migrate": "pnpm --filter @haru/db db:migrate",
     "db:push": "pnpm --filter @haru/db db:push",
-    "db:seed": "pnpm --filter @haru/db db:seed"
+    "db:seed": "pnpm --filter @haru/db db:seed",
+    "schemas:generate": "pnpm --filter @haru/protocol schemas:generate"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

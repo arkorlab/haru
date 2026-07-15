@@ -1,4 +1,5 @@
 {
+  "$schema": "../../protocol/schemas/fleet-layout.schema.json",
   "slug": "default",
   "displayName": "Example fleet",
   "activeDomainSlug": "alpha",

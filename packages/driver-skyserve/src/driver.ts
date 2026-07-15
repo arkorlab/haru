@@ -100,9 +100,15 @@ export function createSkyserveDriver(
       if (!row) {
         return null;
       }
-      const status = row.find((token) =>
-        (SERVICE_STATUSES as readonly string[]).includes(token),
-      );
+      // Skip the NAME column (tokens[0], already matched against
+      // serviceName) when scanning for the status cell: a service whose
+      // name happens to be a status token must not shadow the real
+      // STATUS column.
+      const status = row
+        .slice(1)
+        .find((token) =>
+          (SERVICE_STATUSES as readonly string[]).includes(token),
+        );
       if (status === undefined) {
         throw new SkyCliError(
           `sky serve status ${serviceName}`,

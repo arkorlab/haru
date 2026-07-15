@@ -9,7 +9,9 @@ import { slotKindSchema } from "./enums.js";
  * their admin endpoints (sleep/wake) are private, local-only controls
  * that are never exposed beyond the supervisor.
  */
-export const supervisorInferenceModelConfigSchema = z.object({
+// Strict: HARU_SUPERVISOR_CONFIG is operator-authored, so a misspelled
+// key must fail at load time rather than be silently dropped.
+export const supervisorInferenceModelConfigSchema = z.strictObject({
   name: z.string().min(1),
   /** Local port of the vLLM server for this model on 127.0.0.1. */
   port: z.number().int().min(1).max(65_535),
@@ -18,13 +20,13 @@ export type SupervisorInferenceModelConfig = z.infer<
   typeof supervisorInferenceModelConfigSchema
 >;
 
-export const supervisorInferenceSlotConfigSchema = z.object({
+export const supervisorInferenceSlotConfigSchema = z.strictObject({
   kind: z.literal("inference"),
   gpuIndex: z.number().int().nonnegative(),
   models: z.array(supervisorInferenceModelConfigSchema).min(1),
 });
 
-export const supervisorTrainingSlotConfigSchema = z.object({
+export const supervisorTrainingSlotConfigSchema = z.strictObject({
   kind: z.literal("training"),
   gpuIndex: z.number().int().nonnegative(),
   command: z.array(z.string().min(1)).min(1),
@@ -38,7 +40,10 @@ export const supervisorSlotConfigSchema = z.discriminatedUnion("kind", [
 export type SupervisorSlotConfig = z.infer<typeof supervisorSlotConfigSchema>;
 
 export const supervisorConfigSchema = z
-  .object({
+  .strictObject({
+    /** Optional pointer to the bundled JSON Schema, so an editor can
+     * validate / autocomplete the config. Ignored by the loader. */
+    $schema: z.string().optional(),
     slots: z.array(supervisorSlotConfigSchema).min(1),
   })
   // The supervisor keys training runs by gpuIndex; a duplicate
@@ -98,8 +103,13 @@ export const supervisorStatusSchema = z.object({
 export type SupervisorStatus = z.infer<typeof supervisorStatusSchema>;
 
 /** POST /v1/vllm/sleep and /v1/vllm/wake body. Omitted gpuIndex means
- * every inference slot on the host. */
-export const vllmTargetRequestSchema = z.object({
+ * every inference slot on the host.
+ *
+ * The supervisor's inbound request bodies are strict: the server is the
+ * only caller and ships from the same repo, so an unknown key is drift
+ * or a typo, not a compatible extension. (Supervisor RESPONSE schemas,
+ * which the server parses, stay lenient - leniency toward a peer.) */
+export const vllmTargetRequestSchema = z.strictObject({
   gpuIndex: z.number().int().nonnegative().optional(),
 });
 export type VllmTargetRequest = z.infer<typeof vllmTargetRequestSchema>;
@@ -111,7 +121,7 @@ export type VllmTargetRequest = z.infer<typeof vllmTargetRequestSchema>;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** POST /v1/training/stop body. */
-export const trainingStopRequestSchema = z.object({
+export const trainingStopRequestSchema = z.strictObject({
   graceMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
 });
 export type TrainingStopRequest = z.infer<typeof trainingStopRequestSchema>;
@@ -130,7 +140,7 @@ export const gpuMemorySchema = z.object({
 export type GpuMemory = z.infer<typeof gpuMemorySchema>;
 
 /** POST /v1/probe body. */
-export const probeRequestSchema = z.object({
+export const probeRequestSchema = z.strictObject({
   prompt: z.string().min(1).default("ping"),
   maxTokens: z.number().int().positive().default(4),
   /**

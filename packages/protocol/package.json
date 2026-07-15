@@ -16,7 +16,8 @@
     "lint": "oxlint --type-aware --deny-warnings . && eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "schemas:generate": "pnpm build && node scripts/generate-schemas.mjs"
   },
   "dependencies": {
     "zod": "catalog:"

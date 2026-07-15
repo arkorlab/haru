@@ -27,12 +27,15 @@ export const operationSnapshotSchema = z.object({
 });
 export type OperationSnapshot = z.infer<typeof operationSnapshotSchema>;
 
-export const promoteRequestSchema = z.object({
+// Strict: these are the server's own control-API request bodies. Client
+// and server ship from one repo and version together, so an unknown key
+// is a typo / drift, not a compatible extension - reject it at the edge.
+export const promoteRequestSchema = z.strictObject({
   targetDomainId: z.uuid(),
 });
 export type PromoteRequest = z.infer<typeof promoteRequestSchema>;
 
-export const demoteRequestSchema = z.object({
+export const demoteRequestSchema = z.strictObject({
   targetDomainId: z.uuid(),
 });
 export type DemoteRequest = z.infer<typeof demoteRequestSchema>;

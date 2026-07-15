@@ -13,7 +13,13 @@
 export function joinUrl(baseUrl: string, path: string): string {
   const base = new URL(baseUrl);
   const prefix = base.pathname.replace(/\/+$/, "");
-  const suffix = path.startsWith("/") ? path : `/${path}`;
+  // Collapse any leading slashes AND backslashes to exactly one forward
+  // slash. A `path` like `//evil.example/x` - or `\\evil.example/x`,
+  // which the WHATWG URL parser normalizes to `//` on http/https - would
+  // otherwise be parsed as protocol-relative and swap the base's
+  // host/origin against an origin-only base. Every caller passes a
+  // code-literal path today, so this is defense in depth.
+  const suffix = `/${path.replace(/^[\\/]+/, "")}`;
   const joined = new URL(`${prefix}${suffix}`, base);
   // Re-apply the base query params that `new URL` dropped. Snapshot the
   // path's OWN keys first so a same-named base param is skipped (path

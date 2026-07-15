@@ -23,6 +23,9 @@ export function isRoutableDomainState(domain: DomainSnapshot): boolean {
  */
 export function routableModels(domain: DomainSnapshot): RouteModel[] {
   const isStateRoutable = isRoutableDomainState(domain);
+  // Gating on the spec discriminant is equivalent to gating on the
+  // slot row's `kind`: slotSnapshotSchema enforces `kind === spec.kind`
+  // at the read boundary, so the two never disagree here.
   return domain.slots.flatMap((slot) =>
     slot.spec.kind === "inference"
       ? slot.spec.models.map((m) => ({
@@ -90,6 +93,11 @@ function toTarget(
   role: "active" | "standby",
 ): RouteTarget {
   const models = routableModels(domain);
+  // Per-model `eligible` is computed role-agnostically, so a just-
+  // demoted domain whose slots are still `serving` can report
+  // `models[].eligible === true` until sleep_vllm lands. That per-model
+  // flag is advisory for a standby; the target-level `eligible`/`weight`
+  // below (the contract consumers route on) is hard-forced off/zero.
   const isEligible =
     role === "active" &&
     domain.servingBaseUrl !== null &&

@@ -283,6 +283,9 @@ export default defineConfig(
       "n/no-process-exit": "off",
       "unicorn/no-process-exit": "off",
       "n/hashbang": "off",
+      // Generators/scripts import built (dist) or generated artifacts
+      // that may be absent until a prior build step runs.
+      "n/no-missing-import": "off",
     },
   },
 );

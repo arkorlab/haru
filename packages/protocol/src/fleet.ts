@@ -25,7 +25,7 @@ export const httpUrlSchema = z.url({ protocol: /^https?$/ });
  * the vLLM server that hosts it. Multiple models on one GPU slot means
  * multiple vLLM server processes sharing that GPU.
  */
-export const modelBindingSchema = z.object({
+export const modelBindingSchema = z.strictObject({
   // Lowercase-only: this is the routing key clients put in `model`,
   // matched exactly by the chat proxy. Requiring lowercase here turns
   // a client/server casing mismatch (many callers normalise model ids
@@ -46,8 +46,12 @@ export type ModelBinding = z.infer<typeof modelBindingSchema>;
  * Inference slot spec: which models this GPU serves. `sleepLevel: 1`
  * is the only supported standby mode in this slice (vLLM level 1
  * sleep keeps weights in CPU RAM for the fastest wake path).
+ *
+ * Strict: operator-authored config; unknown keys (e.g. a misspelled
+ * `sleepLevel`) fail at parse time. `slotLayoutSchema` extends this
+ * with `gpuIndex` and inherits the strictness.
  */
-export const inferenceSlotSpecSchema = z.object({
+export const inferenceSlotSpecSchema = z.strictObject({
   kind: z.literal("inference"),
   models: z.array(modelBindingSchema).min(1),
   sleepLevel: z.literal(1).default(1),
@@ -60,7 +64,7 @@ export type InferenceSlotSpec = z.infer<typeof inferenceSlotSpecSchema>;
  * checkpoint/resume oriented; the supervisor may SIGKILL it after the
  * configured grace period during failover.
  */
-export const trainingSlotSpecSchema = z.object({
+export const trainingSlotSpecSchema = z.strictObject({
   kind: z.literal("training"),
   command: z.array(z.string().min(1)).min(1),
   checkpointDir: z.string().min(1),
@@ -73,14 +77,24 @@ export const slotSpecSchema = z.discriminatedUnion("kind", [
 ]);
 export type SlotSpec = z.infer<typeof slotSpecSchema>;
 
-export const slotSnapshotSchema = z.object({
-  id: z.uuid(),
-  domainId: z.uuid(),
-  gpuIndex: z.number().int().nonnegative(),
-  kind: slotKindSchema,
-  state: slotStateSchema,
-  spec: slotSpecSchema,
-});
+export const slotSnapshotSchema = z
+  .object({
+    id: z.uuid(),
+    domainId: z.uuid(),
+    gpuIndex: z.number().int().nonnegative(),
+    kind: slotKindSchema,
+    state: slotStateSchema,
+    spec: slotSpecSchema,
+  })
+  // The row's `kind` column and the spec discriminant are written
+  // together by applyFleetLayout; enforce they agree at the read
+  // boundary so a drifted row can never surface as (say) an inference
+  // slot carrying a training spec. Routing and health predicates then
+  // gate on either interchangeably.
+  .refine((slot) => slot.kind === slot.spec.kind, {
+    message: "slot.kind must match slot.spec.kind",
+    path: ["kind"],
+  });
 export type SlotSnapshot = z.infer<typeof slotSnapshotSchema>;
 
 export const domainSnapshotSchema = z.object({

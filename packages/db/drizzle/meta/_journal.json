@@ -15,6 +15,13 @@
       "when": 1783833982467,
       "tag": "0001_reflective_payback",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784057020977,
+      "tag": "0002_bumpy_khan",
+      "breakpoints": true
     }
   ]
 }
