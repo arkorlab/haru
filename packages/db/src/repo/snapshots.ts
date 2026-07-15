@@ -13,6 +13,33 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Persisted fleet state failed `fleetSnapshotSchema` validation
+ * (corrupt jsonb in a spec/placement/policy column). Thrown by
+ * `getFleetSnapshot` so consumers can tell "the data is broken" from
+ * "the store is unreachable" without inspecting a validation-library
+ * error by name; the original validation error rides on `cause`.
+ */
+export class MalformedFleetStateError extends Error {
+  constructor(cause: unknown) {
+    super("persisted fleet state failed validation");
+    this.name = "MalformedFleetStateError";
+    this.cause = cause;
+  }
+}
+
+/**
+ * Whether a fleet reference is UUID-shaped, i.e. whether
+ * `lookupFleetByReference` resolves it by ID BEFORE falling back to
+ * slug. Exported because any consumer that resolves references without
+ * the database (haru-server's fail-open snapshot cache) must reproduce
+ * the same id-first rule: the slug charset admits UUID-shaped slugs, so
+ * one fleet's slug can collide with another fleet's id.
+ */
+export function isFleetIdShaped(reference: string): boolean {
+  return UUID_RE.test(reference);
+}
+
+/**
  * Resolve a fleet reference: by id when it is UUID-shaped, falling
  * back to slug. Two separate lookups (never `id = ref OR slug = ref`):
  * the slug charset admits UUID-shaped slugs, and a single OR query
@@ -25,7 +52,7 @@ async function lookupFleetByReference<T>(
   runQuery: (where: SQL) => Promise<T[]>,
   reference: string,
 ): Promise<T | null> {
-  if (UUID_RE.test(reference)) {
+  if (isFleetIdShaped(reference)) {
     const byId = await runQuery(eq(fleets.id, reference));
     if (byId[0]) {
       return byId[0];
@@ -78,7 +105,8 @@ export async function getFleetRoutePointer(
  * Load the full read model of a fleet (a fleet lookup, then domains
  * and slots in parallel; no transaction). The result is validated
  * through the protocol schema so malformed jsonb (spec/placement/
- * policy) surfaces here instead of deep inside a consumer.
+ * policy) surfaces here, as `MalformedFleetStateError`, instead of
+ * deep inside a consumer.
  */
 export async function getFleetSnapshot(
   database: HaruDatabase,
@@ -109,32 +137,40 @@ export async function getFleetSnapshot(
   // Group once instead of filtering the full slot list per domain.
   const slotsByDomain = Map.groupBy(slotRows, (s) => s.domainId);
 
-  return fleetSnapshotSchema.parse({
-    id: fleet.id,
-    slug: fleet.slug,
-    displayName: fleet.displayName,
-    activeDomainId: fleet.activeDomainId,
-    routeRevision: fleet.routeRevision,
-    policy: resolveFleetPolicy(fleet.policy),
-    domains: domainRows.map((d) => ({
-      id: d.id,
-      fleetId: d.fleetId,
-      slug: d.slug,
-      state: d.state,
-      provider: d.provider,
-      placement: d.placement,
-      supervisorUrl: d.supervisorUrl,
-      servingBaseUrl: d.servingBaseUrl,
-      lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
-      stateUpdatedAt: d.stateUpdatedAt.toISOString(),
-      slots: (slotsByDomain.get(d.id) ?? []).map((s) => ({
-        id: s.id,
-        domainId: s.domainId,
-        gpuIndex: s.gpuIndex,
-        kind: s.kind,
-        state: s.state,
-        spec: s.spec,
+  // The WHOLE read-model construction is inside the wrap:
+  // resolveFleetPolicy parses the policy jsonb and the schema parse
+  // validates the rest, and consumers must see ONE typed error for any
+  // corrupt persisted state, whichever column it hides in.
+  try {
+    return fleetSnapshotSchema.parse({
+      id: fleet.id,
+      slug: fleet.slug,
+      displayName: fleet.displayName,
+      activeDomainId: fleet.activeDomainId,
+      routeRevision: fleet.routeRevision,
+      policy: resolveFleetPolicy(fleet.policy),
+      domains: domainRows.map((d) => ({
+        id: d.id,
+        fleetId: d.fleetId,
+        slug: d.slug,
+        state: d.state,
+        provider: d.provider,
+        placement: d.placement,
+        supervisorUrl: d.supervisorUrl,
+        servingBaseUrl: d.servingBaseUrl,
+        lastSeenAt: d.lastSeenAt?.toISOString() ?? null,
+        stateUpdatedAt: d.stateUpdatedAt.toISOString(),
+        slots: (slotsByDomain.get(d.id) ?? []).map((s) => ({
+          id: s.id,
+          domainId: s.domainId,
+          gpuIndex: s.gpuIndex,
+          kind: s.kind,
+          state: s.state,
+          spec: s.spec,
+        })),
       })),
-    })),
-  });
+    });
+  } catch (error) {
+    throw new MalformedFleetStateError(error);
+  }
 }

@@ -25,6 +25,19 @@ export const ERROR_CODES = {
   payloadTooLarge: "payload_too_large",
   /** The supervisor received SIGTERM; no new work is accepted. */
   shuttingDown: "shutting_down",
+  /**
+   * The chat proxy could not resolve routing for THIS fleet from the
+   * state store, and had no usable cached routing for it either: the
+   * store is unreachable and the fleet was never cached by this
+   * process, or the store answered but its state is unusable (a
+   * promotion moved the pointer and the fresh snapshot will not load,
+   * or the fleet's persisted state is malformed). A cached snapshot
+   * does NOT preclude this code: an entry whose routing is known to be
+   * superseded (or whose fleet's state is corrupt) is quarantined
+   * rather than served, so a warm process can still raise it (see the
+   * fail-open path in haru-server's `cachedSnapshot`).
+   */
+  stateStoreUnavailable: "state_store_unavailable",
 } as const;
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 

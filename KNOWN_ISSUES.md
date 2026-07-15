@@ -25,17 +25,75 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   populated from the execFile error and include them in the SkyCliError
   / gpu error strings.
 
-### Chat snapshot cache entries are never evicted
+### Chat snapshot cache has no size cap
 
-- Where: `services/haru-server/src/app.ts` (`snapshotCache`).
-- Current: entries are overwritten on next access but never deleted;
-  a fleet that stops existing (or stops being queried) pins its last
+- Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
+  `fleetIdByReference` and `forgottenGenerations` maps that share its
+  lifetime).
+- Current: entries are dropped when the store reports the fleet gone,
+  and quarantined when they are learned to be unusable (`forgetFleet`),
+  but a fleet that simply stops being queried pins its last
   FleetSnapshot for process lifetime. Bounded by the number of distinct
   fleets ever served.
-- Why deferred: fleets are few and long-lived in this slice; there is
-  no fleet-delete API yet to hook.
-- Intended fix: drop the entry when the per-request pointer lookup
-  returns null, plus a small LRU cap.
+- Why deferred: fleets are few and long-lived in this slice.
+- Intended fix: a small LRU cap. Careful: eviction must stay driven by
+  what the store SAYS (a null lookup, an unusable snapshot), never by a
+  lookup that THROWS - a throw means the store is unreachable and the
+  entry is exactly what the chat proxy's fail-open path serves from
+  (see `failOpen` in the same file).
+
+### Outage detection latency on the chat path is unbounded
+
+- Where: `services/haru-server/src/app.ts` (`cachedSnapshot` calling
+  `getFleetRoutePointer`).
+- Current: the pointer read has no timeout or AbortSignal and there is
+  no memoized outage state, so during a hang-mode outage (the store
+  accepts TCP but never answers) every chat request waits for the
+  transport's own failure before fail-open engages, potentially the
+  full undici header timeout, paid per request as time-to-first-byte.
+  A fast-fail outage (connection refused) is near-instant and
+  unaffected.
+- Why deferred: a detection bound is a design decision (fixed budget
+  vs config knob vs circuit breaker) and this slice deliberately adds
+  no new env knobs; the common outage mode (endpoint down) fails fast.
+- Intended fix: a small fixed AbortSignal budget around the pointer
+  read (well above healthy p99), optionally with a short-lived "store
+  is down" memo so consecutive requests skip straight to the cache.
+  Both must preserve the rule that only a FAILING pointer read
+  licenses fail-open.
+
+### Fail-closed chat errors log once per request
+
+- Where: `services/haru-server/src/app.ts` (`failOpen` cold-cache
+  branch and `snapshotLoadFailed`).
+- Current: stale-serving transitions are deduplicated via
+  `staleFleetIds`, but the two fail-closed 503 paths `console.error`
+  on every request: an outage with a cold (or quarantined) fleet logs
+  per request, and a fleet with corrupt persisted state logs per
+  reload attempt until the data is repaired.
+- Why deferred: dedup needs per-reference bookkeeping with a clearing
+  rule; the flood only occurs while requests are already failing.
+- Intended fix: transition-style logging keyed by reference (log on
+  first failure, clear on the next success), mirroring
+  `staleFleetIds`.
+
+### A partial pointer read discards the id-disclaimed half of its verdict
+
+- Where: `packages/db/src/repo/snapshots.ts` (`lookupFleetByReference`)
+  as consumed by `cachedSnapshot` / `failOpen` in
+  `services/haru-server/src/app.ts`.
+- Current: a UUID-shaped reference runs two sequential queries. When
+  the by-id query succeeds with an empty result (the store just
+  disclaimed the id) and the slug-fallback query then throws, the
+  caller sees only a throw and fails open, so the id-first cache probe
+  can serve a fleet the store disclaimed one query earlier.
+- Why deferred: it needs the store to die between the two sub-queries
+  of a single request AND the reference to name a just-deleted fleet
+  this process still has cached; the next successful read heals the
+  cache.
+- Intended fix: surface partial evidence from the pointer read (a
+  typed error carrying "the id half was disclaimed") so `failOpen` can
+  skip the id-keyed probe while still honoring the alias path.
 
 ### Cache-miss path refetches the fleet row
 

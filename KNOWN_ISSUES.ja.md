@@ -25,17 +25,72 @@
   `signal`/`errorMessage` を追加し、SkyCliError / gpu エラー文字列に
   含める。
 
-### chat スナップショットキャッシュのエントリは削除されない
+### chat スナップショットキャッシュにサイズ上限がない
 
-- 場所: `services/haru-server/src/app.ts` (`snapshotCache`)。
-- 現状: エントリは次アクセスで上書きされるが削除はされない。存在
-  しなくなった (または参照されなくなった) フリートの最終
-  FleetSnapshot がプロセス寿命の間残る。上限は「これまでに配信した
-  フリート数」。
-- 先送りの理由: このスライスではフリートは少数かつ長寿命で、フック
-  すべき fleet 削除 API もまだない。
-- 意図する修正: リクエスト時のポインタ lookup が null を返したら
-  エントリを削除 + 小さな LRU 上限。
+- 場所: `services/haru-server/src/app.ts` (`snapshotCache`。加えて
+  同じ寿命を共有する `fleetIdByReference` / `forgottenGenerations`
+  マップ)。
+- 現状: store が「フリートは存在しない」と答えたときの削除と、
+  使用不能と判明したエントリの隔離 (`forgetFleet`) は実装済み。
+  ただし単に参照されなくなっただけのフリートは、最終 FleetSnapshot
+  がプロセス寿命の間残る。上限は「これまでに配信したフリート数」。
+- 先送りの理由: このスライスではフリートは少数かつ長寿命。
+- 意図する修正: 小さな LRU 上限。注意: 削除は store が「そう言った」
+  ことだけを根拠にすること (null lookup、使用不能なスナップショット)。
+  lookup の throw を根拠にしてはいけない。throw は store 到達不能を
+  意味し、そのエントリこそ chat proxy の fail-open 経路が配信する
+  当のものだから (同ファイルの `failOpen`)。
+
+### chat 経路の障害検知レイテンシに上限がない
+
+- 場所: `services/haru-server/src/app.ts` (`cachedSnapshot` が
+  `getFleetRoutePointer` を呼ぶ箇所)。
+- 現状: pointer 読み取りに timeout / AbortSignal がなく、障害状態の
+  メモ化もない。そのためハング型の障害 (TCP は受けるが応答しない)
+  では、fail-open が発動する前に毎リクエストがトランスポート自身の
+  失敗を待つ (最悪 undici のヘッダータイムアウトまで、リクエスト
+  ごとに TTFB として支払う)。即時失敗型の障害 (connection refused)
+  はほぼ即座で影響なし。
+- 先送りの理由: 検知の上限は設計判断 (固定バジェット / 設定ノブ /
+  サーキットブレーカー) であり、このスライスは意図的に新しい env
+  ノブを増やさない。よくある障害モード (エンドポイント停止) は
+  即時失敗する。
+- 意図する修正: pointer 読み取りへの小さな固定 AbortSignal
+  バジェット (健全時 p99 より十分上)。加えて短寿命の「store 停止中」
+  メモで後続リクエストを直接キャッシュへ向かわせてもよい。いずれも
+  「fail-open を許可するのは pointer 読み取りの失敗だけ」という
+  規則を保つこと。
+
+### fail-closed の chat エラーはリクエストごとにログされる
+
+- 場所: `services/haru-server/src/app.ts` (`failOpen` のコールド
+  キャッシュ分岐と `snapshotLoadFailed`)。
+- 現状: stale 配信の遷移は `staleFleetIds` で重複排除済みだが、
+  fail-closed の 503 経路 2 つは毎リクエスト `console.error` する:
+  コールド (または隔離済み) フリートへの障害中リクエストは
+  リクエストごとに、永続状態が壊れたフリートはデータ修復まで
+  リロード試行ごとにログが出る。
+- 先送りの理由: 重複排除には参照ごとの状態とクリア規則が必要で、
+  洪水はリクエストが既に失敗している間しか起きない。
+- 意図する修正: 参照をキーにした遷移型ログ (初回失敗でログ、次の
+  成功でクリア)。`staleFleetIds` と同じ作法。
+
+### pointer 読み取りの部分失敗は「id は否認済み」という半分の判定を捨てる
+
+- 場所: `packages/db/src/repo/snapshots.ts` (`lookupFleetByReference`)。
+  消費側は `services/haru-server/src/app.ts` の `cachedSnapshot` /
+  `failOpen`。
+- 現状: UUID 形の参照は 2 つのクエリを順に実行する。by-id クエリが
+  空結果で成功し (store がその id を否認した直後)、slug フォール
+  バックのクエリが throw した場合、呼び出し側には throw しか見えず
+  fail-open する。その結果、id-first のキャッシュ探索が、1 クエリ前に
+  store が否認したフリートを配信しうる。
+- 先送りの理由: 1 リクエスト内の 2 サブクエリの間で store が落ち、
+  かつ参照が「削除直後でこのプロセスにまだキャッシュされている
+  フリート」を指す必要がある。次の成功読み取りでキャッシュは治る。
+- 意図する修正: pointer 読み取りから部分的な証拠を表面化する
+  (「id 側は否認済み」を運ぶ型付きエラー)。`failOpen` は alias 経路を
+  保ちつつ id キーの探索をスキップできる。
 
 ### キャッシュミス経路で fleet 行を二重取得している
 

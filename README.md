@@ -168,7 +168,29 @@ script reads `DATABASE_URL` and optionally `HARU_FLEET_LAYOUT`.
 - Responses stream through untouched (SSE or JSON). Errors use
   `{ "error": { "code", "message" } }` with codes such as
   `fleet_not_found`, `model_not_found`, `no_active_domain`,
-  `upstream_timeout`, `upstream_unreachable`.
+  `upstream_timeout`, `upstream_unreachable`,
+  `state_store_unavailable`.
+- **The data path fails open.** If the fleet state store is
+  unreachable, chat keeps serving the last routing this process saw and
+  marks the response `X-Haru-Routing: stale`. That is safe rather than
+  merely convenient: the routing pointer cannot move while the database
+  is down (a promotion needs the very CAS that is failing), so the
+  cached route is still the correct one. That guarantee is scoped to a
+  FULL outage: in a partition where another process can still write,
+  the pointer can move while this process is blind, and chat keeps
+  routing to the previous active until the store is readable again
+  (those requests fail upstream as the old active is demoted - the same
+  outcome failing closed would give; see Known limitations).
+  Unreachability is the ONLY
+  failure that licenses serving UNVERIFIED routing: if the store
+  answers but its state cannot be used (a promotion moved the pointer
+  and the fresh snapshot will not load, or the persisted state is
+  malformed) chat fails CLOSED with `503 state_store_unavailable`, as
+  it does for a fleet this process never cached. One reachable-store
+  case also carries the header: when the pointer read proves the cached
+  routing is still current and only the refresh of non-routing state
+  failed, chat serves the cache marked stale. The header therefore
+  means "served without a fresh snapshot", not "the store is down".
 
 ## vLLM requirements (supervisor hosts)
 
@@ -289,9 +311,21 @@ intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   pointer.
 - **Chat routing may lag non-routing state changes by up to the
   snapshot cache TTL** (`HARU_SNAPSHOT_CACHE_TTL_MS`, default 2 s).
-  Routing-pointer moves are exempt: every request revalidates against
-  the fleet's route revision, so a promotion switches chat traffic
-  immediately.
+  Routing-pointer moves are exempt while the state store is reachable:
+  every request revalidates against the fleet's route revision, so a
+  promotion switches chat traffic immediately.
+- **While the state store is unreachable, chat routing itself goes
+  stale** (fail-open; responses carry `X-Haru-Routing: stale`). The
+  pointer cannot move during the outage either, so the served route
+  stays correct; the exception is a partition in which another process
+  can still write, where traffic keeps going to the old active until
+  the store is readable again.
+- **A cold start during a state-store outage cannot fail open**: an
+  empty cache has no routing to serve and chat answers `503
+  state_store_unavailable`. Do NOT restart haru-server during an outage
+  - the in-memory snapshot is what keeps traffic alive, and `/healthz`
+  deliberately stays green (it never touches the database) so a
+  liveness probe cannot destroy it.
 
 ## Intentionally out of scope (for now)
 
