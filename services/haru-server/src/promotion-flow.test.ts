@@ -90,6 +90,24 @@ async function reconcileUntilSettled(
   return last;
 }
 
+describe("control-route body limit", () => {
+  it("rejects an oversized promote body with 413 before validating it", async () => {
+    await seed();
+    const app = makeApp();
+    // Well over the 16 KiB control cap; must be refused up front rather
+    // than buffered into memory ahead of schema validation.
+    const huge = JSON.stringify({ targetDomainId: "x".repeat(64 * 1024) });
+    const response = await app.request("/v1/fleets/default/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: huge,
+    });
+    expect(response.status).toBe(413);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("payload_too_large");
+  });
+});
+
 describe("full promotion flow", () => {
   it("promotes the standby through every step and flips routing", async () => {
     await seed();

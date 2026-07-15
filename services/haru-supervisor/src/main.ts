@@ -9,9 +9,35 @@ import { loadSupervisorConfig } from "./config.js";
 
 import type { SpawnFunction } from "./training.js";
 
+// Treat a present-but-blank numeric var (empty or whitespace-only, e.g.
+// an unexpanded `${VAR}`) as unset: z.coerce.number() would turn "" into
+// 0 and fail .min(1), crashing boot instead of using the default.
+function blankableNumber<Schema extends z.ZodType>(schema: Schema) {
+  return z.preprocess(
+    (value) =>
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    schema,
+  );
+}
+
+// Trim and blank-normalise the bearer token: a whitespace-only or
+// trailing-newline value (common from a secret file) must not count as
+// "set" (it would bind the control plane publicly while no presented
+// `\S+` credential could ever match it), and `secret\n` must resolve to
+// the same `secret` the SERVER sends after its own trim.
+const blankableTokenSchema = z
+  .string()
+  .optional()
+  .transform((value) => {
+    const trimmed = value?.trim();
+    return trimmed === undefined || trimmed === "" ? undefined : trimmed;
+  });
+
 const environmentSchema = z.object({
-  PORT: z.coerce.number().int().min(1).max(65_535).default(8701),
-  HARU_SUPERVISOR_TOKEN: z.string().optional(),
+  PORT: blankableNumber(
+    z.coerce.number().int().min(1).max(65_535).default(8701),
+  ),
+  HARU_SUPERVISOR_TOKEN: blankableTokenSchema,
   HARU_SUPERVISOR_CONFIG: z.string().min(1),
 });
 

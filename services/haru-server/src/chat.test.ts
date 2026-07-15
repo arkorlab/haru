@@ -108,6 +108,34 @@ describe("POST /v1/chat/completions", () => {
     expect(chatCalls).toHaveLength(0);
   });
 
+  it("returns a bare 499 when the client aborts during the body upload", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const app = chatApp({ chatCalls });
+    // Model a client that disconnected mid-upload: the request signal is
+    // aborted and reading the body stream rejects. That must surface as a
+    // bare 499 (the client is gone), never a 500 from Hono's default
+    // error handler.
+    const abort = new AbortController();
+    abort.abort();
+    const body = new ReadableStream({
+      pull(controller) {
+        controller.error(new Error("client disconnected"));
+      },
+    });
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body,
+      duplex: "half",
+      signal: abort.signal,
+    } as RequestInit & { duplex: "half" });
+    expect(response.status).toBe(499);
+    expect(chatCalls).toHaveLength(0);
+  });
+
   it("falls back to the configured default fleet", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const app = chatApp({ chatCalls, config: { defaultFleet: "default" } });

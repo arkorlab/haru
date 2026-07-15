@@ -7,7 +7,7 @@ import {
   trainingSlotSpecSchema,
 } from "./fleet.js";
 import { placementSpecSchema } from "./placement.js";
-import { fleetPolicySchema } from "./policy.js";
+import { fleetPolicyPatchSchema } from "./policy.js";
 
 /**
  * Declarative fleet layout, used to seed or reconcile a fleet into the
@@ -49,8 +49,11 @@ export const fleetLayoutSchema = z
     displayName: z.string().min(1).optional(),
     /** Slug of the domain that starts active; must name a domain below. */
     activeDomainSlug: slugSchema.optional(),
-    /** Partial policy; unset fields resolve to defaults on read. */
-    policy: fleetPolicySchema.partial().optional(),
+    /** Partial policy; only the operator-provided keys are stored, and
+     * unset fields resolve to the CURRENT default on read (see
+     * fleetPolicyPatchSchema - a plain `.partial()` would bake every
+     * default into the stored value). */
+    policy: fleetPolicyPatchSchema.optional(),
     domains: z.array(domainLayoutSchema).min(1),
   })
   .refine(

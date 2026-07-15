@@ -25,6 +25,8 @@ export const ERROR_CODES = {
   payloadTooLarge: "payload_too_large",
   /** The supervisor received SIGTERM; no new work is accepted. */
   shuttingDown: "shutting_down",
+  /** Unexpected server-side fault (the API's default onError). */
+  internalError: "internal_error",
   /**
    * The chat proxy could not resolve routing for THIS fleet from the
    * state store, and had no usable cached routing for it either: the

@@ -9,7 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import type { FleetPolicy } from "@haru/protocol";
+import type { FleetPolicyPatch } from "@haru/protocol";
 
 export const fleets = pgTable(
   "fleets",
@@ -27,8 +27,9 @@ export const fleets = pgTable(
     activeDomainId: uuid("active_domain_id"),
     /** Bumped on every active-pointer move; consumers order on it. */
     routeRevision: integer("route_revision").notNull().default(1),
-    /** Partial FleetPolicy; parsed with defaults on read. */
-    policy: jsonb("policy").$type<Partial<FleetPolicy>>().notNull().default({}),
+    /** Operator-provided policy keys only (a partial); the rest resolve
+     * to the CURRENT default on read via resolveFleetPolicy. */
+    policy: jsonb("policy").$type<FleetPolicyPatch>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
