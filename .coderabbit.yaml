@@ -1,8 +1,7 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
-# CodeRabbit configuration, ported from our shared org-standard baseline and
-# tuned for the STRICTEST possible review. (This repo is public, so AGENTS.md
-# forbids naming the private consumer repos this baseline is shared with.)
+# CodeRabbit configuration, ported from a shared org-standard review baseline
+# and tuned for the STRICTEST possible review.
 #
 # Every knob below is deliberately set to its most rigorous value:
 #   - assertive profile + request-changes workflow + an error-level PR-title
@@ -251,11 +250,12 @@ chat:
   # even though the private issue-tracker integrations below are off.
   allow_non_org_members: false
   auto_reply: true
-  # This repo is PUBLIC and its contributor flow runs on GitHub issues (see
-  # CONTRIBUTING.md), not a private tracker. Disable the Jira/Linear lookups so
-  # an org member can't trigger a bot reply that publishes private issue titles
-  # or summaries into a public PR thread. Flip these back on deliberately only
-  # if a tracker is ever wired into the public flow.
+  # This repo's contributor flow runs on GitHub issues (see CONTRIBUTING.md),
+  # not a private tracker, so Jira/Linear lookups add nothing here. Set them to
+  # an explicit "disabled" rather than "auto": that pins the safe posture
+  # independently of how "auto" resolves per visibility, so no bot reply can
+  # surface private-tracker titles/summaries in a PR thread even if the repo's
+  # visibility or integrations change later.
   integrations:
     jira:
       usage: "disabled"
@@ -288,9 +288,9 @@ knowledge_base:
     scope: "auto"
   pull_requests:
     scope: "auto"
-  # Off for the same reason as the chat integrations above: a public repo whose
-  # flow lives on GitHub issues must not pull private-tracker context into
-  # review summaries.
+  # Off for the same reason as the chat integrations above: this repo's flow
+  # lives on GitHub issues, so keep private-tracker context out of review
+  # summaries explicitly rather than leaving it to "auto".
   jira:
     usage: "disabled"
   linear:
