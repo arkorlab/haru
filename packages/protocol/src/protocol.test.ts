@@ -532,6 +532,45 @@ describe("supervisorConfigSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects a non-lowercase model name (must match the layout's routing key)", () => {
+    // The layout side forces lowercase; server-side health/probe checks
+    // match the two by exact equality, so a casing mismatch must be a
+    // config-time error, not runtime health flapping.
+    expect(() =>
+      supervisorConfigSchema.parse({
+        slots: [
+          {
+            kind: "inference",
+            gpuIndex: 0,
+            models: [{ name: "Example-Chat", port: 8001 }],
+          },
+        ],
+      }),
+    ).toThrow(/lowercase/);
+  });
+
+  it("rejects a model name duplicated across inference slots", () => {
+    // Server-side completion checks key reported models by name in a
+    // last-write-wins map; a duplicate would let the wrong slot's
+    // report satisfy another slot's wake/sleep proof.
+    expect(() =>
+      supervisorConfigSchema.parse({
+        slots: [
+          {
+            kind: "inference",
+            gpuIndex: 0,
+            models: [{ name: "example-chat", port: 8001 }],
+          },
+          {
+            kind: "inference",
+            gpuIndex: 1,
+            models: [{ name: "example-chat", port: 9001 }],
+          },
+        ],
+      }),
+    ).toThrow(/unique across inference slots/);
+  });
 });
 
 describe("operationStepSchema", () => {

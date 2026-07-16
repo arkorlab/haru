@@ -141,8 +141,8 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Current: every test creates a database and replays the full
   committed migration set; the PGlite lane got the migrate-once
   optimization but the CI lane did not.
-- Why deferred: the migration set is currently a single squashed file,
-  so the per-test cost is small.
+- Why deferred: the committed migration set is still small (three
+  files), so the per-test cost is modest.
 - Intended fix: migrate one seed database per run, then
   `CREATE DATABASE ... TEMPLATE seed` per test (file-level copy skips
   the replay), dropping the seed in a global teardown.

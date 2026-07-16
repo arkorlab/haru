@@ -835,6 +835,50 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(2);
   });
 
+  it("a delayed pointer read's verdict cannot evict the fleet a newer request learned", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
+    // Warm the cache for the ORIGINAL fleet behind "default".
+    expect((await chat("default")).status).toBe(200);
+
+    // R1's pointer read EXECUTES against the old world but its response
+    // is delayed in transit (captureEarly) - the Neon HTTP shape.
+    const gate = gateSelect(1, { captureEarly: true });
+    const delayed = chat("default");
+    await gate.reached;
+
+    // While R1's response is in flight, the fleet is deleted and a NEW
+    // one takes the slug; a fresh request learns the rebinding.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    const replacement = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
+    replacement.activeDomainSlug = "beta";
+    await applyFleetLayout(database, replacement);
+    expect((await chat("default")).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // R1's stale result arrives. Its own answer is 404 (the fleet its
+    // read resolved is gone - the rebind already evicted it), but its
+    // delayed verdict must NOT rebind the alias back to the dead fleet
+    // and evict (generation-quarantine) the live one's cache.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    // The proof: during an outage, "default" still fail-opens onto the
+    // NEW fleet's cached routing (beta). With the stale verdict applied,
+    // the alias would point at the dead fleet and fail-open would have
+    // nothing to serve (503).
+    breakIt();
+    const stale = await chat("default");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
   it("forgets a fleet whose UUID-SHAPED SLUG the store reports gone", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });

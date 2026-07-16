@@ -3,6 +3,13 @@ import type { HaruDatabase } from "@haru/db";
 interface SelectGate {
   /** 1-based absolute select-access index this gate arms at. */
   at: number;
+  /** Execute the query IMMEDIATELY when reached and hold the settled
+   * result until the decision - models the Neon HTTP driver's
+   * "executed early, response delayed in transit" shape, where the
+   * eventually-delivered result is STALE relative to writes that landed
+   * while it was in flight. Plain gating instead suspends execution, so
+   * a proceed() would observe fresh data. */
+  captureEarly: boolean;
   reachedGate: () => void;
   decision: Promise<"proceed" | "fail">;
 }
@@ -47,7 +54,10 @@ export function breakableDatabase(real: HaruDatabase): {
    * the gate; `proceed` runs the real query then; `fail` rejects it
    * instead.
    */
-  gateSelect: (access: number) => {
+  gateSelect: (
+    access: number,
+    options?: { captureEarly?: boolean },
+  ) => {
     reached: Promise<void>;
     proceed: () => void;
     fail: () => void;
@@ -93,11 +103,12 @@ export function breakableDatabase(real: HaruDatabase): {
     breakAfterSelects: (allowedSelects: number) => {
       selectsLeft = allowedSelects;
     },
-    gateSelect: (access: number) => {
+    gateSelect: (access: number, options?: { captureEarly?: boolean }) => {
       const reached = Promise.withResolvers<undefined>();
       const decision = Promise.withResolvers<"proceed" | "fail">();
       pendingGate = {
         at: selectAccesses + access,
+        captureEarly: options?.captureEarly ?? false,
         reachedGate: () => {
           reached.resolve(undefined);
         },
@@ -131,22 +142,38 @@ function gatedBuilder(builder: object, gate: SelectGate): object {
   return new Proxy(builder, {
     get(target, property) {
       if (property === "then") {
-        gate.reachedGate();
         const realThen = Reflect.get(target, property) as (
           resolve: (value: unknown) => void,
           reject: (error: unknown) => void,
         ) => unknown;
+        // captureEarly: run the query NOW so its result is pinned to the
+        // database state at gate time; deliver it on proceed(). Models a
+        // response delayed in transit (the delivered data is stale
+        // relative to writes that landed while it was held).
+        const captured = gate.captureEarly
+          ? new Promise((resolve, reject) => {
+              realThen.call(target, resolve, reject);
+            })
+          : undefined;
+        gate.reachedGate();
         return (
           resolve: (value: unknown) => void,
           reject: (error: unknown) => void,
         ) => {
-          void gate.decision.then((choice) => {
+          void (async () => {
+            const choice = await gate.decision;
             if (choice === "fail") {
               reject(new Error("state store hiccup (test)"));
+            } else if (captured) {
+              try {
+                resolve(await captured);
+              } catch (error) {
+                reject(error);
+              }
             } else {
               realThen.call(target, resolve, reject);
             }
-          });
+          })();
         };
       }
       const value = Reflect.get(target, property) as unknown;

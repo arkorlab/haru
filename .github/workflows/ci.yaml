@@ -33,6 +33,10 @@ jobs:
       # the gate also greps its output for failures.
       - name: Migration drift gate
         run: |
+          # The default runner shell is `bash -e` WITHOUT pipefail, so a
+          # db:generate crash whose output matches neither grep pattern
+          # would otherwise exit through tee's 0 and pass the gate green.
+          set -o pipefail
           pnpm db:generate 2>&1 | tee /tmp/db-generate.log
           if grep -qE "MODULE_NOT_FOUND|^Error" /tmp/db-generate.log; then
             echo "drizzle-kit generate reported an error (it exits 0 on failures)"

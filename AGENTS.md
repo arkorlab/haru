@@ -228,8 +228,8 @@ Everything runs without GPUs, cloud accounts, or a live database:
 ## Tooling gotchas
 
 - **Two TypeScripts on purpose**: packages compile with TypeScript 7 (default
-  catalog; currently pinned `7.0.1-rc` - see the dated comment in
-  [pnpm-workspace.yaml](pnpm-workspace.yaml) about bumping to `^7.0.2`); the
+  catalog; currently `^7.0.2` in
+  [pnpm-workspace.yaml](pnpm-workspace.yaml)); the
   workspace root installs TypeScript 6.0.3 (`catalog:tseslint`) solely for
   typescript-eslint, whose peer range is still `<6.1.0`. Drop the extra copy
   when typescript-eslint supports TS 7.

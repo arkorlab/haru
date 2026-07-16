@@ -55,6 +55,21 @@ describe("readGpuMemory", () => {
     await expect(readGpuMemory(exec)).rejects.toThrow("signal SIGTERM");
   });
 
+  it("bounds the error message even when nvidia-smi floods stderr", async () => {
+    const exec: ExecFunction = () =>
+      Promise.resolve({ code: 9, stdout: "", stderr: "x".repeat(100_000) });
+    // The message rides into the /v1/gpu/memory 502 body: capped, never
+    // the full exec stderr buffer.
+    let error: unknown;
+    try {
+      await readGpuMemory(exec);
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message.length).toBeLessThan(700);
+  });
+
   it("surfaces the exec message from a spawn failure", async () => {
     const exec: ExecFunction = () =>
       Promise.resolve({

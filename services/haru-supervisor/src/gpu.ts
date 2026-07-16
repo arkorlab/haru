@@ -23,7 +23,11 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
   if (result.code !== 0) {
     // Shared formatter surfaces a missing binary / timeout kill (signal +
     // exec message) instead of an opaque "exited 1 with empty stderr".
-    throw new Error(`nvidia-smi ${describeExecFailure(result)}`);
+    // Capped: this message rides verbatim into the /v1/gpu/memory 502
+    // body, which must not embed up to the 16 MiB exec stderr buffer.
+    throw new Error(
+      `nvidia-smi ${describeExecFailure(result, { maxStderrChars: 500 })}`,
+    );
   }
   const gpus = result.stdout
     .split("\n")

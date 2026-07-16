@@ -12,7 +12,18 @@ import { slotKindSchema } from "./enums.js";
 // Strict: HARU_SUPERVISOR_CONFIG is operator-authored, so a misspelled
 // key must fail at load time rather than be silently dropped.
 export const supervisorInferenceModelConfigSchema = z.strictObject({
-  name: z.string().min(1),
+  // Lowercase-only, mirroring the layout's modelBindingSchema: every
+  // server-side health/wake/sleep/probe check matches the layout's
+  // lowercase binding name against this reported name by EXACT string
+  // equality, so a casing mismatch would not fail here at config time
+  // but as runtime health flapping (the active's slots CASed to failed
+  // on every heartbeat) and spurious failover.
+  name: z
+    .string()
+    .min(1)
+    .refine((value) => value === value.toLowerCase(), {
+      message: "model names must be lowercase (matched against the layout)",
+    }),
   /** Local port of the vLLM server for this model on 127.0.0.1. */
   port: z.number().int().min(1).max(65_535),
 });
@@ -55,6 +66,24 @@ export const supervisorConfigSchema = z
     },
     {
       message: "each (gpuIndex, kind) pair must be unique",
+      path: ["slots"],
+    },
+  )
+  // Server-side wake/sleep completion checks key the supervisor's
+  // reported models by NAME in a last-write-wins map, so a name listed
+  // on two slots would let the wrong slot's report satisfy (or fail)
+  // another slot's check - e.g. a demote's sleep proof passing while
+  // the layout-bound server still holds VRAM. The layout schema rejects
+  // the same duplication for the same reason.
+  .refine(
+    (config) => {
+      const names = config.slots.flatMap((slot) =>
+        slot.kind === "inference" ? slot.models.map((m) => m.name) : [],
+      );
+      return new Set(names).size === names.length;
+    },
+    {
+      message: "model names must be unique across inference slots",
       path: ["slots"],
     },
   );

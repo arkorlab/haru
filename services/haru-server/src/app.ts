@@ -166,6 +166,17 @@ export function createApp(dependencies: AppDependencies) {
   // a lost fail-open. Grows with distinct forgotten fleet ids, the
   // same order as the cache itself (see KNOWN_ISSUES: no size cap).
   const forgottenGenerations = new Map<string, number>();
+  // The same later-knowledge-wins rule for the ALIAS map: bumped per
+  // REFERENCE whenever a pointer-read verdict is applied for that
+  // spelling (an alias learned/rebound, or the spelling reported gone).
+  // A pointer read that started before a newer request applied its
+  // verdict for the same reference must not apply its own - a delayed
+  // stale read for a reused slug would otherwise evict (and
+  // generation-quarantine) the LIVE fleet's cache the newer request
+  // just published, losing fail-open for it. The response is still
+  // built from the stale read's own data; only the map keeps the later
+  // knowledge. Same lifetime/growth class as the maps above.
+  const referenceVerdictGenerations = new Map<string, number>();
 
   const reconcilerDependencies = {
     database,
@@ -216,6 +227,14 @@ export function createApp(dependencies: AppDependencies) {
     // string. Mixing them up lets a verdict about one spelling evict or
     // serve a fleet the store was never asked about.
     const canonical = canonicalReference(rawReference);
+    // Captured BEFORE the pointer read: a verdict this read yields is
+    // applied to the alias map only if no newer request applied its own
+    // verdict for the same spelling while ours was in flight.
+    const referenceGenerationBeforeRead =
+      referenceVerdictGenerations.get(rawReference) ?? 0;
+    const isReferenceVerdictStale = () =>
+      (referenceVerdictGenerations.get(rawReference) ?? 0) !==
+      referenceGenerationBeforeRead;
     let pointer;
     try {
       pointer = await getFleetRoutePointer(database, rawReference);
@@ -229,8 +248,12 @@ export function createApp(dependencies: AppDependencies) {
       // The fleet genuinely does not exist. NOT the same signal as a
       // throw: never treat this as an outage. Forget everything this RAW
       // spelling can name, or a later outage would resurrect a deleted
-      // fleet's routing through an alias this request did not use.
-      forgetFleetByReference(rawReference);
+      // fleet's routing through an alias this request did not use -
+      // UNLESS a newer request already applied fresher knowledge for
+      // this spelling (our delayed verdict must not evict it).
+      if (!isReferenceVerdictStale()) {
+        forgetFleetByReference(rawReference);
+      }
       return { ok: false, reason: "not_found" };
     }
     if (isFleetIdShaped(rawReference) && pointer.id !== canonical) {
@@ -242,10 +265,13 @@ export function createApp(dependencies: AppDependencies) {
       // serve it during the next outage instead of the slug owner.
       forgetFleet(canonical);
     }
-    if (pointer.id !== canonical) {
+    if (pointer.id !== canonical && !isReferenceVerdictStale()) {
       // Learn the alias only when the reference is not the fleet id
       // itself: cachedFor's id-first probe already reaches the entry
       // from either uuid spelling, so a self-alias would be dead weight.
+      // Skipped when a newer request already applied its verdict for
+      // this spelling: a delayed read for a rebound slug would rebind
+      // the alias to a stale fleet and evict the live one's cache.
       rememberFleetReference(rawReference, pointer.id);
     }
 
@@ -401,7 +427,17 @@ export function createApp(dependencies: AppDependencies) {
       : undefined;
   }
 
+  /** Record that a verdict was applied for this reference spelling, so
+   * an in-flight pointer read that predates it will not apply its own. */
+  function bumpReferenceVerdict(reference: string): void {
+    referenceVerdictGenerations.set(
+      reference,
+      (referenceVerdictGenerations.get(reference) ?? 0) + 1,
+    );
+  }
+
   function rememberFleetReference(reference: string, fleetId: string): void {
+    bumpReferenceVerdict(reference);
     const previous = fleetIdByReference.get(reference);
     if (previous !== undefined && previous !== fleetId) {
       // The reference now names a DIFFERENT fleet (the old one was
@@ -443,6 +479,7 @@ export function createApp(dependencies: AppDependencies) {
    * canonicalized one, or a 404 for `0F5C...` would evict the live
    * fleet whose slug is the lowercase form. */
   function forgetFleetByReference(reference: string): void {
+    bumpReferenceVerdict(reference);
     const fleetId = fleetIdByReference.get(reference);
     fleetIdByReference.delete(reference);
     if (fleetId !== undefined) {
