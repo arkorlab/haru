@@ -73,4 +73,17 @@ describe("trainerEnvironment", () => {
     trainerEnvironment(base);
     expect(base.HARU_SUPERVISOR_TOKEN).toBe("s3cret");
   });
+
+  it("strips the secrets case-insensitively (Windows env casing)", () => {
+    // Windows env vars are case-insensitive and process.env preserves
+    // the casing they were set with; an exact-case filter would leak.
+    const child = trainerEnvironment({
+      haru_supervisor_token: "s3cret",
+      Haru_Supervisor_Config: "/etc/haru/supervisor.json",
+      Path: String.raw`C:\Windows`,
+    });
+    expect(child.haru_supervisor_token).toBeUndefined();
+    expect(child.Haru_Supervisor_Config).toBeUndefined();
+    expect(child.Path).toBe(String.raw`C:\Windows`);
+  });
 });

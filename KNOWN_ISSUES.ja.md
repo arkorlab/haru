@@ -15,8 +15,8 @@
 ### chat スナップショットキャッシュにサイズ上限がない
 
 - 場所: `services/haru-server/src/app.ts` (`snapshotCache`。加えて
-  同じ寿命を共有する `fleetIdByReference` / `forgottenGenerations`
-  マップ)。
+  同じ寿命を共有する `fleetIdByReference` / `forgottenGenerations` /
+  `referenceVerdictGenerations` マップ)。
 - 現状: store が「フリートは存在しない」と答えたときの削除と、
   使用不能と判明したエントリの隔離 (`forgetFleet`) は実装済み。
   ただし単に参照されなくなっただけのフリートは、最終 FleetSnapshot
@@ -107,6 +107,29 @@
   外で長い supervisor 呼び出しを走らせることになる。
 - 意図する修正: 操作失敗後に対象への demote をキューする (既存の
   demote ステップを再利用)。それまでは運用手順書に記載。
+
+### promotion 進行中に seed したスロットは wake 経路から漏れうる
+
+- 場所: `packages/db/src/repo/layout.ts` (`applyFleetLayout`) と
+  `services/haru-server/src/reconciler/steps.ts` の promotion ステップ。
+- 現状: 新しい inference スロットの初期姿勢は INSERT 文内でライブの
+  ルーティングポインタに対して評価される (挿入自体はポインタと
+  レースしない)。しかしそのドメインの promote が進行中で既に
+  `wake_vllm` を過ぎた時点で挿入されたスロットは、(その瞬間は
+  standby なので) 正しく `sleeping` で播種され、promotion は
+  `switch_active` 前にターゲットのスロットを再走査しないため、
+  ドメインは sleeping スロットを 1 つ抱えたまま active になる。
+  何も自己修復しない (ハートビートミラーは定常ペアしか触らない)。
+  ドメインの demote/promote 一巡で回復する。
+- 先送りの理由: 修正は操作レベルの設計判断 (`switch_active` の
+  ナッジでターゲットのスロット集合を再検証してルーティング CAS に
+  追加ガードを載せるか、レイアウト適用を one-in-flight 操作スロットと
+  直列化するか) であり、promotion 中のライブフリートへの seed は
+  異例のオペレータ操作。
+- 意図する修正: `switch_active` エグゼキュータが tick スナップショット
+  からターゲットの inference スロットを再導出し、`serving` でない
+  ものがある間はコミットを拒否する (通常の pending 経路で収束)。
+  もしくは runbook に seed と操作の相互排他を明記する。
 
 ### フリートレイアウトの再適用は削除されたドメイン/スロットを消さない
 

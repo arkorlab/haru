@@ -256,7 +256,16 @@ export function createApp(dependencies: AppDependencies) {
       }
       return { ok: false, reason: "not_found" };
     }
-    if (isFleetIdShaped(rawReference) && pointer.id !== canonical) {
+    // ONE freshness decision guards every reference-side effect of this
+    // read (the id quarantine, the alias write, and the freshness bump
+    // itself): a delayed stale result must not apply ANY of its verdict
+    // over knowledge a newer request already recorded.
+    const shouldApplyReferenceVerdict = !isReferenceVerdictStale();
+    if (
+      shouldApplyReferenceVerdict &&
+      isFleetIdShaped(rawReference) &&
+      pointer.id !== canonical
+    ) {
       // A UUID-shaped reference that did NOT resolve by id proves no
       // fleet holds that id any more (the lookup is id-first), so it
       // fell through to a fleet that merely uses the string as its slug.
@@ -265,14 +274,20 @@ export function createApp(dependencies: AppDependencies) {
       // serve it during the next outage instead of the slug owner.
       forgetFleet(canonical);
     }
-    if (pointer.id !== canonical && !isReferenceVerdictStale()) {
-      // Learn the alias only when the reference is not the fleet id
-      // itself: cachedFor's id-first probe already reaches the entry
-      // from either uuid spelling, so a self-alias would be dead weight.
-      // Skipped when a newer request already applied its verdict for
-      // this spelling: a delayed read for a rebound slug would rebind
-      // the alias to a stale fleet and evict the live one's cache.
-      rememberFleetReference(rawReference, pointer.id);
+    if (shouldApplyReferenceVerdict) {
+      if (pointer.id !== canonical) {
+        // Learn the alias only when the reference is not the fleet id
+        // itself: cachedFor's id-first probe already reaches the entry
+        // from either uuid spelling, so a self-alias would be dead weight.
+        // (rememberFleetReference records the verdict generation.)
+        rememberFleetReference(rawReference, pointer.id);
+      } else {
+        // A DIRECT-id success is also fresh knowledge about this
+        // spelling: record it, or an older delayed not_found /
+        // slug-fallback verdict for the same id would still read as
+        // current and evict the entry this resolution stands behind.
+        bumpReferenceVerdict(rawReference);
+      }
     }
 
     const nowMs = now().getTime();
@@ -479,14 +494,23 @@ export function createApp(dependencies: AppDependencies) {
    * canonicalized one, or a 404 for `0F5C...` would evict the live
    * fleet whose slug is the lowercase form. */
   function forgetFleetByReference(reference: string): void {
-    bumpReferenceVerdict(reference);
     const fleetId = fleetIdByReference.get(reference);
     fleetIdByReference.delete(reference);
     if (fleetId !== undefined) {
       forgetFleet(fleetId);
     }
+    // Whether this spelling actually named cached knowledge. The verdict
+    // generation is recorded ONLY then: bumping for every unknown
+    // reference would let arbitrary distinct X-Haru-Fleet values grow
+    // the generation map without bound, and a not_found that forgot
+    // nothing needs no guard - a stale success arriving after it
+    // self-heals through its own snapshot load (the fleet is gone, so
+    // the load forgets what the stale alias pointed at).
+    let hasKnowledge = fleetId !== undefined;
     if (isFleetIdShaped(reference)) {
-      forgetFleet(reference.toLowerCase());
+      const canonical = reference.toLowerCase();
+      hasKnowledge ||= snapshotCache.has(canonical);
+      forgetFleet(canonical);
       // Only a UUID-SHAPED slug can be missing from the alias map (it is
       // never indexed); for any other spelling the alias above was the
       // only way in, so the scan would be dead work on every unknown-
@@ -497,6 +521,10 @@ export function createApp(dependencies: AppDependencies) {
       for (const id of slugOwners) {
         forgetFleet(id);
       }
+      hasKnowledge ||= slugOwners.length > 0;
+    }
+    if (hasKnowledge) {
+      bumpReferenceVerdict(reference);
     }
   }
 

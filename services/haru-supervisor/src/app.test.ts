@@ -106,8 +106,10 @@ describe("auth", () => {
       ).status,
     ).toBe(200);
   });
+});
 
-  it("healthz never touches the GPU/exec or upstream (green during host trouble)", async () => {
+describe("healthz", () => {
+  it("never touches the GPU/exec or upstream (green during host trouble)", async () => {
     // A liveness probe that ran nvidia-smi or hit vLLM would go red on a
     // sick GPU/driver and get the supervisor restarted mid-trouble.
     const { app } = createSupervisorApp({

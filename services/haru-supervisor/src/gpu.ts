@@ -38,9 +38,13 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
       if (fields.length !== 3) {
         // The query pins three columns (index, used, total); a different
         // count means the CSV shape drifted (driver change / injected
-        // header), which the NaN guard below could otherwise mask.
+        // header), which the NaN guard below could otherwise mask. The
+        // preview is capped like the exec failure above: this message
+        // also rides into the /v1/gpu/memory 502 body, and a single
+        // oversized malformed line must not smuggle megabytes past it.
+        const preview = line.length > 500 ? `${line.slice(0, 500)}...` : line;
         throw new TypeError(
-          `nvidia-smi returned ${String(fields.length)} columns, expected 3 (index, used, total): "${line}"`,
+          `nvidia-smi returned ${String(fields.length)} columns, expected 3 (index, used, total): "${preview}"`,
         );
       }
       const [index, usedMiB, totalMiB] = fields;

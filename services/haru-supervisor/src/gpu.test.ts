@@ -32,6 +32,21 @@ describe("readGpuMemory", () => {
     await expect(readGpuMemory(exec)).rejects.toThrow();
   });
 
+  it("bounds the column-guard message for an oversized malformed line", async () => {
+    const exec: ExecFunction = () =>
+      // A successful run (code 0) whose single line is huge and
+      // malformed: the preview cap must hold, like the failure path.
+      Promise.resolve({ code: 0, stdout: "x".repeat(100_000), stderr: "" });
+    let error: unknown;
+    try {
+      await readGpuMemory(exec);
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as Error).message.length).toBeLessThan(700);
+  });
+
   it("rejects a drifted column count instead of masking it", async () => {
     const exec: ExecFunction = () =>
       // Four columns (driver drift / injected header): the count guard

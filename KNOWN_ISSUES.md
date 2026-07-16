@@ -16,8 +16,8 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 ### Chat snapshot cache has no size cap
 
 - Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
-  `fleetIdByReference` and `forgottenGenerations` maps that share its
-  lifetime).
+  `fleetIdByReference`, `forgottenGenerations` and
+  `referenceVerdictGenerations` maps that share its lifetime).
 - Current: entries are dropped when the store reports the fleet gone,
   and quarantined when they are learned to be unusable (`forgetFleet`),
   but a fleet that simply stops being queried pins its last
@@ -114,6 +114,29 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Intended fix: enqueue a demote of the failed target after the
   operation fails (reusing the existing demote steps), or an operator
   runbook note until then.
+
+### Slots seeded during an in-flight promotion can miss the wake path
+
+- Where: `packages/db/src/repo/layout.ts` (`applyFleetLayout`) vs the
+  promotion steps in `services/haru-server/src/reconciler/steps.ts`.
+- Current: a new inference slot's initial posture is evaluated inside
+  its insert statement against the LIVE routing pointer (so the insert
+  itself cannot race the pointer). But a slot inserted while a promote
+  of its domain is in flight and already PAST `wake_vllm` is correctly
+  seeded `sleeping` (the domain is still standby at that instant), and
+  the promotion never re-scans the target's slots before
+  `switch_active`, so the domain goes active with one sleeping slot
+  that nothing self-heals (the heartbeat mirror only flips steady-state
+  pairs). A demote/promote cycle of the domain recovers it.
+- Why deferred: the fix is an operation-level design decision -
+  re-verify the target's slot set at the `switch_active` nudge (extra
+  guard semantics on the routing CAS) or serialize layout application
+  with the one-in-flight operation slot - and seeding a live fleet
+  mid-promotion is an unusual operator action.
+- Intended fix: have the `switch_active` executor re-derive the
+  target's inference slots from the tick snapshot and refuse to commit
+  while any is not `serving` (converging via the normal pending path),
+  or document seed-vs-operation mutual exclusion in the runbook.
 
 ### Re-applying a fleet layout never removes dropped domains or slots
 

@@ -879,6 +879,44 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
   });
 
+  it("a delayed not_found cannot evict a fleet a newer DIRECT-ID request resolved", async () => {
+    const { chat, breakIt, gateSelect } = failOpenApp({});
+    // Learn a fleet id, then delete the fleet: the id names nothing.
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // R1's pointer read for the id executes NOW (not_found) but its
+    // response is delayed in transit.
+    const gate = gateSelect(2, { captureEarly: true });
+    const delayed = chat(goneId);
+    await gate.reached;
+
+    // A fleet with the SAME id comes back (restore/re-insert) while
+    // R1's response is in flight; a fresh DIRECT-ID request resolves and
+    // caches it (domainless, so it answers no_active_domain).
+    await database
+      .insert(schema.fleets)
+      .values({ id: goneId, slug: "revived" });
+    const fresh = await chat(goneId);
+    expect(fresh.status).toBe(503);
+    expect((await fresh.json()).error.code).toBe("no_active_domain");
+
+    // R1's stale not_found arrives: its own answer is 404, but it must
+    // not evict (and generation-quarantine) the revived fleet's cache.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    // The proof: during an outage the id still fail-opens onto the
+    // revived fleet's cached snapshot (no_active_domain), instead of
+    // having nothing to serve (state_store_unavailable).
+    breakIt();
+    const stale = await chat(goneId);
+    expect(stale.status).toBe(503);
+    expect((await stale.json()).error.code).toBe("no_active_domain");
+  });
+
   it("forgets a fleet whose UUID-SHAPED SLUG the store reports gone", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });

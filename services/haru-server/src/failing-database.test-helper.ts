@@ -155,7 +155,22 @@ function gatedBuilder(builder: object, gate: SelectGate): object {
               realThen.call(target, resolve, reject);
             })
           : undefined;
-        gate.reachedGate();
+        if (captured) {
+          // Signal `reached` only once the captured result SETTLED, so
+          // the test's post-gate writes provably cannot be observed by
+          // it. Awaiting here also guarantees a captured rejection is
+          // always observed, even when the test then chooses fail().
+          void (async () => {
+            try {
+              await captured;
+            } catch {
+              // Delivered (or discarded) via the decision branch below.
+            }
+            gate.reachedGate();
+          })();
+        } else {
+          gate.reachedGate();
+        }
         return (
           resolve: (value: unknown) => void,
           reject: (error: unknown) => void,

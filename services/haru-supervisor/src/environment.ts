@@ -42,11 +42,14 @@ const SUPERVISOR_PRIVATE_ENVIRONMENT_KEYS: ReadonlySet<string> = new Set([
 
 /** A copy of `base` safe to hand a trainer child: the full inherited
  * environment (PATH, CUDA_*, HOME, ...) minus the supervisor's own
- * secrets. */
+ * secrets. The comparison is case-insensitive: environment variables
+ * are case-insensitive on Windows (process.env preserves the casing
+ * they were SET with), so an exact-case filter would leak a
+ * lowercase-set token there. */
 export function trainerEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
     Object.entries(base).filter(
-      ([key]) => !SUPERVISOR_PRIVATE_ENVIRONMENT_KEYS.has(key),
+      ([key]) => !SUPERVISOR_PRIVATE_ENVIRONMENT_KEYS.has(key.toUpperCase()),
     ),
   );
 }
