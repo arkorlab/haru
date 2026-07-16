@@ -47,9 +47,23 @@ describe("readGpuMemory", () => {
         stdout: "",
         stderr: "",
         signal: "SIGTERM",
-        errorMessage: "Command failed: timed out",
+        // defaultExec deliberately leaves errorMessage null for a
+        // signal kill (Node's kill message embeds the full stderr);
+        // the mock mirrors the real timeout-kill shape.
+        errorMessage: null,
       });
     await expect(readGpuMemory(exec)).rejects.toThrow("signal SIGTERM");
-    await expect(readGpuMemory(exec)).rejects.toThrow("timed out");
+  });
+
+  it("surfaces the exec message from a spawn failure", async () => {
+    const exec: ExecFunction = () =>
+      Promise.resolve({
+        code: 1,
+        stdout: "",
+        stderr: "",
+        signal: null,
+        errorMessage: "spawn nvidia-smi ENOENT",
+      });
+    await expect(readGpuMemory(exec)).rejects.toThrow("ENOENT");
   });
 });

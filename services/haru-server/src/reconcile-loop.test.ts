@@ -127,6 +127,41 @@ describe("startReconcileLoop", () => {
     stop();
   });
 
+  it("isolates a throwing onError sink (no unhandled rejection, loop keeps going)", async () => {
+    const calls: string[] = [];
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      const stop = startReconcileLoop(dependencies, {
+        fleetReferences: ["bad"],
+        intervalMs: 1000,
+        reconcile: (_dependencies, reference) => {
+          calls.push(reference);
+          return Promise.reject(new Error("boom"));
+        },
+        // An injected observability hook that itself throws must not
+        // become an unhandled rejection out of the detached tick.
+        onError: () => {
+          throw new Error("sink exploded");
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(calls).toEqual(["bad"]);
+      // Both the original failure and the sink failure are logged.
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+
+      // The guard was still released: the next tick reconciles again.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(calls).toEqual(["bad", "bad"]);
+
+      stop();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("reconciles a duplicated fleet reference only once per tick", async () => {
     const calls: string[] = [];
     const stop = startReconcileLoop(dependencies, {

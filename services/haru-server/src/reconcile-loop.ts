@@ -78,7 +78,16 @@ export function startReconcileLoop(
         try {
           await reconcile(dependencies, reference);
         } catch (error) {
-          onError(reference, error);
+          // The IIFE is detached (void), so an exception escaping this
+          // block would be an unhandled rejection - isolate a throwing
+          // injected error sink instead of letting an observability hook
+          // destabilize the loop or the process.
+          try {
+            onError(reference, error);
+          } catch (sinkError) {
+            console.error(`reconcile ${reference} failed:`, error);
+            console.error("reconcile onError sink threw:", sinkError);
+          }
         } finally {
           inFlight.delete(reference);
         }

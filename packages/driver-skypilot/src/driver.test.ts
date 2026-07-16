@@ -117,17 +117,18 @@ describe("createSkypilotDriver", () => {
     await expect(driver.launchDomain(SPEC)).rejects.toThrow("quota exceeded");
   });
 
-  it("surfaces the signal and exec message from a timeout kill", async () => {
+  it("surfaces the signal from a timeout kill", async () => {
     // A `timeoutMs` kill resolves as a synthesized exit 1 with empty
-    // stderr; the signal/errorMessage must reach the SkyCliError message
-    // so it is not an opaque "exited 1".
+    // stderr and a null errorMessage (defaultExec drops Node's kill
+    // message, which embeds the full stderr); the signal must reach the
+    // SkyCliError message so it is not an opaque "exited 1".
     const { exec } = recordingExec({
       launch: {
         code: 1,
         stdout: "",
         stderr: "",
         signal: "SIGTERM",
-        errorMessage: "Command failed: timed out",
+        errorMessage: null,
       },
     });
     const driver = createSkypilotDriver({
@@ -135,7 +136,23 @@ describe("createSkypilotDriver", () => {
       writeTaskFile: () => Promise.resolve("/tmp/task.yaml"),
     });
     await expect(driver.launchDomain(SPEC)).rejects.toThrow("signal SIGTERM");
-    await expect(driver.launchDomain(SPEC)).rejects.toThrow("timed out");
+  });
+
+  it("surfaces the exec message from a spawn failure", async () => {
+    const { exec } = recordingExec({
+      launch: {
+        code: 1,
+        stdout: "",
+        stderr: "",
+        signal: null,
+        errorMessage: "spawn sky ENOENT",
+      },
+    });
+    const driver = createSkypilotDriver({
+      exec,
+      writeTaskFile: () => Promise.resolve("/tmp/task.yaml"),
+    });
+    await expect(driver.launchDomain(SPEC)).rejects.toThrow("ENOENT");
   });
 
   it("parses sky status json and finds the cluster", async () => {

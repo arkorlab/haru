@@ -13,11 +13,14 @@ export interface ExecResult {
    */
   signal?: NodeJS.Signals | null;
   /**
-   * The execFile error message for a NON-exit failure - a missing
-   * binary (ENOENT), a timeout kill, or a maxBuffer overflow - where
-   * `code` is a synthesized 1 that says nothing about WHY. null on a
-   * clean run or a real numeric exit code. Optional for the same
-   * back-compat reason as `signal`.
+   * The execFile error message for a STRING-coded failure - a missing
+   * binary (ENOENT/EACCES) or a maxBuffer overflow - where `code` is a
+   * synthesized 1 that says nothing about WHY. Deliberately null for a
+   * timeout/signal kill: Node embeds the entire captured stderr in that
+   * message, so `signal` (plus the separately-captured `stderr`)
+   * conveys the kill instead. Also null on a clean run or a real
+   * numeric exit code. Optional for the same back-compat reason as
+   * `signal`.
    */
   errorMessage?: string | null;
 }
