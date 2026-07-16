@@ -41,8 +41,10 @@ jobs:
           # --porcelain catches BOTH modified and untracked files (a
           # brand-new migration), with no index side effects, unlike a
           # plain `git diff` (tracked only) or `git add -N` (leaves
-          # intent-to-add markers). Empty output = no drift.
-          drift="$(git status --porcelain packages/db/drizzle)"
+          # intent-to-add markers). --untracked-files=normal is explicit
+          # so a runner-level status.showUntrackedFiles=no cannot silently
+          # neuter the untracked-file detection. Empty output = no drift.
+          drift="$(git status --porcelain --untracked-files=normal packages/db/drizzle)"
           if [ -n "$drift" ]; then
             echo "drizzle migrations are out of date; run pnpm db:generate:"
             echo "$drift"
