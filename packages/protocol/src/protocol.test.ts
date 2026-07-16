@@ -691,7 +691,7 @@ describe("describeExecFailure", () => {
     expect(
       describeExecFailure(
         { code: 2, signal: null, errorMessage: null, stderr: "  abcdef  " },
-        { maxStderrBytes: 3 },
+        { maxStderrChars: 3 },
       ),
     ).toBe("exited 2: abc");
   });
@@ -700,7 +700,7 @@ describe("describeExecFailure", () => {
     const long = "x".repeat(5000);
     const message = describeExecFailure(
       { code: 1, signal: "SIGTERM", errorMessage: long, stderr: long },
-      { maxStderrBytes: 500 },
+      { maxStderrChars: 500 },
     );
     // Both the parenthetical errorMessage and the stderr tail are bounded,
     // not just result.stderr.

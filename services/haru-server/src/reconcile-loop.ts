@@ -29,12 +29,18 @@ export interface ReconcileLoopOptions {
  *     shared mutex, so one stuck fleet cannot throttle every fleet's
  *     reconcile and blow a healthy fleet's degradedGraceMs failover
  *     budget; the fleets run concurrently and independently.
- *   - a fleet never overlaps ITSELF, so it never double-issues the
- *     supervisor calls a tick makes (the DB CAS dedupes state
- *     transitions, but not the supervisor calls themselves). Releasing
- *     the guard on a watchdog timer instead would let the next interval
- *     start a second concurrent reconcile for the SAME fleet while the
- *     timed-out one is still running.
+ *   - a fleet does not overlap ITSELF for a given reference string, so
+ *     the common case does not redundantly re-issue the supervisor calls
+ *     a tick makes. This is a best-effort throttle, NOT a hard
+ *     invariant: reconcileFleet is explicitly safe to run concurrently
+ *     (every write is a guarded CAS, no transaction spans a supervisor
+ *     call), so one fleet CAN still be reconciled concurrently - by the
+ *     manual POST /reconcile endpoint, another replica, or the same
+ *     fleet listed under both its slug AND its id (the Set/guard key on
+ *     the raw reference, not the resolved id) - yielding only duplicate
+ *     idempotent supervisor calls, never corrupt state. Releasing the
+ *     guard on a watchdog timer would ADD such overlap on every hang,
+ *     which is why the guard is held until the work settles instead.
  *
  * reconcileFleet's opening store read has no AbortSignal, so a store
  * "hang mode" outage pauses only the stuck fleet until the DB driver's
@@ -46,7 +52,10 @@ export function startReconcileLoop(
   dependencies: ReconcilerDependencies,
   options: ReconcileLoopOptions,
 ): () => void {
-  // De-dup so a fleet listed twice is not reconciled twice per tick.
+  // De-dup identical reference strings so a fleet listed twice is not
+  // reconciled twice per tick. Two DIFFERENT reference forms of one fleet
+  // (slug + id) are NOT collapsed - that is the harmless CAS-safe
+  // redundant-work case documented above, not a correctness concern.
   const fleetReferences = [...new Set(options.fleetReferences)];
   const reconcile = options.reconcile ?? reconcileFleet;
   const onError =

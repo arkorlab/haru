@@ -52,9 +52,12 @@ export type ExecFunction = (
  */
 export function describeExecFailure(
   result: Pick<ExecResult, "code" | "signal" | "errorMessage" | "stderr">,
-  options?: { maxStderrBytes?: number },
+  // maxStderrChars, not bytes: `.slice` counts UTF-16 code units (as the
+  // prior stderr.slice(0, 500) did), which is fine for a length bound on
+  // an error string.
+  options?: { maxStderrChars?: number },
 ): string {
-  const max = options?.maxStderrBytes;
+  const max = options?.maxStderrChars;
   // The cap covers errorMessage too, not just stderr: a downstream caller
   // that bounds its message (SkyCliError) must stay bounded even if some
   // errorMessage embeds output (defaultExec already avoids the signal-kill

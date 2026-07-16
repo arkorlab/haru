@@ -38,10 +38,16 @@ jobs:
             echo "drizzle-kit generate reported an error (it exits 0 on failures)"
             exit 1
           fi
-          # Intent-to-add so a brand-new (untracked) migration file also
-          # trips the diff; plain `git diff` only sees tracked changes.
-          git add -N packages/db/drizzle
-          git diff --exit-code packages/db/drizzle
+          # --porcelain catches BOTH modified and untracked files (a
+          # brand-new migration), with no index side effects, unlike a
+          # plain `git diff` (tracked only) or `git add -N` (leaves
+          # intent-to-add markers). Empty output = no drift.
+          drift="$(git status --porcelain packages/db/drizzle)"
+          if [ -n "$drift" ]; then
+            echo "drizzle migrations are out of date; run pnpm db:generate:"
+            echo "$drift"
+            exit 1
+          fi
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

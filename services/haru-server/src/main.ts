@@ -60,9 +60,8 @@ const server = serve(
 
 // Optional background reconcile loop. POST /v1/fleets/:id/reconcile
 // drives the same tick on demand (e.g. from cron or tests). The loop
-// wiring (per-fleet concurrency + hang watchdog) lives in
-// reconcile-loop.ts so it is unit-testable without this entrypoint's
-// top-level side effects.
+// wiring (the per-fleet in-flight guard) lives in reconcile-loop.ts so
+// it is unit-testable without this entrypoint's top-level side effects.
 let stopReconcileLoop: (() => void) | undefined;
 if (environment.HARU_RECONCILE_INTERVAL_MS !== undefined) {
   const fleetReferences = (

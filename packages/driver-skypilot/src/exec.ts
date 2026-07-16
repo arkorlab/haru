@@ -33,7 +33,7 @@ export class SkyCliError extends Error {
     super(
       `${command} ${describeExecFailure(
         { code, signal, errorMessage: detail?.errorMessage ?? null, stderr },
-        { maxStderrBytes: 500 },
+        { maxStderrChars: 500 },
       )}`,
     );
     this.name = "SkyCliError";
