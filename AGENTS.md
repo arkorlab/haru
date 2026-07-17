@@ -11,6 +11,7 @@ pnpm install
 pnpm build          # tsc -p tsconfig.build.json per package, topological
 pnpm typecheck      # tsc --noEmit (TypeScript 7)
 pnpm lint           # oxlint --type-aware --deny-warnings, then strict ESLint 10
+                    # (depends on ^build: type-aware lint resolves dist/ types)
 pnpm format         # oxfmt --write (config in oxfmt.config.ts; md/yaml excluded)
 pnpm format:check   # CI gate
 pnpm test           # vitest everywhere (PGlite-backed DB/server suites)
@@ -37,7 +38,8 @@ Run a single test file: `pnpm --filter <pkg> exec vitest run src/foo.test.ts`
 **Schema edits require `pnpm db:generate` in the same change.** The PGlite test
 harness replays the committed migrations in `packages/db/drizzle/`, while
 deploys use `db:push` from the schema files; CI has a drift gate
-(`db:generate && git diff --exit-code packages/db/drizzle`) that fails the PR
+(`db:generate` then `git status --porcelain packages/db/drizzle`, which
+catches modified AND brand-new untracked migrations) that fails the PR
 if they diverge.
 
 ## Architecture
