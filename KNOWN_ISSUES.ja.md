@@ -108,24 +108,33 @@
 - 意図する修正: 操作失敗後に対象への demote をキューする (既存の
   demote ステップを再利用)。それまでは運用手順書に記載。
 
-### promotion 進行中に seed したスロットは wake 経路から漏れうる
+### promotion 進行中に seed したスロットは誤った姿勢で残りうる
 
 - 場所: `packages/db/src/repo/layout.ts` (`applyFleetLayout`) と
   `services/haru-server/src/reconciler/steps.ts` の promotion ステップ。
 - 現状: 新しい inference スロットの初期姿勢は INSERT 文内でライブの
   ルーティングポインタに対して評価される (挿入自体はポインタと
-  レースしない)。しかしそのドメインの promote が進行中で既に
-  `wake_vllm` を過ぎた時点で挿入されたスロットは、(その瞬間は
-  standby なので) 正しく `sleeping` で播種され、promotion は
-  `switch_active` 前にターゲットのスロットを再走査しないため、
-  ドメインは sleeping スロットを 1 つ抱えたまま active になる。
-  何も自己修復しない (ハートビートミラーは定常ペアしか触らない)。
-  ドメインの demote/promote 一巡で回復する。
+  レースしない)。seed と操作の残余ウィンドウは両方向に残る:
+  - promote が既に `wake_vllm` を過ぎた時点で挿入されたスロットは
+    (その瞬間は standby なので) 正しく `sleeping` で播種されるが、
+    promotion は `switch_active` 前にターゲットを再走査しないため、
+    ドメインは sleeping スロットを抱えたまま active になり、何も
+    自己修復しない (ハートビートミラーは定常ペアのみ)。demote/
+    promote 一巡で回復する。
+  - 逆に、`switch_active` コミット直前に現 active へ `serving` で
+    播種されたスロットは、新 standby に serving のまま残る。
+    こちらは概ね自己修復する: promotion のベストエフォート
+    `demote_old_sleep` と以後の `sleep_vllm` が単一文 CAS で
+    `serving -> sleeping` を一括遷移し、standby の serving スロットは
+    ルーティングされない (standby ターゲットは強制的に ineligible)。
+    sleep ステップを既に過ぎた操作の場合のみ、次の demote まで残留。
 - 先送りの理由: 修正は操作レベルの設計判断 (`switch_active` の
   ナッジでターゲットのスロット集合を再検証してルーティング CAS に
   追加ガードを載せるか、レイアウト適用を one-in-flight 操作スロットと
-  直列化するか) であり、promotion 中のライブフリートへの seed は
-  異例のオペレータ操作。
+  直列化するか)。seed とポインタを `db.transaction()` で包む案は
+  不可 (Neon HTTP ドライバに対話的トランザクションはなく実行時に
+  throw する)。promotion 中のライブフリートへの seed は異例の
+  オペレータ操作。
 - 意図する修正: `switch_active` エグゼキュータが tick スナップショット
   からターゲットの inference スロットを再導出し、`serving` でない
   ものがある間はコミットを拒否する (通常の pending 経路で収束)。

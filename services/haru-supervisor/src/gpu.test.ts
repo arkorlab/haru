@@ -32,6 +32,26 @@ describe("readGpuMemory", () => {
     await expect(readGpuMemory(exec)).rejects.toThrow();
   });
 
+  it("bounds the non-numeric-line message for oversized 3-field garbage", async () => {
+    const exec: ExecFunction = () =>
+      // Exactly three fields, so the column guard passes; the huge
+      // non-numeric first field must still be capped in the message.
+      Promise.resolve({
+        code: 0,
+        stdout: `${"x".repeat(100_000)}, y, z\n`,
+        stderr: "",
+      });
+    let error: unknown;
+    try {
+      await readGpuMemory(exec);
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as Error).message).toContain("non-numeric");
+    expect((error as Error).message.length).toBeLessThan(700);
+  });
+
   it("bounds the column-guard message for an oversized malformed line", async () => {
     const exec: ExecFunction = () =>
       // A successful run (code 0) whose single line is huge and

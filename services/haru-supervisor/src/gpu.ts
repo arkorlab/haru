@@ -35,14 +35,16 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
     .filter((line) => line !== "")
     .map((line) => {
       const fields = line.split(",").map((v) => v.trim());
+      // Capped preview for BOTH malformed-line errors below: these
+      // messages ride into the /v1/gpu/memory 502 body, and a single
+      // oversized malformed line (wrong column count OR three huge
+      // non-numeric fields) must not smuggle megabytes past the cap the
+      // exec-failure path already enforces.
+      const preview = line.length > 500 ? `${line.slice(0, 500)}...` : line;
       if (fields.length !== 3) {
         // The query pins three columns (index, used, total); a different
         // count means the CSV shape drifted (driver change / injected
-        // header), which the NaN guard below could otherwise mask. The
-        // preview is capped like the exec failure above: this message
-        // also rides into the /v1/gpu/memory 502 body, and a single
-        // oversized malformed line must not smuggle megabytes past it.
-        const preview = line.length > 500 ? `${line.slice(0, 500)}...` : line;
+        // header), which the NaN guard below could otherwise mask.
         throw new TypeError(
           `nvidia-smi returned ${String(fields.length)} columns, expected 3 (index, used, total): "${preview}"`,
         );
@@ -63,7 +65,7 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
         // memory introspection is unavailable on this host instead of
         // a bare schema error.
         throw new TypeError(
-          `nvidia-smi reported a non-numeric memory line (unsupported GPU/driver mode?): "${line}"`,
+          `nvidia-smi reported a non-numeric memory line (unsupported GPU/driver mode?): "${preview}"`,
         );
       }
       return parsed;

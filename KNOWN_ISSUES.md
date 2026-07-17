@@ -115,24 +115,35 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   operation fails (reusing the existing demote steps), or an operator
   runbook note until then.
 
-### Slots seeded during an in-flight promotion can miss the wake path
+### Slots seeded during an in-flight promotion can land in the wrong posture
 
 - Where: `packages/db/src/repo/layout.ts` (`applyFleetLayout`) vs the
   promotion steps in `services/haru-server/src/reconciler/steps.ts`.
 - Current: a new inference slot's initial posture is evaluated inside
   its insert statement against the LIVE routing pointer (so the insert
-  itself cannot race the pointer). But a slot inserted while a promote
-  of its domain is in flight and already PAST `wake_vllm` is correctly
-  seeded `sleeping` (the domain is still standby at that instant), and
-  the promotion never re-scans the target's slots before
-  `switch_active`, so the domain goes active with one sleeping slot
-  that nothing self-heals (the heartbeat mirror only flips steady-state
-  pairs). A demote/promote cycle of the domain recovers it.
+  itself cannot race the pointer). Both directions of the residual
+  seed-vs-operation window remain:
+  - a slot inserted while a promote of its domain is already PAST
+    `wake_vllm` is correctly seeded `sleeping` (the domain is standby
+    at that instant), the promotion never re-scans the target before
+    `switch_active`, and nothing self-heals a sleeping slot on an
+    active (the heartbeat mirror only flips steady-state pairs); a
+    demote/promote cycle recovers it.
+  - conversely, a slot seeded `serving` on the CURRENT active just
+    before `switch_active` commits leaves a serving slot on the new
+    standby. This direction mostly self-heals: the promotion's
+    best-effort `demote_old_sleep` and any later `sleep_vllm` sweep
+    `serving -> sleeping` in their single-statement CAS, and a
+    serving slot on a standby is never routed to (standby targets are
+    hard-forced ineligible). Only an operation that has already passed
+    its sleep step leaves it stranded until the next demote.
 - Why deferred: the fix is an operation-level design decision -
   re-verify the target's slot set at the `switch_active` nudge (extra
   guard semantics on the routing CAS) or serialize layout application
-  with the one-in-flight operation slot - and seeding a live fleet
-  mid-promotion is an unusual operator action.
+  with the one-in-flight operation slot. A `db.transaction()` around
+  seed + pointer is NOT an option (the Neon HTTP driver has no
+  interactive transactions; it throws at runtime). Seeding a live
+  fleet mid-promotion is an unusual operator action.
 - Intended fix: have the `switch_active` executor re-derive the
   target's inference slots from the tick snapshot and refuse to commit
   while any is not `serving` (converging via the normal pending path),

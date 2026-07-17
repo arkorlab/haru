@@ -229,12 +229,24 @@ export function createApp(dependencies: AppDependencies) {
     const canonical = canonicalReference(rawReference);
     // Captured BEFORE the pointer read: a verdict this read yields is
     // applied to the alias map only if no newer request applied its own
-    // verdict for the same spelling while ours was in flight.
+    // verdict while ours was in flight. Two freshness dimensions, per
+    // the identity rules above: the RAW spelling (slug/alias knowledge
+    // is case-sensitive) and, for a UUID-shaped reference, the
+    // CANONICAL id (uuid identity is case-insensitive, so an id-side
+    // verdict recorded under one casing must fence a stale read that
+    // used another).
     const referenceGenerationBeforeRead =
       referenceVerdictGenerations.get(rawReference) ?? 0;
+    const idGenerationBeforeRead =
+      canonical === rawReference
+        ? undefined
+        : (referenceVerdictGenerations.get(canonical) ?? 0);
     const isReferenceVerdictStale = () =>
       (referenceVerdictGenerations.get(rawReference) ?? 0) !==
-      referenceGenerationBeforeRead;
+        referenceGenerationBeforeRead ||
+      (idGenerationBeforeRead !== undefined &&
+        (referenceVerdictGenerations.get(canonical) ?? 0) !==
+          idGenerationBeforeRead);
     let pointer;
     try {
       pointer = await getFleetRoutePointer(database, rawReference);
@@ -272,7 +284,10 @@ export function createApp(dependencies: AppDependencies) {
       // Anything still cached under that id belongs to a fleet that is
       // gone: quarantine it, or cachedFor's id-first fast path would
       // serve it during the next outage instead of the slug owner.
+      // This is an ID-side verdict: record it under the canonical
+      // spelling so a stale direct-id read under any casing is fenced.
       forgetFleet(canonical);
+      bumpReferenceVerdict(canonical);
     }
     if (shouldApplyReferenceVerdict) {
       if (pointer.id !== canonical) {
@@ -282,11 +297,12 @@ export function createApp(dependencies: AppDependencies) {
         // (rememberFleetReference records the verdict generation.)
         rememberFleetReference(rawReference, pointer.id);
       } else {
-        // A DIRECT-id success is also fresh knowledge about this
-        // spelling: record it, or an older delayed not_found /
-        // slug-fallback verdict for the same id would still read as
-        // current and evict the entry this resolution stands behind.
-        bumpReferenceVerdict(rawReference);
+        // A DIRECT-id success is also fresh knowledge: record it, or an
+        // older delayed not_found / slug-fallback verdict for the same
+        // id would still read as current and evict the entry this
+        // resolution stands behind. Keyed by the CANONICAL spelling so
+        // it fences a stale id-side verdict under ANY casing of the id.
+        bumpReferenceVerdict(canonical);
       }
     }
 
@@ -525,6 +541,13 @@ export function createApp(dependencies: AppDependencies) {
     }
     if (hasKnowledge) {
       bumpReferenceVerdict(reference);
+      // A UUID-shaped spelling's verdict also covers the canonical id
+      // (uuid identity is case-insensitive): record it there too, so a
+      // stale id-side read under a DIFFERENT casing is fenced as well.
+      const canonical = canonicalReference(reference);
+      if (canonical !== reference) {
+        bumpReferenceVerdict(canonical);
+      }
     }
   }
 

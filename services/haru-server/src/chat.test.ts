@@ -917,6 +917,40 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect((await stale.json()).error.code).toBe("no_active_domain");
   });
 
+  it("a delayed UPPERCASE not_found cannot evict a fleet resolved via lowercase id", async () => {
+    const { chat, breakIt, gateSelect } = failOpenApp({});
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // R1 asks with the UPPERCASE spelling of the id; its (not_found)
+    // response is delayed in transit. UUID identity is case-insensitive,
+    // so this verdict is about the same fleet id as R2's below.
+    const gate = gateSelect(2, { captureEarly: true });
+    const delayed = chat(goneId.toUpperCase());
+    await gate.reached;
+
+    // A fleet with the SAME id comes back; a fresh lowercase DIRECT-ID
+    // request resolves and caches it.
+    await database
+      .insert(schema.fleets)
+      .values({ id: goneId, slug: "revived" });
+    expect((await (await chat(goneId)).json()).error.code).toBe(
+      "no_active_domain",
+    );
+
+    // R1's stale verdict must be fenced by the CANONICAL-id generation
+    // the lowercase resolution recorded, despite the different spelling.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    breakIt();
+    const stale = await chat(goneId);
+    expect(stale.status).toBe(503);
+    expect((await stale.json()).error.code).toBe("no_active_domain");
+  });
+
   it("forgets a fleet whose UUID-SHAPED SLUG the store reports gone", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });
