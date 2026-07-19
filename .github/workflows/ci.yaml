@@ -33,12 +33,27 @@ jobs:
       # the gate also greps its output for failures.
       - name: Migration drift gate
         run: |
+          # The default runner shell is `bash -e` WITHOUT pipefail, so a
+          # db:generate crash whose output matches neither grep pattern
+          # would otherwise exit through tee's 0 and pass the gate green.
+          set -o pipefail
           pnpm db:generate 2>&1 | tee /tmp/db-generate.log
           if grep -qE "MODULE_NOT_FOUND|^Error" /tmp/db-generate.log; then
             echo "drizzle-kit generate reported an error (it exits 0 on failures)"
             exit 1
           fi
-          git diff --exit-code packages/db/drizzle
+          # --porcelain catches BOTH modified and untracked files (a
+          # brand-new migration), with no index side effects, unlike a
+          # plain `git diff` (tracked only) or `git add -N` (leaves
+          # intent-to-add markers). --untracked-files=normal is explicit
+          # so a runner-level status.showUntrackedFiles=no cannot silently
+          # neuter the untracked-file detection. Empty output = no drift.
+          drift="$(git status --porcelain --untracked-files=normal packages/db/drizzle)"
+          if [ -n "$drift" ]; then
+            echo "drizzle migrations are out of date; run pnpm db:generate:"
+            echo "$drift"
+            exit 1
+          fi
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

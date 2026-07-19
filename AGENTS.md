@@ -11,6 +11,7 @@ pnpm install
 pnpm build          # tsc -p tsconfig.build.json per package, topological
 pnpm typecheck      # tsc --noEmit (TypeScript 7)
 pnpm lint           # oxlint --type-aware --deny-warnings, then strict ESLint 10
+                    # (depends on ^build: type-aware lint resolves dist/ types)
 pnpm format         # oxfmt --write (config in oxfmt.config.ts; md/yaml excluded)
 pnpm format:check   # CI gate
 pnpm test           # vitest everywhere (PGlite-backed DB/server suites)
@@ -37,7 +38,8 @@ Run a single test file: `pnpm --filter <pkg> exec vitest run src/foo.test.ts`
 **Schema edits require `pnpm db:generate` in the same change.** The PGlite test
 harness replays the committed migrations in `packages/db/drizzle/`, while
 deploys use `db:push` from the schema files; CI has a drift gate
-(`db:generate && git diff --exit-code packages/db/drizzle`) that fails the PR
+(`db:generate` then `git status --porcelain packages/db/drizzle`, which
+catches modified AND brand-new untracked migrations) that fails the PR
 if they diverge.
 
 ## Architecture
@@ -228,8 +230,8 @@ Everything runs without GPUs, cloud accounts, or a live database:
 ## Tooling gotchas
 
 - **Two TypeScripts on purpose**: packages compile with TypeScript 7 (default
-  catalog; currently pinned `7.0.1-rc` - see the dated comment in
-  [pnpm-workspace.yaml](pnpm-workspace.yaml) about bumping to `^7.0.2`); the
+  catalog; currently `^7.0.2` in
+  [pnpm-workspace.yaml](pnpm-workspace.yaml)); the
   workspace root installs TypeScript 6.0.3 (`catalog:tseslint`) solely for
   typescript-eslint, whose peer range is still `<6.1.0`. Drop the extra copy
   when typescript-eslint supports TS 7.

@@ -108,6 +108,25 @@ describe("auth", () => {
   });
 });
 
+describe("healthz", () => {
+  it("never touches the GPU/exec or upstream (green during host trouble)", async () => {
+    // A liveness probe that ran nvidia-smi or hit vLLM would go red on a
+    // sick GPU/driver and get the supervisor restarted mid-trouble.
+    const { app } = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: () => Promise.reject(new Error("healthz must not fetch")),
+      spawnFn: () => {
+        throw new Error("healthz must not spawn");
+      },
+      exec: () => Promise.reject(new Error("healthz must not exec")),
+    });
+    const response = await app.request("/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+});
+
 describe("GET /v1/status and /v1/ready", () => {
   it("reports per-model sleep state and readiness", async () => {
     const state = freshState();

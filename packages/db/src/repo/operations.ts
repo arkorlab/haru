@@ -274,6 +274,15 @@ export async function failOperationWithPromotionCleanup(
   for (const state of FAILED_PROMOTION_SLOT_STATES) {
     assertSlotTransition("inference", state, "failed");
   }
+  // stop_training mirrors the target's training slots to `stopping`
+  // BEFORE its (here, failed) supervisor stop. The heartbeat mirror
+  // deliberately never touches `stopping` (it belongs to an in-flight
+  // operation's executor), so a promote that fails at stop_training
+  // would strand them there until the next stop/start on the domain.
+  // Restore them to `training` (the pre-stop posture) in the same
+  // atomic statement; the heartbeat mirror then reconciles
+  // training <-> idle from there.
+  assertSlotTransition("training", "stopping", "training");
   const failQuery = database
     .update(operations)
     .set({
@@ -342,8 +351,35 @@ export async function failOperationWithPromotionCleanup(
     )
     .returning({ id: slots.id });
   const cleanedSlots = database.$with("cleaned_slots").as(cleanupQuery);
+  // Same guards as the inference cleanup (promote, target-in-fleet,
+  // pointer-not-at-target): a data-modifying CTE always runs to
+  // completion, so this restores the stranded `stopping` training slots
+  // atomically with the fail. On a fail at a LATER step, stop_training
+  // already moved those slots to `idle`, so this matches nothing.
+  const trainingRecoveryQuery = database
+    .update(slots)
+    .set({
+      state: "training",
+      stateUpdatedAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .from(failedOperation)
+    .where(
+      and(
+        eq(failedOperation.kind, "promote"),
+        eq(slots.domainId, failedOperation.targetDomainId),
+        eq(slots.kind, "training"),
+        eq(slots.state, "stopping"),
+        exists(targetBelongsToFleet),
+        notExists(pointerAtFailedTarget),
+      ),
+    )
+    .returning({ id: slots.id });
+  const recoveredTraining = database
+    .$with("recovered_training")
+    .as(trainingRecoveryQuery);
   const rows = await database
-    .with(failedOperation, cleanedSlots)
+    .with(failedOperation, cleanedSlots, recoveredTraining)
     .select()
     .from(failedOperation);
   return rows[0] ?? null;

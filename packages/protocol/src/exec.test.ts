@@ -31,4 +31,30 @@ describe("defaultExec", () => {
     );
     expect(result.code).not.toBe(0);
   });
+
+  it("on a timeout kill surfaces the signal but NOT a stderr-embedding message", async () => {
+    const result = await defaultExec(
+      "node",
+      [
+        "-e",
+        'process.stderr.write("E".repeat(2000)); setTimeout(() => {}, 60_000);',
+      ],
+      { timeoutMs: 200 },
+    );
+    expect(result.code).toBe(1);
+    expect(result.signal).toBe("SIGTERM");
+    // Node embeds the ENTIRE captured stderr in the kill message, which
+    // the signal plus the separately-captured stderr already convey, so
+    // it is dropped - otherwise a downstream cap could be defeated by a
+    // multi-KB message.
+    expect(result.errorMessage).toBeNull();
+    expect(result.stderr).toContain("E");
+  });
+
+  it("on a spawn failure carries the short reason in errorMessage", async () => {
+    const result = await defaultExec("haru-definitely-not-a-real-binary", []);
+    expect(result.code).toBe(1);
+    expect(result.signal).toBeNull();
+    expect(result.errorMessage).toContain("ENOENT");
+  });
 });

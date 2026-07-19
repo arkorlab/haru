@@ -1,8 +1,4 @@
-import {
-  fleetLayoutSchema,
-  type FleetLayout,
-  type SlotState,
-} from "@haru/protocol";
+import { fleetLayoutSchema, type FleetLayout } from "@haru/protocol";
 import { and, eq, exists, isNull, ne, notExists, sql } from "drizzle-orm";
 
 import { domains, fleets, slots } from "../schema/index.js";
@@ -15,16 +11,31 @@ export interface ApplyLayoutResult {
   domains: { id: string; slug: string }[];
 }
 
-function initialSlotState(
-  kind: "inference" | "training",
-  isActiveDomain: boolean,
-): SlotState {
-  if (kind === "inference") {
-    // Active serves immediately; standby starts in the level 1 sleep
-    // posture and is woken by promotion.
-    return isActiveDomain ? "serving" : "sleeping";
-  }
-  return "idle";
+/**
+ * Initial posture of a NEW inference slot, evaluated INSIDE the insert
+ * statement against the LIVE routing pointer: active serves
+ * immediately; standby starts in the level 1 sleep posture; with no
+ * pointer yet, the layout's declared active seeds serving so the
+ * pointer-init update below can adopt it. Reading the pointer once
+ * before the insert loop would race a promotion committing mid-apply -
+ * a slot seeded 'sleeping' on the new active never self-heals (the
+ * heartbeat mirror only flips steady-state pairs), so the decision has
+ * to ride in the same statement, like every other pointer-dependent
+ * write in this repo.
+ */
+function inferenceSlotStateExpression(
+  fleetId: string,
+  domainId: string,
+  isLayoutDeclaredActive: boolean,
+) {
+  const livePointer = sql`(SELECT ${fleets.activeDomainId} FROM ${fleets} WHERE ${fleets.id} = ${fleetId})`;
+  return sql`
+    (CASE
+        WHEN ${livePointer} = ${domainId} THEN 'serving'
+        WHEN ${livePointer} IS NULL AND ${isLayoutDeclaredActive} THEN 'serving'
+        ELSE 'sleeping'
+      END)::slot_state
+  `;
 }
 
 /**
@@ -63,10 +74,6 @@ export async function applyFleetLayout(
     throw new Error(`fleet ${layout.slug} vanished during layout apply`);
   }
 
-  // Slot initial states must reflect the LIVE routing pointer, not the
-  // layout's declared active: re-applying a layout after a promotion
-  // moved the pointer must not seed "serving" slots on the standby.
-  const liveActiveDomainId = fleetRow.activeDomainId;
   const domainResults: { id: string; slug: string }[] = [];
   for (const domainLayout of layout.domains) {
     const insertedDomains = await database
@@ -103,10 +110,11 @@ export async function applyFleetLayout(
     }
     domainResults.push({ id: domainRow.id, slug: domainRow.slug });
 
-    const isActiveDomain =
-      liveActiveDomainId === null
-        ? domainLayout.slug === layout.activeDomainSlug
-        : domainRow.id === liveActiveDomainId;
+    // Whether the LAYOUT declares this domain active only matters while
+    // no live pointer exists; the live pointer itself is read inside
+    // each insert statement (see inferenceSlotStateExpression).
+    const isLayoutDeclaredActive =
+      domainLayout.slug === layout.activeDomainSlug;
     for (const slotLayout of domainLayout.slots) {
       const { gpuIndex, ...spec } = slotLayout;
       await database
@@ -115,7 +123,14 @@ export async function applyFleetLayout(
           domainId: domainRow.id,
           gpuIndex,
           kind: spec.kind,
-          state: initialSlotState(spec.kind, isActiveDomain),
+          state:
+            spec.kind === "training"
+              ? "idle"
+              : inferenceSlotStateExpression(
+                  fleetRow.id,
+                  domainRow.id,
+                  isLayoutDeclaredActive,
+                ),
           spec,
         })
         .onConflictDoNothing();

@@ -301,7 +301,10 @@ intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - **Model binding names are lowercase routing keys** and the vLLM
   server behind each binding must serve the same lowercase name (e.g.
   `--served-model-name`); the chat proxy matches exactly and forwards
-  the client body verbatim.
+  the client body verbatim. The supervisor config enforces the same
+  contract: its model names must be lowercase and unique across the
+  host's inference slots (server-side health/wake/sleep checks match
+  layout and supervisor names by exact string equality).
 - **GPU memory verification requires `nvidia-smi` numeric output**;
   MIG-partitioned GPUs reporting `[N/A]` for memory fields are not
   supported by the `verify_gpu` step yet.

@@ -13,23 +13,11 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 ## Deferred (post-review backlog)
 
-### defaultExec collapses spawn failures and timeout kills into exit 1
-
-- Where: `packages/protocol/src/exec.ts`.
-- Current: a missing binary (ENOENT) or a child killed by `timeoutMs`
-  resolves as `{code: 1, stdout: "", stderr: ""}`; callers (verify_gpu,
-  sky wrappers) report an empty-stderr "exited 1" that hides WHY.
-- Why deferred: pre-existing behavior faithfully hoisted; changing the
-  result shape touches every exec consumer's error mapping.
-- Intended fix: extend `ExecResult` with `signal`/`errorMessage` fields
-  populated from the execFile error and include them in the SkyCliError
-  / gpu error strings.
-
 ### Chat snapshot cache has no size cap
 
 - Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
-  `fleetIdByReference` and `forgottenGenerations` maps that share its
-  lifetime).
+  `fleetIdByReference`, `forgottenGenerations` and
+  `referenceVerdictGenerations` maps that share its lifetime).
 - Current: entries are dropped when the store reports the fleet gone,
   and quarantined when they are learned to be unusable (`forgetFleet`),
   but a fleet that simply stops being queried pins its last
@@ -111,18 +99,74 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 - Where: `services/haru-server/src/reconciler/reconciler.ts`
   (`applyStepResolution` failure path, `markFailedPromotionSlots`).
-- Current: a promote that stopped the target's training and then
-  failed before `switch_active` (e.g. `probe_failed`) marks the
-  target's inference slots failed and finishes. Nothing automatically
-  puts the target back into standby posture (vLLM asleep + training
-  running); a manual `POST /v1/fleets/:id/demote` of the target
-  restores it.
+- Current: a promote that failed AFTER waking the target (e.g.
+  `probe_failed`) marks the target's inference slots failed and
+  finishes. Nothing automatically puts the target back into standby
+  posture (vLLM asleep + training running); a manual `POST
+  /v1/fleets/:id/demote` of the target restores it. (A failure AT
+  `stop_training` is now handled:
+  `failOperationWithPromotionCleanup` restores the target's `stopping`
+  training slots to `training` in the same statement, so only the
+  post-wake inference-slot case remains.)
 - Why deferred: an automatic restore is a small operation of its own
   (sleep + start training with proofs); bolting it onto the failure
   path would run long supervisor calls outside the step machinery.
 - Intended fix: enqueue a demote of the failed target after the
   operation fails (reusing the existing demote steps), or an operator
   runbook note until then.
+
+### Slots seeded during an in-flight promotion can land in the wrong posture
+
+- Where: `packages/db/src/repo/layout.ts` (`applyFleetLayout`) vs the
+  promotion steps in `services/haru-server/src/reconciler/steps.ts`.
+- Current: a new inference slot's initial posture is evaluated inside
+  its insert statement against the LIVE routing pointer (so the insert
+  itself cannot race the pointer). Both directions of the residual
+  seed-vs-operation window remain:
+  - a slot inserted while a promote of its domain is already PAST
+    `wake_vllm` is correctly seeded `sleeping` (the domain is standby
+    at that instant), the promotion never re-scans the target before
+    `switch_active`, and nothing self-heals a sleeping slot on an
+    active (the heartbeat mirror only flips steady-state pairs); a
+    demote/promote cycle recovers it.
+  - conversely, a slot seeded `serving` on the CURRENT active just
+    before `switch_active` commits leaves a serving slot on the new
+    standby. This direction mostly self-heals: the promotion's
+    best-effort `demote_old_sleep` and any later `sleep_vllm` sweep
+    `serving -> sleeping` in their single-statement CAS, and a
+    serving slot on a standby is never routed to (standby targets are
+    hard-forced ineligible). Only an operation that has already passed
+    its sleep step leaves it stranded until the next demote.
+- Why deferred: the fix is an operation-level design decision -
+  re-verify the target's slot set at the `switch_active` nudge (extra
+  guard semantics on the routing CAS) or serialize layout application
+  with the one-in-flight operation slot. A `db.transaction()` around
+  seed + pointer is NOT an option (the Neon HTTP driver has no
+  interactive transactions; it throws at runtime). Seeding a live
+  fleet mid-promotion is an unusual operator action.
+- Intended fix: have the `switch_active` executor re-derive the
+  target's inference slots from the tick snapshot and refuse to commit
+  while any is not `serving` (converging via the normal pending path),
+  or document seed-vs-operation mutual exclusion in the runbook.
+
+### Re-applying a fleet layout never removes dropped domains or slots
+
+- Where: `packages/db/src/repo/layout.ts` (`applyFleetLayout`).
+- Current: layout apply is idempotent-additive (`ON CONFLICT DO
+  NOTHING`): existing rows are left untouched and new ones inserted, so
+  re-running a seed never resets live state. But a re-apply that DROPS
+  a domain or slot from the layout does not delete the removed rows -
+  they linger and can still be counted (e.g. a stale standby domain by
+  `detectFailover`'s viable-standby predicate).
+- Why deferred: deletion is not simple additive seeding - a dropped
+  domain might be the live active pointer or mid-operation, so safe
+  removal needs its own guarded teardown flow (and the drivers to
+  release the cloud resource). The seed path is deliberately
+  non-destructive.
+- Intended fix: a separate declarative reconcile that diffs the layout
+  against live rows and tears down removed domains/slots through the
+  guarded state machine (never a bare DELETE), or an operator runbook
+  for decommissioning until then.
 
 ### Postgres test lane replays migrations per test
 
@@ -131,8 +175,8 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Current: every test creates a database and replays the full
   committed migration set; the PGlite lane got the migrate-once
   optimization but the CI lane did not.
-- Why deferred: the migration set is currently a single squashed file,
-  so the per-test cost is small.
+- Why deferred: the committed migration set is still small (three
+  files), so the per-test cost is modest.
 - Intended fix: migrate one seed database per run, then
   `CREATE DATABASE ... TEMPLATE seed` per test (file-level copy skips
   the replay), dropping the seed in a global teardown.
@@ -151,3 +195,17 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   reconciler does not drive SkyServe provisioning yet.
 - Intended fix: switch to an output-format flag the moment upstream
   adds one to `sky serve status` (track the SkyPilot CLI reference).
+
+### SkyPilot getDomainStatus may throw instead of returning null for an unknown cluster
+
+- Where: `packages/driver-skypilot/src/driver.ts` (`getDomainStatus`).
+- Current: the method returns `null` only when the cluster is absent
+  from a SUCCESSFUL `sky status --output json` array. If `sky status`
+  exits non-zero for an unknown cluster (unverified against the pinned
+  version), `createSkyRunner` throws `SkyCliError` first, so a caller
+  treating "not found" as `null` would instead see an exception.
+- Why deferred: the exit semantics depend on the pinned SkyPilot
+  version, and the reconciler does not drive SkyPilot provisioning yet.
+- Intended fix: pin the "unknown cluster" behavior with a test against
+  the documented version and, if it exits non-zero, map that one case
+  to `null`.

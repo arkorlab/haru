@@ -23,6 +23,12 @@
       "persistent": true
     },
     "lint": {
+      // Type-aware lint (oxlint --type-aware, typescript-eslint) resolves
+      // cross-package `@haru/*` imports through their built `dist/` types,
+      // exactly like typecheck: a clean checkout must build deps first or
+      // the lint errors on unresolved imports. CI builds before linting,
+      // but the task graph must encode it for a standalone `pnpm lint`.
+      "dependsOn": ["^build"],
       "outputs": []
     },
     "test": {

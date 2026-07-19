@@ -835,6 +835,122 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(2);
   });
 
+  it("a delayed pointer read's verdict cannot evict the fleet a newer request learned", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
+    // Warm the cache for the ORIGINAL fleet behind "default".
+    expect((await chat("default")).status).toBe(200);
+
+    // R1's pointer read EXECUTES against the old world but its response
+    // is delayed in transit (captureEarly) - the Neon HTTP shape.
+    const gate = gateSelect(1, { captureEarly: true });
+    const delayed = chat("default");
+    await gate.reached;
+
+    // While R1's response is in flight, the fleet is deleted and a NEW
+    // one takes the slug; a fresh request learns the rebinding.
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+    const replacement = testLayout() as {
+      slug: string;
+      activeDomainSlug: string;
+    };
+    replacement.activeDomainSlug = "beta";
+    await applyFleetLayout(database, replacement);
+    expect((await chat("default")).status).toBe(200);
+    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+
+    // R1's stale result arrives. Its own answer is 404 (the fleet its
+    // read resolved is gone - the rebind already evicted it), but its
+    // delayed verdict must NOT rebind the alias back to the dead fleet
+    // and evict (generation-quarantine) the live one's cache.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    // The proof: during an outage, "default" still fail-opens onto the
+    // NEW fleet's cached routing (beta). With the stale verdict applied,
+    // the alias would point at the dead fleet and fail-open would have
+    // nothing to serve (503).
+    breakIt();
+    const stale = await chat("default");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+  });
+
+  it("a delayed not_found cannot evict a fleet a newer DIRECT-ID request resolved", async () => {
+    const { chat, breakIt, gateSelect } = failOpenApp({});
+    // Learn a fleet id, then delete the fleet: the id names nothing.
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // R1's pointer read for the id executes NOW (not_found) but its
+    // response is delayed in transit.
+    const gate = gateSelect(2, { captureEarly: true });
+    const delayed = chat(goneId);
+    await gate.reached;
+
+    // A fleet with the SAME id comes back (restore/re-insert) while
+    // R1's response is in flight; a fresh DIRECT-ID request resolves and
+    // caches it (domainless, so it answers no_active_domain).
+    await database
+      .insert(schema.fleets)
+      .values({ id: goneId, slug: "revived" });
+    const fresh = await chat(goneId);
+    expect(fresh.status).toBe(503);
+    expect((await fresh.json()).error.code).toBe("no_active_domain");
+
+    // R1's stale not_found arrives: its own answer is 404, but it must
+    // not evict (and generation-quarantine) the revived fleet's cache.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    // The proof: during an outage the id still fail-opens onto the
+    // revived fleet's cached snapshot (no_active_domain), instead of
+    // having nothing to serve (state_store_unavailable).
+    breakIt();
+    const stale = await chat(goneId);
+    expect(stale.status).toBe(503);
+    expect((await stale.json()).error.code).toBe("no_active_domain");
+  });
+
+  it("a delayed UPPERCASE not_found cannot evict a fleet resolved via lowercase id", async () => {
+    const { chat, breakIt, gateSelect } = failOpenApp({});
+    const goneId = (await getFleetSnapshot(database, "default"))!.id;
+    await database.delete(schema.slots);
+    await database.delete(schema.domains);
+    await database.delete(schema.fleets);
+
+    // R1 asks with the UPPERCASE spelling of the id; its (not_found)
+    // response is delayed in transit. UUID identity is case-insensitive,
+    // so this verdict is about the same fleet id as R2's below.
+    const gate = gateSelect(2, { captureEarly: true });
+    const delayed = chat(goneId.toUpperCase());
+    await gate.reached;
+
+    // A fleet with the SAME id comes back; a fresh lowercase DIRECT-ID
+    // request resolves and caches it.
+    await database
+      .insert(schema.fleets)
+      .values({ id: goneId, slug: "revived" });
+    expect((await (await chat(goneId)).json()).error.code).toBe(
+      "no_active_domain",
+    );
+
+    // R1's stale verdict must be fenced by the CANONICAL-id generation
+    // the lowercase resolution recorded, despite the different spelling.
+    gate.proceed();
+    expect((await delayed).status).toBe(404);
+
+    breakIt();
+    const stale = await chat(goneId);
+    expect(stale.status).toBe(503);
+    expect((await stale.json()).error.code).toBe("no_active_domain");
+  });
+
   it("forgets a fleet whose UUID-SHAPED SLUG the store reports gone", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt } = failOpenApp({ chatCalls });

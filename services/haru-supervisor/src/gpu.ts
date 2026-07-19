@@ -1,4 +1,5 @@
 import {
+  describeExecFailure,
   gpuMemorySchema,
   type ExecFunction,
   type GpuMemory,
@@ -20,14 +21,35 @@ const NVIDIA_SMI_ARGS = [
 export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
   const result = await exec("nvidia-smi", NVIDIA_SMI_ARGS);
   if (result.code !== 0) {
-    throw new Error(`nvidia-smi exited ${result.code}: ${result.stderr}`);
+    // Shared formatter surfaces a missing binary / timeout kill (signal +
+    // exec message) instead of an opaque "exited 1 with empty stderr".
+    // Capped: this message rides verbatim into the /v1/gpu/memory 502
+    // body, which must not embed up to the 16 MiB exec stderr buffer.
+    throw new Error(
+      `nvidia-smi ${describeExecFailure(result, { maxStderrChars: 500 })}`,
+    );
   }
   const gpus = result.stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
     .map((line) => {
-      const [index, usedMiB, totalMiB] = line.split(",").map((v) => v.trim());
+      const fields = line.split(",").map((v) => v.trim());
+      // Capped preview for BOTH malformed-line errors below: these
+      // messages ride into the /v1/gpu/memory 502 body, and a single
+      // oversized malformed line (wrong column count OR three huge
+      // non-numeric fields) must not smuggle megabytes past the cap the
+      // exec-failure path already enforces.
+      const preview = line.length > 500 ? `${line.slice(0, 500)}...` : line;
+      if (fields.length !== 3) {
+        // The query pins three columns (index, used, total); a different
+        // count means the CSV shape drifted (driver change / injected
+        // header), which the NaN guard below could otherwise mask.
+        throw new TypeError(
+          `nvidia-smi returned ${String(fields.length)} columns, expected 3 (index, used, total): "${preview}"`,
+        );
+      }
+      const [index, usedMiB, totalMiB] = fields;
       const parsed = {
         index: Number(index),
         usedMiB: Number(usedMiB),
@@ -43,7 +65,7 @@ export async function readGpuMemory(exec: ExecFunction): Promise<GpuMemory> {
         // memory introspection is unavailable on this host instead of
         // a bare schema error.
         throw new TypeError(
-          `nvidia-smi reported a non-numeric memory line (unsupported GPU/driver mode?): "${line}"`,
+          `nvidia-smi reported a non-numeric memory line (unsupported GPU/driver mode?): "${preview}"`,
         );
       }
       return parsed;

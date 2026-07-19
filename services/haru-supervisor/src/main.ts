@@ -5,7 +5,10 @@ import { serve } from "@hono/node-server";
 
 import { createSupervisorApp } from "./app.js";
 import { loadSupervisorConfig } from "./config.js";
-import { loadSupervisorEnvironment } from "./environment.js";
+import {
+  loadSupervisorEnvironment,
+  trainerEnvironment,
+} from "./environment.js";
 
 import type { SpawnFunction } from "./training.js";
 
@@ -55,7 +58,11 @@ const realSpawn: SpawnFunction = (command, options) => {
     // every descendant.
     detached: true,
     env: {
-      ...process.env,
+      // The inherited environment minus the supervisor's own secrets:
+      // the bearer token for the network-exposed control API must never
+      // ride into an operator workload (trainers commonly capture their
+      // environment into run metadata / crash dumps).
+      ...trainerEnvironment(process.env),
       // The trainer must checkpoint here and resume from it on start.
       HARU_CHECKPOINT_DIR: options.checkpointDir,
       // Which GPU this slot owns. A trainer that had to guess would take

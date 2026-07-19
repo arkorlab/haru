@@ -23,3 +23,33 @@ export function loadSupervisorEnvironment(
 ): SupervisorEnvironment {
   return supervisorEnvironmentSchema.parse(environment);
 }
+
+/**
+ * The supervisor-private variables that must NEVER reach a trainer
+ * child. HARU_SUPERVISOR_TOKEN is the bearer credential for the
+ * 0.0.0.0-bound control API (sleep/wake/kill-training): training
+ * commands are operator-authored workloads whose tooling routinely
+ * captures the process environment into run metadata, telemetry, or
+ * crash dumps, so inheriting it would hand the sole external auth
+ * boundary to anything the trainer ships off-host. The config path is
+ * stripped alongside it as supervisor-internal. Kept next to the env
+ * schema so a future supervisor secret gets added in one place.
+ */
+const SUPERVISOR_PRIVATE_ENVIRONMENT_KEYS: ReadonlySet<string> = new Set([
+  "HARU_SUPERVISOR_TOKEN",
+  "HARU_SUPERVISOR_CONFIG",
+]);
+
+/** A copy of `base` safe to hand a trainer child: the full inherited
+ * environment (PATH, CUDA_*, HOME, ...) minus the supervisor's own
+ * secrets. The comparison is case-insensitive: environment variables
+ * are case-insensitive on Windows (process.env preserves the casing
+ * they were SET with), so an exact-case filter would leak a
+ * lowercase-set token there. */
+export function trainerEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(base).filter(
+      ([key]) => !SUPERVISOR_PRIVATE_ENVIRONMENT_KEYS.has(key.toUpperCase()),
+    ),
+  );
+}

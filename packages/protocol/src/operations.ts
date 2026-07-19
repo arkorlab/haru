@@ -30,13 +30,20 @@ export type OperationSnapshot = z.infer<typeof operationSnapshotSchema>;
 // Strict: these are the server's own control-API request bodies. Client
 // and server ship from one repo and version together, so an unknown key
 // is a typo / drift, not a compatible extension - reject it at the edge.
+//
+// targetDomainId is lowercased at the schema boundary: a UUID is
+// case-insensitive (z.uuid() accepts either case), but Postgres stores
+// and returns domain ids lowercase and core matches them with strict
+// `===`, so an uppercase id would be spuriously rejected as "not in the
+// fleet". Normalising here (not per-handler) covers every caller of the
+// schema.
 export const promoteRequestSchema = z.strictObject({
-  targetDomainId: z.uuid(),
+  targetDomainId: z.uuid().toLowerCase(),
 });
 export type PromoteRequest = z.infer<typeof promoteRequestSchema>;
 
 export const demoteRequestSchema = z.strictObject({
-  targetDomainId: z.uuid(),
+  targetDomainId: z.uuid().toLowerCase(),
 });
 export type DemoteRequest = z.infer<typeof demoteRequestSchema>;
 
