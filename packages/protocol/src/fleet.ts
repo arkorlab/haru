@@ -125,15 +125,97 @@ export type DomainSnapshot = z.infer<typeof domainSnapshotSchema>;
  * domain is standby. `activeDomainId` is the single authoritative
  * routing pointer and only ever moves via compare-and-swap.
  */
-export const fleetSnapshotSchema = z.object({
-  id: z.uuid(),
-  slug: slugSchema,
-  displayName: z.string().nullable(),
-  activeDomainId: z.uuid().nullable(),
-  routeRevision: z.number().int().positive(),
-  policy: fleetPolicySchema,
-  domains: z.array(domainSnapshotSchema),
-});
+export const fleetSnapshotSchema = z
+  .object({
+    id: z.uuid(),
+    slug: slugSchema,
+    displayName: z.string().nullable(),
+    activeDomainId: z.uuid().nullable(),
+    routeRevision: z.number().int().positive(),
+    policy: fleetPolicySchema,
+    domains: z.array(domainSnapshotSchema),
+  })
+  .superRefine((fleet, context) => {
+    const domainIds = new Set<string>();
+    const domainSlugs = new Set<string>();
+    const slotIds = new Set<string>();
+
+    for (const [domainIndex, domain] of fleet.domains.entries()) {
+      const modelBindingNames = new Set<string>();
+
+      if (domain.fleetId !== fleet.id) {
+        context.addIssue({
+          code: "custom",
+          message: "domain.fleetId must match fleet.id",
+          path: ["domains", domainIndex, "fleetId"],
+        });
+      }
+      if (domainIds.has(domain.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "domain ids must be unique within a fleet",
+          path: ["domains", domainIndex, "id"],
+        });
+      }
+      domainIds.add(domain.id);
+      if (domainSlugs.has(domain.slug)) {
+        context.addIssue({
+          code: "custom",
+          message: "domain slugs must be unique within a fleet",
+          path: ["domains", domainIndex, "slug"],
+        });
+      }
+      domainSlugs.add(domain.slug);
+
+      for (const [slotIndex, slot] of domain.slots.entries()) {
+        if (slot.domainId !== domain.id) {
+          context.addIssue({
+            code: "custom",
+            message: "slot.domainId must match its parent domain.id",
+            path: ["domains", domainIndex, "slots", slotIndex, "domainId"],
+          });
+        }
+        if (slotIds.has(slot.id)) {
+          context.addIssue({
+            code: "custom",
+            message: "slot ids must be unique within a fleet",
+            path: ["domains", domainIndex, "slots", slotIndex, "id"],
+          });
+        }
+        slotIds.add(slot.id);
+
+        if (slot.spec.kind === "inference") {
+          for (const [modelIndex, model] of slot.spec.models.entries()) {
+            if (modelBindingNames.has(model.name)) {
+              context.addIssue({
+                code: "custom",
+                message: "model binding names must be unique within a domain",
+                path: [
+                  "domains",
+                  domainIndex,
+                  "slots",
+                  slotIndex,
+                  "spec",
+                  "models",
+                  modelIndex,
+                  "name",
+                ],
+              });
+            }
+            modelBindingNames.add(model.name);
+          }
+        }
+      }
+    }
+
+    if (fleet.activeDomainId !== null && !domainIds.has(fleet.activeDomainId)) {
+      context.addIssue({
+        code: "custom",
+        message: "activeDomainId must identify a domain in this fleet",
+        path: ["activeDomainId"],
+      });
+    }
+  });
 export type FleetSnapshot = z.infer<typeof fleetSnapshotSchema>;
 
 export function domainRole(

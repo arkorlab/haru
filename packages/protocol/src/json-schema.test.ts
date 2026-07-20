@@ -8,6 +8,7 @@ import {
   serializeJsonSchema,
   toConfigJsonSchema,
 } from "./json-schema.js";
+import { MAX_PROBE_PROMPT_CODE_POINTS, probePromptSchema } from "./policy.js";
 
 type JsonNode = Record<string, unknown>;
 
@@ -62,4 +63,28 @@ describe("bundled config JSON Schemas", () => {
       }
     });
   }
+
+  it("uses the same Unicode code-point prompt limit at runtime and in JSON Schema", () => {
+    expect(
+      probePromptSchema.safeParse("😀".repeat(MAX_PROBE_PROMPT_CODE_POINTS))
+        .success,
+    ).toBe(true);
+    expect(
+      probePromptSchema.safeParse("😀".repeat(MAX_PROBE_PROMPT_CODE_POINTS + 1))
+        .success,
+    ).toBe(false);
+
+    const fleetLayout = configSchemasByFile["fleet-layout.schema.json"];
+    if (!fleetLayout) throw new Error("fleet layout schema missing");
+    const promptSchemas = objectNodes(toConfigJsonSchema(fleetLayout))
+      .map((node) => node.properties as Record<string, JsonNode>)
+      .map((properties) => properties.prompt)
+      .filter((schema) => schema !== undefined);
+    expect(promptSchemas).not.toHaveLength(0);
+    expect(
+      promptSchemas.every(
+        (schema) => schema.maxLength === MAX_PROBE_PROMPT_CODE_POINTS,
+      ),
+    ).toBe(true);
+  });
 });

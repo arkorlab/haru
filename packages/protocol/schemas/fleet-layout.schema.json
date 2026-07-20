@@ -82,12 +82,13 @@
           "properties": {
             "prompt": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 8192
             },
             "maxTokens": {
               "type": "integer",
               "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
+              "maximum": 256
             }
           },
           "additionalProperties": false

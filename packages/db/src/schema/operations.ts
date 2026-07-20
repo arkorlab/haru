@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  foreignKey,
   index,
   jsonb,
   pgTable,
@@ -25,16 +26,14 @@ export const operations = pgTable(
       .references(() => fleets.id),
     kind: operationKindEnum("kind").notNull(),
     state: operationStateEnum("state").notNull().default("pending"),
-    targetDomainId: uuid("target_domain_id")
-      .notNull()
-      .references(() => domains.id),
+    targetDomainId: uuid("target_domain_id").notNull(),
     /**
      * The fleet's active pointer at operation-creation time: the "old
      * active" a promote's post-commit demote steps act on. Null means
      * no active existed (headless promote) and the cleanup steps
      * deliberately no-op instead of guessing a domain.
      */
-    sourceDomainId: uuid("source_domain_id").references(() => domains.id),
+    sourceDomainId: uuid("source_domain_id"),
     /** Current OperationStep while running; null before claim/after finish. */
     currentStep: text("current_step"),
     stepStartedAt: timestamp("step_started_at", { withTimezone: true }),
@@ -61,15 +60,25 @@ export const operations = pgTable(
       .notNull(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
-  (t) => [
+  (table) => [
+    foreignKey({
+      name: "operations_target_domain_membership_fk",
+      columns: [table.fleetId, table.targetDomainId],
+      foreignColumns: [domains.fleetId, domains.id],
+    }),
+    foreignKey({
+      name: "operations_source_domain_membership_fk",
+      columns: [table.fleetId, table.sourceDomainId],
+      foreignColumns: [domains.fleetId, domains.id],
+    }),
     /**
      * At most one in-flight operation per fleet. Concurrent promote or
      * demote requests race on this partial unique index; the loser
      * joins the winner's operation (or receives a conflict).
      */
     uniqueIndex("uq_operations_one_inflight_per_fleet")
-      .on(t.fleetId)
-      .where(sql`${t.state} IN ('pending', 'running')`),
-    index("idx_operations_fleet").on(t.fleetId),
+      .on(table.fleetId)
+      .where(sql`${table.state} IN ('pending', 'running')`),
+    index("idx_operations_fleet").on(table.fleetId),
   ],
 );

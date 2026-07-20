@@ -1,6 +1,38 @@
 import { z } from "zod";
 
 import { slotKindSchema } from "./enums.js";
+import { probeMaxTokensSchema, probePromptSchema } from "./policy.js";
+
+/**
+ * The server leaves this much of a supervisor HTTP budget for the
+ * supervisor to serialize its result and for the response to travel
+ * back after an inner vLLM timeout. For short budgets, ten percent is
+ * reserved instead so a configured sub-second timeout remains useful.
+ */
+export const SUPERVISOR_RESPONSE_HEADROOM_MS = 1000;
+
+export function supervisorInnerTimeoutMs(outerTimeoutMs: number): number {
+  const proportionalHeadroomMs = Math.max(1, Math.floor(outerTimeoutMs / 10));
+  return Math.max(
+    1,
+    outerTimeoutMs -
+      Math.min(SUPERVISOR_RESPONSE_HEADROOM_MS, proportionalHeadroomMs),
+  );
+}
+
+/**
+ * Default outer budget for haru-server heartbeat status calls. This
+ * stays 1s above the 5s /is_sleeping timeout in pre-selector
+ * supervisors, so a rolling server-first deployment still leaves
+ * enough time for their sleeping:null response to arrive.
+ */
+export const SUPERVISOR_STATUS_TIMEOUT_MS = 6000;
+/** Hard inner cap for each local /is_sleeping call. */
+export const SUPERVISOR_STATUS_MODEL_TIMEOUT_MS = 4000;
+/** Query marker: the caller already converted an outer budget to an
+ * inner per-model timeout. Kept as one shared literal so client and
+ * supervisor cannot drift on its spelling. */
+export const SUPERVISOR_INNER_TIMEOUT_KIND = "inner";
 
 /**
  * Supervisor-side static configuration (HARU_SUPERVISOR_CONFIG): the
@@ -11,19 +43,24 @@ import { slotKindSchema } from "./enums.js";
  */
 // Strict: HARU_SUPERVISOR_CONFIG is operator-authored, so a misspelled
 // key must fail at load time rather than be silently dropped.
+// Lowercase-only, mirroring the layout's modelBindingSchema: every
+// server-side health/wake/sleep/probe check matches the layout's
+// lowercase binding name against this reported name by EXACT string
+// equality, so a casing mismatch would not fail here at config time
+// but as runtime health flapping (the active's slots CASed to failed
+// on every heartbeat) and spurious failover.
+export const supervisorModelNameSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value === value.toLowerCase(), {
+    message: "model names must be lowercase (matched against the layout)",
+  });
+export const supervisorModelSelectionSchema = z.array(
+  supervisorModelNameSchema,
+);
+
 export const supervisorInferenceModelConfigSchema = z.strictObject({
-  // Lowercase-only, mirroring the layout's modelBindingSchema: every
-  // server-side health/wake/sleep/probe check matches the layout's
-  // lowercase binding name against this reported name by EXACT string
-  // equality, so a casing mismatch would not fail here at config time
-  // but as runtime health flapping (the active's slots CASed to failed
-  // on every heartbeat) and spurious failover.
-  name: z
-    .string()
-    .min(1)
-    .refine((value) => value === value.toLowerCase(), {
-      message: "model names must be lowercase (matched against the layout)",
-    }),
+  name: supervisorModelNameSchema,
   /** Local port of the vLLM server for this model on 127.0.0.1. */
   port: z.number().int().min(1).max(65_535),
 });
@@ -148,10 +185,28 @@ export type VllmTargetRequest = z.infer<typeof vllmTargetRequestSchema>;
  * 2^31-1 to ~1ms; an oversized "grace" would SIGKILL immediately.
  */
 const MAX_TIMEOUT_MS = 2_147_483_647;
+const timeoutMsSchema = z.number().int().positive().max(MAX_TIMEOUT_MS);
+
+/**
+ * Parsed form of the GET /v1/status query. `models: undefined` keeps
+ * the legacy "all configured models" behaviour; an empty array asks
+ * for training status without probing any inference model.
+ */
+export const supervisorStatusQuerySchema = z.strictObject({
+  models: supervisorModelSelectionSchema.optional(),
+  timeoutMs: z
+    .number()
+    .int()
+    .positive()
+    .max(SUPERVISOR_STATUS_MODEL_TIMEOUT_MS)
+    .optional(),
+  timeoutKind: z.literal(SUPERVISOR_INNER_TIMEOUT_KIND).optional(),
+});
+export type SupervisorStatusQuery = z.infer<typeof supervisorStatusQuerySchema>;
 
 /** POST /v1/training/stop body. */
 export const trainingStopRequestSchema = z.strictObject({
-  graceMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
+  graceMs: timeoutMsSchema.optional(),
 });
 export type TrainingStopRequest = z.infer<typeof trainingStopRequestSchema>;
 
@@ -170,15 +225,15 @@ export type GpuMemory = z.infer<typeof gpuMemorySchema>;
 
 /** POST /v1/probe body. */
 export const probeRequestSchema = z.strictObject({
-  prompt: z.string().min(1).default("ping"),
-  maxTokens: z.number().int().positive().default(4),
+  prompt: probePromptSchema.default("ping"),
+  maxTokens: probeMaxTokensSchema.default(4),
   /**
    * Per-model completion timeout. The caller (reconciler) passes its
    * probe step budget so the supervisor never keeps a vLLM request
    * alive past the point the caller stopped waiting for it; omitted
    * means the supervisor's built-in default.
    */
-  timeoutMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
+  timeoutMs: timeoutMsSchema.optional(),
 });
 export type ProbeRequest = z.infer<typeof probeRequestSchema>;
 

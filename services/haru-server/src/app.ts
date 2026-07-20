@@ -166,6 +166,13 @@ export function createApp(dependencies: AppDependencies) {
   // a lost fail-open. Grows with distinct forgotten fleet ids, the
   // same order as the cache itself (see KNOWN_ISSUES: no size cap).
   const forgottenGenerations = new Map<string, number>();
+  // Coalesce ONLY the expensive full-snapshot read. Pointer reads stay
+  // per request: each caller must independently learn the latest route
+  // revision (and apply the verdict for its exact reference spelling).
+  // The key includes every fact that licenses sharing. A route move
+  // starts a different load, and a forget bumps the generation so work
+  // predating that verdict can neither be joined nor republished.
+  const snapshotLoads = new Map<string, Promise<FleetSnapshot | null>>();
   // The same later-knowledge-wins rule for the ALIAS map: bumped per
   // REFERENCE whenever a pointer-read verdict is applied for that
   // spelling (an alias learned/rebound, or the spelling reported gone).
@@ -184,6 +191,33 @@ export function createApp(dependencies: AppDependencies) {
     now,
     supervisorToken: config.supervisorToken,
   };
+
+  function loadSnapshotOnce(
+    fleetId: string,
+    routeRevision: number,
+    forgottenGeneration: number,
+  ): Promise<FleetSnapshot | null> {
+    const key = JSON.stringify([fleetId, routeRevision, forgottenGeneration]);
+    const inFlight = snapshotLoads.get(key);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+
+    const load = getFleetSnapshot(database, fleetId);
+    snapshotLoads.set(key, load);
+    const cleanUp = () => {
+      // Identity-check the entry: a late completion must never delete a
+      // replacement installed under the same key.
+      if (snapshotLoads.get(key) === load) {
+        snapshotLoads.delete(key);
+      }
+    };
+    // Handle both outcomes so a failed load cannot poison subsequent
+    // retries. Providing a rejection handler also avoids creating an
+    // unobserved rejected promise solely for cleanup.
+    void load.then(cleanUp, cleanUp);
+    return load;
+  }
 
   /**
    * Resolve a fleet reference for the chat hot path, FAILING OPEN when
@@ -321,7 +355,11 @@ export function createApp(dependencies: AppDependencies) {
     const generationBeforeLoad = forgottenGenerations.get(pointer.id) ?? 0;
     let snapshot;
     try {
-      snapshot = await getFleetSnapshot(database, pointer.id);
+      snapshot = await loadSnapshotOnce(
+        pointer.id,
+        pointer.routeRevision,
+        generationBeforeLoad,
+      );
     } catch (error) {
       return snapshotLoadFailed(rawReference, pointer, error);
     }
@@ -346,10 +384,15 @@ export function createApp(dependencies: AppDependencies) {
       (existing !== undefined &&
         existing.routeRevision > snapshot.routeRevision);
     if (!didLoseRace) {
+      // The TTL bounds how long a SUCCESSFULLY loaded snapshot is used,
+      // not how long its database read took. Starting it before the read
+      // made a slow load arrive already expired and immediately trigger
+      // another refresh.
+      const publishedAtMs = now().getTime();
       snapshotCache.set(pointer.id, {
         snapshot,
         routeRevision: snapshot.routeRevision,
-        expiresAtMs: nowMs + snapshotCacheTtlMs,
+        expiresAtMs: publishedAtMs + snapshotCacheTtlMs,
       });
       // The snapshot reveals the fleet's other accepted reference form,
       // so a slug-warmed cache is reachable by uuid during an outage and
@@ -579,7 +622,7 @@ export function createApp(dependencies: AppDependencies) {
 
   // A client that aborts or truncates its upload before we respond
   // leaves nothing to send a body to. Reading such a request (in the
-  // body-size gate or `c.req.text()`) rejects with the request signal
+  // body-size gate or `c.req.arrayBuffer()`) rejects with the request signal
   // already aborted (@hono/node-server ties it to the socket), which
   // would otherwise reach Hono's default handler as a misleading 500;
   // answer with a bare nginx-style 499 instead. Still log it: a genuine
@@ -774,15 +817,19 @@ export function createApp(dependencies: AppDependencies) {
         c.header(STALE_ROUTING_HEADER, "stale");
       }
 
-      // Keep the raw text so unknown fields forward byte-identically;
-      // parse only to extract the model name. A failed read here means
-      // the client aborted/truncated the upload (the body-size gate above
-      // has already buffered it, so this only rejects on a live abort);
-      // the request signal is aborted, so app.onError maps it to a bare
-      // 499, never the JSON-parse 400 below or a 500.
-      const bodyText = await c.req.text();
+      // Keep the original bytes so unknown fields, whitespace and a UTF-8
+      // BOM forward byte-identically. Decode a separate view only to
+      // extract the model. A failed read here means the client
+      // aborted/truncated the upload (the body-size gate above has
+      // already buffered it, so this only rejects on a live abort); the
+      // request signal is aborted, so app.onError maps it to a bare 499,
+      // never the JSON-parse 400 below or a 500.
+      const bodyBytes = await c.req.arrayBuffer();
       let model: string;
       try {
+        const bodyText = new TextDecoder("utf-8", { fatal: true }).decode(
+          bodyBytes,
+        );
         model = chatCompletionRequestSchema.parse(JSON.parse(bodyText)).model;
       } catch {
         return c.json(
@@ -825,7 +872,7 @@ export function createApp(dependencies: AppDependencies) {
       const result = await proxyChatCompletion(
         chatFetchFunction,
         binding.servingUrl,
-        bodyText,
+        bodyBytes,
         chatHeaderTimeoutMs,
         // Propagate a pre-header client disconnect to the upstream so an
         // abandoned request stops generating immediately.

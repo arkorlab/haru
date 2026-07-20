@@ -1,6 +1,6 @@
 import { and, eq, exists, isNull, sql } from "drizzle-orm";
 
-import { fleets, operations } from "../schema/index.js";
+import { domains, fleets, operations } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
 
@@ -38,11 +38,19 @@ export async function switchActive(
   newActiveId: string,
   requireRunningOperationId?: string,
 ): Promise<{ routeRevision: number } | null> {
+  // Defense in depth behind the composite FK: a plain pointer move
+  // also has to prove the destination belongs to this fleet inside
+  // the same CAS statement.
+  const sameFleetTarget = database
+    .select({ one: sql`1` })
+    .from(domains)
+    .where(and(eq(domains.fleetId, fleetId), eq(domains.id, newActiveId)));
   const conditions = [
     eq(fleets.id, fleetId),
     expectedActiveId === null
       ? isNull(fleets.activeDomainId)
       : eq(fleets.activeDomainId, expectedActiveId),
+    exists(sameFleetTarget),
   ];
   const pointerUpdate = {
     activeDomainId: newActiveId,
@@ -65,7 +73,15 @@ export async function switchActive(
     .where(
       and(
         eq(operations.id, requireRunningOperationId),
+        eq(operations.fleetId, fleetId),
+        eq(operations.kind, "promote"),
         eq(operations.state, "running"),
+        eq(operations.currentStep, "switch_active"),
+        eq(operations.targetDomainId, newActiveId),
+        expectedActiveId === null
+          ? isNull(operations.sourceDomainId)
+          : eq(operations.sourceDomainId, expectedActiveId),
+        eq(operations.routingCommitted, false),
       ),
     )
     .for("update");

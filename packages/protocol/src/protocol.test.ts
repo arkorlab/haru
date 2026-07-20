@@ -6,6 +6,7 @@ import { errorBody } from "./errors.js";
 import { describeExecFailure } from "./exec.js";
 import {
   domainRole,
+  fleetSnapshotSchema,
   inferenceSlotSpecSchema,
   modelBindingSchema,
   slotSnapshotSchema,
@@ -18,13 +19,20 @@ import { placementSpecSchema } from "./placement.js";
 import {
   fleetPolicyPatchSchema,
   fleetPolicySchema,
+  MAX_PROBE_PROMPT_CODE_POINTS,
+  MAX_PROBE_TOKENS,
   probePolicyPatchSchema,
   probePolicySchema,
   resolveFleetPolicy,
 } from "./policy.js";
 import {
   probeRequestSchema,
+  supervisorInnerTimeoutMs,
+  SUPERVISOR_INNER_TIMEOUT_KIND,
   supervisorConfigSchema,
+  supervisorStatusQuerySchema,
+  SUPERVISOR_STATUS_MODEL_TIMEOUT_MS,
+  SUPERVISOR_STATUS_TIMEOUT_MS,
   trainingStopRequestSchema,
   vllmTargetRequestSchema,
 } from "./supervisor.js";
@@ -115,6 +123,47 @@ describe("fleetPolicySchema", () => {
     expect(() => fleetPolicySchema.parse({ autoFailver: true })).toThrow();
     expect(() => resolveFleetPolicy({ autoFailver: true })).toThrow();
   });
+
+  it("bounds synthetic probe work in stored policy", () => {
+    expect(() =>
+      fleetPolicySchema.parse({
+        probe: {
+          prompt: "x".repeat(MAX_PROBE_PROMPT_CODE_POINTS),
+          maxTokens: MAX_PROBE_TOKENS,
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      fleetPolicySchema.parse({
+        probe: {
+          prompt: "x".repeat(MAX_PROBE_PROMPT_CODE_POINTS + 1),
+          maxTokens: MAX_PROBE_TOKENS,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      fleetPolicySchema.parse({
+        probe: { prompt: "ping", maxTokens: MAX_PROBE_TOKENS + 1 },
+      }),
+    ).toThrow();
+  });
+
+  it("counts astral prompt characters as Unicode code points", () => {
+    expect(() =>
+      fleetPolicySchema.parse({
+        probe: {
+          prompt: "😀".repeat(MAX_PROBE_PROMPT_CODE_POINTS),
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      fleetPolicySchema.parse({
+        probe: {
+          prompt: "😀".repeat(MAX_PROBE_PROMPT_CODE_POINTS + 1),
+        },
+      }),
+    ).toThrow();
+  });
 });
 
 describe("slotSpecSchema", () => {
@@ -188,6 +237,95 @@ describe("slotSnapshotSchema", () => {
     expect(() =>
       slotSnapshotSchema.parse({ ...inferenceSnapshot, kind: "training" }),
     ).toThrow(/kind must match/);
+  });
+});
+
+describe("fleetSnapshotSchema relationships", () => {
+  const fleetId = "00000000-0000-4000-8000-000000000001";
+  const domainId = "00000000-0000-4000-8000-000000000002";
+  const slotId = "00000000-0000-4000-8000-000000000003";
+  const timestamp = "2026-01-01T00:00:00.000Z";
+
+  function snapshot() {
+    return {
+      id: fleetId,
+      slug: "default",
+      displayName: null,
+      activeDomainId: domainId,
+      routeRevision: 1,
+      policy: resolveFleetPolicy({}),
+      domains: [
+        {
+          id: domainId,
+          fleetId,
+          slug: "alpha",
+          state: "ready",
+          provider: "static",
+          placement: {
+            cloud: "aws",
+            region: "region-a",
+            accelerator: "example-accelerator",
+          },
+          supervisorUrl: "http://127.0.0.1:8701",
+          servingBaseUrl: "http://127.0.0.1:8000",
+          lastSeenAt: timestamp,
+          stateUpdatedAt: timestamp,
+          slots: [
+            {
+              id: slotId,
+              domainId,
+              gpuIndex: 0,
+              kind: "inference",
+              state: "serving",
+              spec: {
+                kind: "inference",
+                models: [
+                  {
+                    name: "example-chat",
+                    servingUrl: "http://127.0.0.1:8001",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("accepts a relationally coherent snapshot", () => {
+    expect(fleetSnapshotSchema.parse(snapshot()).activeDomainId).toBe(domainId);
+  });
+
+  it("rejects an active pointer outside the fleet's domain list", () => {
+    const value = snapshot();
+    value.activeDomainId = "00000000-0000-4000-8000-000000000099";
+    expect(() => fleetSnapshotSchema.parse(value)).toThrow(
+      /activeDomainId must identify/,
+    );
+  });
+
+  it("rejects domains and slots owned by a different parent", () => {
+    const wrongId = "00000000-0000-4000-8000-000000000099";
+    const wrongFleet = snapshot();
+    wrongFleet.domains[0]!.fleetId = wrongId;
+    expect(() => fleetSnapshotSchema.parse(wrongFleet)).toThrow(
+      /domain.fleetId must match/,
+    );
+
+    const wrongDomain = snapshot();
+    wrongDomain.domains[0]!.slots[0]!.domainId = wrongId;
+    expect(() => fleetSnapshotSchema.parse(wrongDomain)).toThrow(
+      /slot.domainId must match/,
+    );
+  });
+
+  it("rejects duplicate relational identities", () => {
+    const duplicateDomain = snapshot();
+    duplicateDomain.domains.push(structuredClone(duplicateDomain.domains[0]!));
+    expect(() => fleetSnapshotSchema.parse(duplicateDomain)).toThrow(
+      /domain ids must be unique/,
+    );
   });
 });
 
@@ -441,6 +579,66 @@ describe("probeRequestSchema", () => {
     // setTimeout clamps > 2^31-1 to ~1ms; reject at the schema.
     expect(() =>
       probeRequestSchema.parse({ timeoutMs: 2_147_483_648 }),
+    ).toThrow();
+  });
+
+  it("uses the same prompt and generation bounds as fleet policy", () => {
+    expect(() =>
+      probeRequestSchema.parse({
+        prompt: "x".repeat(MAX_PROBE_PROMPT_CODE_POINTS),
+        maxTokens: MAX_PROBE_TOKENS,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      probeRequestSchema.parse({
+        prompt: "x".repeat(MAX_PROBE_PROMPT_CODE_POINTS + 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      probeRequestSchema.parse({ maxTokens: MAX_PROBE_TOKENS + 1 }),
+    ).toThrow();
+  });
+});
+
+describe("supervisor call budgets and model selection", () => {
+  it("reserves response headroom inside the outer heartbeat budget", () => {
+    expect(SUPERVISOR_STATUS_TIMEOUT_MS).toBe(6000);
+    // A pre-selector supervisor ignores the new timeoutMs query and
+    // retains its historic 5s local timeout. The outer call must still
+    // leave a full second for that version to return sleeping:null.
+    expect(SUPERVISOR_STATUS_TIMEOUT_MS - 5000).toBe(1000);
+    expect(SUPERVISOR_STATUS_MODEL_TIMEOUT_MS).toBe(4000);
+    expect(supervisorInnerTimeoutMs(SUPERVISOR_STATUS_TIMEOUT_MS)).toBe(5400);
+    expect(
+      Math.min(
+        SUPERVISOR_STATUS_MODEL_TIMEOUT_MS,
+        supervisorInnerTimeoutMs(SUPERVISOR_STATUS_TIMEOUT_MS),
+      ),
+    ).toBe(4000);
+    expect(supervisorInnerTimeoutMs(500)).toBe(450);
+    expect(supervisorInnerTimeoutMs(2)).toBe(1);
+  });
+
+  it("distinguishes all models from an explicit empty selection", () => {
+    expect(supervisorStatusQuerySchema.parse({})).toEqual({});
+    expect(supervisorStatusQuerySchema.parse({ models: [] })).toEqual({
+      models: [],
+    });
+    expect(
+      supervisorStatusQuerySchema.parse({
+        timeoutKind: SUPERVISOR_INNER_TIMEOUT_KIND,
+      }),
+    ).toEqual({ timeoutKind: "inner" });
+    expect(() =>
+      supervisorStatusQuerySchema.parse({ timeoutKind: "outer" }),
+    ).toThrow();
+    expect(() =>
+      supervisorStatusQuerySchema.parse({
+        timeoutMs: SUPERVISOR_STATUS_MODEL_TIMEOUT_MS + 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      supervisorStatusQuerySchema.parse({ models: ["UPPERCASE"] }),
     ).toThrow();
   });
 });

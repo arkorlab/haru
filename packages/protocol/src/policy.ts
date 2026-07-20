@@ -9,8 +9,39 @@ import { z } from "zod";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const timeoutMsSchema = z.number().int().positive().max(MAX_TIMEOUT_MS);
 
-const probePromptSchema = z.string().min(1);
-const probeMaxTokensSchema = z.number().int().positive();
+/** Synthetic probes are health checks, not a general inference API.
+ * Bound both dimensions so an operator typo cannot turn every
+ * promotion into a large generation workload. JSON Schema maxLength
+ * counts Unicode code points, so the runtime refinement deliberately
+ * uses the string iterator instead of JavaScript's UTF-16
+ * string.length. The supervisor request schema reuses these exact
+ * schemas so stored policy and wire input cannot drift. */
+export const MAX_PROBE_PROMPT_CODE_POINTS = 8192;
+export const MAX_PROBE_TOKENS = 256;
+
+function hasAtMostUnicodeCodePoints(value: string, maximum: number): boolean {
+  let count = 0;
+  for (const _codePoint of value) {
+    count += 1;
+    if (count > maximum) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export const probePromptSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => hasAtMostUnicodeCodePoints(value, MAX_PROBE_PROMPT_CODE_POINTS),
+    `probe prompt must contain at most ${MAX_PROBE_PROMPT_CODE_POINTS} Unicode code points`,
+  );
+export const probeMaxTokensSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(MAX_PROBE_TOKENS);
 
 /** Synthetic inference probe configuration. Strict: this is
  * operator-authored config, so a misspelled key must fail at parse

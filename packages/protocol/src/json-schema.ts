@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { fleetLayoutSchema } from "./layout.js";
+import { MAX_PROBE_PROMPT_CODE_POINTS, probePromptSchema } from "./policy.js";
 import { supervisorConfigSchema } from "./supervisor.js";
 
 /**
@@ -31,7 +32,20 @@ export const configSchemasByFile: Record<string, z.ZodType> = {
  * shape is what an editor needs; the loader still enforces the rest.
  */
 export function toConfigJsonSchema(schema: z.ZodType): unknown {
-  return z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+  return z.toJSONSchema(schema, {
+    io: "input",
+    unrepresentable: "any",
+    // probePromptSchema uses a custom runtime refinement because
+    // JavaScript string.length counts UTF-16 code units while JSON
+    // Schema maxLength counts Unicode code points. Preserve the
+    // representable standard keyword on every reuse of this exact
+    // schema (fleet policy and supervisor probe request).
+    override: ({ zodSchema, jsonSchema }) => {
+      if (zodSchema === probePromptSchema) {
+        jsonSchema.maxLength = MAX_PROBE_PROMPT_CODE_POINTS;
+      }
+    },
+  });
 }
 
 /** Byte-exact serialization the generator writes and the test asserts. */

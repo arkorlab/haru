@@ -209,6 +209,20 @@ const hasNoTrainingSlots = (domain: DomainSnapshot): boolean =>
 const hasNoInferenceSlots = (domain: DomainSnapshot): boolean =>
   domain.slots.every((s) => s.kind !== "inference");
 
+/** Layout-bound model names are the only local vLLM processes whose
+ * status/probe can affect this fleet. Passing this selector to the
+ * supervisor prevents an unrelated configured model from consuming
+ * the whole heartbeat or step budget. */
+export function configuredInferenceModelNames(
+  domain: DomainSnapshot,
+): string[] {
+  return domain.slots.flatMap((slot) =>
+    slot.spec.kind === "inference"
+      ? slot.spec.models.map((model) => model.name)
+      : [],
+  );
+}
+
 /**
  * Whether EVERY inference model the layout binds to this domain is
  * reported by the supervisor with the given sleeping flag. Matching
@@ -230,12 +244,12 @@ export function isEveryConfiguredInferenceModel(
       .flatMap((s) => s.models ?? [])
       .map((m) => [m.name, m.sleeping]),
   );
-  const configured = domain.slots.flatMap((slot) =>
-    slot.spec.kind === "inference" ? slot.spec.models : [],
-  );
+  const configured = configuredInferenceModelNames(domain);
   return (
     configured.length > 0 &&
-    configured.every((m) => reportedSleeping.get(m.name) === isSleeping)
+    configured.every(
+      (modelName) => reportedSleeping.get(modelName) === isSleeping,
+    )
   );
 }
 
@@ -307,7 +321,10 @@ async function stopTraining(context: StepContext): Promise<StepOutcome> {
         options,
         context.fleet.policy.trainingStopGraceMs,
       );
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       // Every training slot the LAYOUT declares must report idle: a
       // supervisor omitting a slot (config drift) is not proof it
       // stopped. Stay pending until the step budget surfaces it.
@@ -384,7 +401,10 @@ async function wakeVllm(context: StepContext): Promise<StepOutcome> {
       // models; that is fine because completion is observed via the
       // status poll below on later nudges.
       await supervisorClient.wake(options);
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       if (!isEveryConfiguredInferenceModel(domain, status, false)) {
         return PENDING;
       }
@@ -441,7 +461,7 @@ async function probe(context: StepContext): Promise<StepOutcome> {
         options,
         context.fleet.policy.probe.prompt,
         context.fleet.policy.probe.maxTokens,
-        probeBudgetMs,
+        [...expectedModels],
       );
       // The decision is over the LAYOUT-bound models only, never the
       // supervisor's aggregate `ok`: an extra model in the supervisor
@@ -531,7 +551,10 @@ async function demoteOldSleep(context: StepContext): Promise<StepOutcome> {
       // fight still-awake vLLM servers for VRAM. Staying PENDING
       // resolves via the best-effort budget, which deliberately SKIPS
       // demote_old_train when this step never completed.
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       if (!isEveryConfiguredInferenceModel(domain, status, true)) {
         return PENDING;
       }
@@ -559,7 +582,10 @@ async function demoteOldTrain(context: StepContext): Promise<StepOutcome> {
       // only a status poll may mark the DB slots as training. Being
       // best-effort, a never-starting run resolves via the step budget
       // (advance + degrade) instead of failing the promotion.
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       if (!isEveryConfiguredTrainingSlot(domain, status, "running")) {
         return PENDING;
       }
@@ -592,7 +618,10 @@ async function sleepVllm(context: StepContext): Promise<StepOutcome> {
     { role: "target", isNoop: hasNoInferenceSlots },
     async (domain, options) => {
       await supervisorClient.sleep(options);
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       // Every LAYOUT-bound model must report asleep: a drifted
       // supervisor omitting a model (or reporting none) proves
       // nothing about it.
@@ -624,7 +653,10 @@ async function startTraining(context: StepContext): Promise<StepOutcome> {
       // error handler), so completion is what the status poll reports,
       // not the 200 on the start call. Same vacuous-truth guard as
       // stop_training: zero reported training slots is config drift.
-      const status = await supervisorClient.status(options);
+      const status = await supervisorClient.status(
+        options,
+        configuredInferenceModelNames(domain),
+      );
       if (!isEveryConfiguredTrainingSlot(domain, status, "running")) {
         return PENDING;
       }

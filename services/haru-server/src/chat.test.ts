@@ -6,7 +6,7 @@ import {
   transitionDomainSlots,
 } from "@haru/db";
 import { createTestDatabase } from "@haru/db/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "./app.js";
 import { breakableDatabase } from "./failing-database.test-helper.js";
@@ -36,6 +36,20 @@ afterEach(async () => {
   await close();
 });
 
+/** Remove the seeded fleet in foreign-key-safe order. The active
+ * pointer and operation ownership constraints deliberately prevent a
+ * domain from disappearing while routing or operation history still
+ * names it. These cache tests need to simulate an externally deleted
+ * fleet, so clear those references explicitly before deleting the
+ * topology rows. */
+async function deleteAllFleetState(): Promise<void> {
+  await database.delete(schema.operations);
+  await database.delete(schema.slots);
+  await database.update(schema.fleets).set({ activeDomainId: null });
+  await database.delete(schema.domains);
+  await database.delete(schema.fleets);
+}
+
 function chatApp(options: {
   chatCalls?: FakeUpstreamCall[];
   fetchFn?: typeof fetch;
@@ -57,6 +71,25 @@ function chatApp(options: {
         chatCalls: options.chatCalls,
       }),
   });
+}
+
+function countingDatabase(real: HaruDatabase): {
+  database: HaruDatabase;
+  selectAccesses: () => number;
+} {
+  let selectAccesses = 0;
+  const counted = new Proxy(real, {
+    get(target, property, receiver) {
+      if (property === "select") {
+        selectAccesses += 1;
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  return {
+    database: counted,
+    selectAccesses: () => selectAccesses,
+  };
 }
 
 const chatBody = JSON.stringify({
@@ -88,6 +121,62 @@ describe("POST /v1/chat/completions", () => {
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
     expect(chatCalls[0]?.body).toBe(chatBody);
+    expect(chatCalls[0]?.bodyBytes).toEqual(new TextEncoder().encode(chatBody));
+  });
+
+  it("preserves an optional UTF-8 BOM and non-canonical JSON bytes", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const app = chatApp({ chatCalls });
+    const json = [
+      "{",
+      '  "model" : "example-chat-small",',
+      '  "messages" : [],',
+      '  "some_vendor_extension" : { "keep" : true }',
+      "}",
+    ].join("\n");
+    const encoded = new TextEncoder().encode(json);
+    const bodyBytes = new Uint8Array(encoded.byteLength + 3);
+    bodyBytes.set([239, 187, 191]);
+    bodyBytes.set(encoded, 3);
+
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: bodyBytes,
+    });
+
+    expect(response.status).toBe(200);
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]?.bodyBytes).toEqual(bodyBytes);
+  });
+
+  it("400s invalid UTF-8 instead of forwarding replacement characters", async () => {
+    const chatCalls: FakeUpstreamCall[] = [];
+    const app = chatApp({ chatCalls });
+    const prefix = new TextEncoder().encode(
+      '{"model":"example-chat-small","messages":[],"extension":"',
+    );
+    const suffix = new TextEncoder().encode('"}');
+    const bodyBytes = new Uint8Array(prefix.length + 1 + suffix.length);
+    bodyBytes.set(prefix);
+    bodyBytes[prefix.length] = 255;
+    bodyBytes.set(suffix, prefix.length + 1);
+
+    const response = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-haru-fleet": "default",
+      },
+      body: bodyBytes,
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_request");
+    expect(chatCalls).toHaveLength(0);
   });
 
   it("413s a request body over the configured size cap", async () => {
@@ -501,6 +590,96 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     return { app, chat, ...broken };
   }
 
+  it("coalesces a concurrent full snapshot load but still reads each pointer", async () => {
+    const request = (app: ReturnType<typeof createApp>) =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+      });
+
+    // Establish how many select-accesses one cold pointer + snapshot
+    // cycle uses without coupling this assertion to the repo query
+    // builder's internal shape.
+    const baseline = countingDatabase(database);
+    expect(
+      (await request(chatApp({ database: baseline.database }))).status,
+    ).toBe(200);
+    const singleRequestAccesses = baseline.selectAccesses();
+
+    const broken = breakableDatabase(database);
+    const counted = countingDatabase(broken.database);
+    const app = chatApp({ database: counted.database });
+    // Request A has completed its own pointer read and is suspended at
+    // the first access of the expensive full snapshot load.
+    const gate = broken.gateSelect(2);
+    const requestA = request(app);
+    await gate.reached;
+    const accessesAtSnapshot = counted.selectAccesses();
+
+    // Request B must perform its own pointer read, then join A's load.
+    const requestB = request(app);
+    await vi.waitFor(() => {
+      expect(counted.selectAccesses()).toBe(accessesAtSnapshot + 1);
+    });
+
+    gate.proceed();
+    const [responseA, responseB] = await Promise.all([requestA, requestB]);
+    expect(responseA.status).toBe(200);
+    expect(responseB.status).toBe(200);
+    // One full load plus two independent pointer reads: only the second
+    // pointer is extra compared with a single cold request.
+    expect(counted.selectAccesses()).toBe(singleRequestAccesses + 1);
+  });
+
+  it("starts the cache TTL when a slow snapshot is published", async () => {
+    let nowMs = Date.now();
+    const broken = breakableDatabase(database);
+    const app = chatApp({
+      database: broken.database,
+      now: () => new Date(nowMs),
+      config: { snapshotCacheTtlMs: 1000 },
+    });
+    const chat = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": "default",
+        },
+        body: chatBody,
+      });
+
+    const gate = broken.gateSelect(2);
+    const slowLoad = chat();
+    await gate.reached;
+    // More than a full TTL elapses while the database read is pending.
+    nowMs += 1001;
+    gate.proceed();
+    expect((await slowLoad).status).toBe(200);
+
+    // Let the next pointer read through but make any attempted snapshot
+    // refresh fail. A TTL stamped at publish time is still fresh, so the
+    // request never attempts that refresh and has no stale marker.
+    broken.breakAfterSelects(1);
+    const immediate = await chat();
+    expect(immediate.status).toBe(200);
+    expect(immediate.headers.get("x-haru-routing")).toBeNull();
+  });
+
+  it("clears a failed single-flight entry so a healthy retry can load", async () => {
+    const { chat, breakAfterSelects, heal } = failOpenApp({});
+    // The pointer answers, then the cold full-snapshot read fails.
+    breakAfterSelects(1);
+    expect((await chat()).status).toBe(503);
+
+    heal();
+    expect((await chat()).status).toBe(200);
+  });
+
   it("keeps serving the last known routing, past the cache TTL", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     let nowMs = Date.now();
@@ -695,9 +874,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
 
     // The fleet is deleted. The healthy request that observes it must
     // drop the snapshot AND every alias, not just the spelling it used.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     expect((await chat("default")).status).toBe(404);
 
     // A later outage must not resurrect the deleted fleet through the
@@ -729,9 +906,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     const fleetId = (await getFleetSnapshot(database, "default"))!.id;
     expect((await chat("default")).status).toBe(200);
 
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
 
     // The healthy request that observes the deletion uses the UUID form,
     // which no alias points at (the cache was warmed through the slug):
@@ -815,9 +990,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect((await chat("default")).status).toBe(200);
 
     // The fleet is deleted and a NEW one takes its slug.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     const replacement = testLayout() as {
       slug: string;
       activeDomainSlug: string;
@@ -849,9 +1022,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
 
     // While R1's response is in flight, the fleet is deleted and a NEW
     // one takes the slug; a fresh request learns the rebinding.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     const replacement = testLayout() as {
       slug: string;
       activeDomainSlug: string;
@@ -883,9 +1054,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     const { chat, breakIt, gateSelect } = failOpenApp({});
     // Learn a fleet id, then delete the fleet: the id names nothing.
     const goneId = (await getFleetSnapshot(database, "default"))!.id;
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
 
     // R1's pointer read for the id executes NOW (not_found) but its
     // response is delayed in transit.
@@ -920,9 +1089,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
   it("a delayed UPPERCASE not_found cannot evict a fleet resolved via lowercase id", async () => {
     const { chat, breakIt, gateSelect } = failOpenApp({});
     const goneId = (await getFleetSnapshot(database, "default"))!.id;
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
 
     // R1 asks with the UPPERCASE spelling of the id; its (not_found)
     // response is delayed in transit. UUID identity is case-insensitive,
@@ -964,9 +1131,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     // (that would shadow an id owner): only the snapshot knows the slug.
     expect((await chat(fleetId)).status).toBe(200);
 
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
 
     // The deletion is observed through the SLUG. The entry is keyed by
     // the id, so nothing but the cached snapshot's own slug can connect
@@ -989,9 +1154,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     // its slug (the slug charset admits UUID-shaped slugs). Its active
     // domain is beta, so the two fleets are distinguishable by the
     // upstream they route to.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     const slugOwner = testLayout() as {
       slug: string;
       activeDomainSlug: string;
@@ -1109,12 +1272,12 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(chatCalls).toHaveLength(1);
   });
 
-  it("does not let a failed reload evict the fresh entry a concurrent request cached", async () => {
+  it("does not let an older failed reload evict a newer revision cached concurrently", async () => {
     const chatCalls: FakeUpstreamCall[] = [];
     const { chat, breakIt, gateSelect } = failOpenApp({ chatCalls });
     expect((await chat()).status).toBe(200);
 
-    // A promotion commits: revision 2, beta serving.
+    // A pointer move commits: revision 2, beta serving.
     const snapshot = await getFleetSnapshot(database, "default");
     const alphaId = snapshot!.domains.find((d) => d.slug === "alpha")!.id;
     const betaId = snapshot!.domains.find((d) => d.slug === "beta")!.id;
@@ -1133,26 +1296,27 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     const requestA = chat();
     await gate.reached;
 
-    // Request B completes the full healthy cycle meanwhile and caches the
-    // fresh revision-2 snapshot.
+    // The pointer moves again while A's revision-2 load is pending.
+    // Request B sees revision 3, so it must not join A's single-flight
+    // entry: route revision is part of the sharing key.
+    await switchActive(database, snapshot!.id, betaId, alphaId);
     expect((await chat()).status).toBe(200);
-    expect(chatCalls[1]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+    expect(chatCalls[1]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
 
-    // A's load now fails. Judging by the entry A saw BEFORE its load
-    // would quarantine (and 503 past) B's fresh entry; the entry cached
-    // NOW matches the pointer A read, so A must serve it and keep it.
+    // A's older load now fails. It cannot serve B's revision-3 snapshot
+    // as though it matched A's revision-2 pointer, so A fails closed,
+    // but it must not quarantine the newer entry.
     gate.fail();
     const responseA = await requestA;
-    expect(responseA.status).toBe(200);
-    expect(responseA.headers.get("x-haru-routing")).toBe("stale");
-    expect(chatCalls[2]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+    expect(responseA.status).toBe(503);
 
-    // The fresh entry survived: a full outage still fails open.
+    // The newer entry survived: a full outage still fails open onto
+    // revision 3.
     breakIt();
     const outage = await chat();
     expect(outage.status).toBe(200);
     expect(outage.headers.get("x-haru-routing")).toBe("stale");
-    expect(chatCalls[3]?.url).toBe(`${BETA_SERVING}/v1/chat/completions`);
+    expect(chatCalls[2]?.url).toBe(`${ALPHA_SERVING}/v1/chat/completions`);
   });
 
   it("does not let a slow reload overwrite a newer revision cached concurrently", async () => {
@@ -1221,9 +1385,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
 
     // The fleet is deleted, and request B observes it: 404 plus a
     // wholesale forget of the entry and its aliases.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     expect((await chat()).status).toBe(404);
 
     // A's pre-deletion read completes LAST. Publishing it would put the
@@ -1257,9 +1419,7 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
 
     // The id owner is deleted and a DIFFERENT fleet takes the string as
     // its slug.
-    await database.delete(schema.slots);
-    await database.delete(schema.domains);
-    await database.delete(schema.fleets);
+    await deleteAllFleetState();
     const slugOwner = testLayout() as {
       slug: string;
       activeDomainSlug: string;

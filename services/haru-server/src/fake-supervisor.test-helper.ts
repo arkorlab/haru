@@ -198,6 +198,27 @@ function supervisorResponse(
 export interface FakeUpstreamCall {
   url: string;
   body: string;
+  bodyBytes: Uint8Array;
+}
+
+function copyBodyBytes(body: BodyInit | null | undefined): Uint8Array {
+  if (body === undefined || body === null) {
+    return new Uint8Array();
+  }
+  if (typeof body === "string") {
+    return new TextEncoder().encode(body);
+  }
+  if (body instanceof ArrayBuffer) {
+    return new Uint8Array(body).slice();
+  }
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(
+      body.buffer,
+      body.byteOffset,
+      body.byteLength,
+    ).slice();
+  }
+  throw new TypeError("fake chat upstream received an unsupported body type");
 }
 
 /**
@@ -226,9 +247,11 @@ export function buildFakeFetch(options: {
       );
     }
     if (url.pathname === "/v1/chat/completions") {
+      const bodyBytes = copyBodyBytes(init?.body);
       options.chatCalls?.push({
         url: url.href,
-        body: typeof init?.body === "string" ? init.body : "",
+        body: new TextDecoder().decode(bodyBytes),
+        bodyBytes,
       });
       const sse = [
         'data: {"choices":[{"delta":{"content":"hello"}}]}',

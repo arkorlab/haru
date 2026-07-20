@@ -140,8 +140,9 @@ Dependency graph (enforce it when adding imports):
   run with `--enable-sleep-mode` + `VLLM_SERVER_DEV_MODE=1`). The supervisor's
   bearer-authenticated API is the only external control surface, and the chat
   proxy only ever constructs `/v1/chat/completions` paths.
-- The chat proxy forwards the request body as **raw text** (byte-identical,
-  vendor extensions survive) and copies only `content-type` back (plus
+- The chat proxy forwards the **original raw body bytes** (a decoded copy is
+  parsed only to extract `model`; vendor extensions and byte identity survive)
+  and copies only `content-type` back (plus
   `X-Haru-Routing: stale` on the fail-open path); the abort timer bounds TTFB
   only, never the streaming body, and a pre-header client disconnect aborts
   the upstream (bare 499 back). `model` is a lowercase routing key

@@ -23,11 +23,15 @@ import {
   transitionDomain,
   transitionSlot,
 } from "@haru/db";
-import { operationStepSchema } from "@haru/protocol";
+import {
+  operationStepSchema,
+  SUPERVISOR_STATUS_TIMEOUT_MS,
+} from "@haru/protocol";
 
 import { SupervisorError, supervisorClient } from "../supervisor-client.js";
 
 import {
+  configuredInferenceModelNames,
   executeStep,
   isEveryConfiguredInferenceModel,
   resolveSourceDomain,
@@ -42,9 +46,6 @@ import type {
   OperationStep,
   SupervisorStatus,
 } from "@haru/protocol";
-
-/** Timeout for one heartbeat status call during a reconcile tick. */
-const HEARTBEAT_TIMEOUT_MS = 5000;
 
 export interface ReconcilerDependencies {
   database: HaruDatabase;
@@ -216,12 +217,15 @@ async function pollOneDomain(
     fetchFn: dependencies.fetchFn,
     baseUrl: domain.supervisorUrl,
     token: dependencies.supervisorToken,
-    timeoutMs: HEARTBEAT_TIMEOUT_MS,
+    timeoutMs: SUPERVISOR_STATUS_TIMEOUT_MS,
   };
   const isActiveDomain = domain.id === fleet.activeDomainId;
   const at = dependencies.now();
   try {
-    const status = await supervisorClient.status(options);
+    const status = await supervisorClient.status(
+      options,
+      configuredInferenceModelNames(domain),
+    );
     // Slot health is mirrored BEFORE the heartbeat becomes fresh: the
     // escalation CAS trusts "fresh heartbeat AND no failed inference
     // slot" in one statement, so publishing freshness first would open

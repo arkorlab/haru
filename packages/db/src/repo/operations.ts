@@ -53,19 +53,38 @@ export async function createOperation(
   },
 ): Promise<CreateOperationResult> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    // Build the candidate from the fleet joined to the requested
+    // domain, so ownership and source-pointer capture are part of the
+    // INSERT's own statement snapshot. A cross-fleet target produces
+    // zero candidate rows and can never reach the operations table.
+    const candidate = database
+      .select({
+        id: sql<string>`gen_random_uuid()`.as("id"),
+        fleetId: fleets.id,
+        kind: sql<OperationKind>`${input.kind}::operation_kind`.as("kind"),
+        state: sql<"pending">`'pending'::operation_state`.as("state"),
+        targetDomainId: domains.id,
+        sourceDomainId: fleets.activeDomainId,
+        currentStep: sql<OperationStep | null>`null`.as("current_step"),
+        stepStartedAt: sql<Date | null>`null`.as("step_started_at"),
+        routingCommitted: sql<boolean>`false`.as("routing_committed"),
+        error: sql<OperationError | null>`null`.as("error"),
+        createdAt: sql<Date>`now()`.as("created_at"),
+        updatedAt: sql<Date>`now()`.as("updated_at"),
+        finishedAt: sql<Date | null>`null`.as("finished_at"),
+      })
+      .from(fleets)
+      .innerJoin(
+        domains,
+        and(
+          eq(domains.fleetId, fleets.id),
+          eq(domains.id, input.targetDomainId),
+        ),
+      )
+      .where(eq(fleets.id, input.fleetId));
     const inserted = await database
       .insert(operations)
-      .values({
-        fleetId: input.fleetId,
-        kind: input.kind,
-        targetDomainId: input.targetDomainId,
-        // Captured INSIDE the insert statement, not from the caller's
-        // snapshot: an operation completing between the caller's read
-        // and this insert winning the one-in-flight slot could move
-        // the pointer, and post-commit cleanup would then act on a
-        // stale "old active".
-        sourceDomainId: sql`(select ${fleets.activeDomainId} from ${fleets} where ${fleets.id} = ${input.fleetId})`,
-      })
+      .select(candidate)
       .onConflictDoNothing()
       .returning();
     const insertedRow = inserted[0];

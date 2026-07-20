@@ -298,6 +298,14 @@ intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   in route intent) and escalates to `failed` (triggering auto-failover
   when enabled) only after staying degraded past the policy grace
   (default 60 s); tune `degradedGraceMs` to taste.
+- **Synthetic probe policy is bounded.** `policy.probe.prompt` is at
+  most 8,192 Unicode code points, matching JSON Schema `maxLength`, and
+  `policy.probe.maxTokens` is at most 256. The database schema enforces
+  both bounds for `db:push`; migration `0003` also checks stored fleet
+  policies before an upgrade and stops instead of truncating an
+  existing value above either limit. Shorten, lower, or remove the
+  offending persisted key before upgrading; re-applying a layout does
+  not update an existing policy row.
 - **Model binding names are lowercase routing keys** and the vLLM
   server behind each binding must serve the same lowercase name (e.g.
   `--served-model-name`); the chat proxy matches exactly and forwards

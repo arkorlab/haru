@@ -3,6 +3,9 @@ import {
   gpuMemorySchema,
   joinUrl,
   probeResponseSchema,
+  SUPERVISOR_INNER_TIMEOUT_KIND,
+  supervisorInnerTimeoutMs,
+  SUPERVISOR_STATUS_MODEL_TIMEOUT_MS,
   supervisorStatusSchema,
   type GpuMemory,
   type ProbeResponse,
@@ -40,6 +43,14 @@ export interface SupervisorClientOptions {
   token: string | undefined;
   timeoutMs: number;
 }
+
+/**
+ * Keep selector-bearing supervisor URLs below common proxy/request-line
+ * limits. This is NOT a model-name/count product limit: if the encoded
+ * selector exceeds it, the call falls back to the legacy all-model
+ * shape and the server still applies its layout-bound verdict locally.
+ */
+const MAX_SUPERVISOR_QUERY_CHARACTERS = 4096;
 
 async function call(
   options: SupervisorClientOptions,
@@ -84,6 +95,68 @@ async function call(
 }
 
 /**
+ * Select only the layout-bound models on status/probe calls. Query
+ * parameters preserve compatibility with older supervisors, which
+ * ignore them and retain their all-model behaviour. A lone empty
+ * `model` value represents an explicit empty selection; omission
+ * continues to mean all configured models.
+ */
+function pathWithModelSelector(
+  path: string,
+  modelNames: readonly string[] | undefined,
+  timeoutMs?: number,
+): string {
+  const query = new URLSearchParams();
+  if (modelNames !== undefined) {
+    const uniqueModelNames = [...new Set(modelNames)];
+    if (uniqueModelNames.length === 0) {
+      query.append("model", "");
+    } else {
+      for (const modelName of uniqueModelNames) {
+        query.append("model", modelName);
+      }
+    }
+  }
+  if (timeoutMs !== undefined) {
+    query.set("timeoutMs", String(timeoutMs));
+  }
+  let serialized = query.toString();
+  if (
+    modelNames !== undefined &&
+    serialized.length > MAX_SUPERVISOR_QUERY_CHARACTERS
+  ) {
+    // Drop ONLY the optimization selector. In particular, status must
+    // retain its shorter inner timeout so an all-model fallback cannot
+    // consume the outer heartbeat budget.
+    const fallbackQuery = new URLSearchParams();
+    if (timeoutMs !== undefined) {
+      fallbackQuery.set("timeoutMs", String(timeoutMs));
+    }
+    // The selector was dropped, so model absence alone would look like
+    // an old client's outer-timeout request to a new supervisor. Mark
+    // the preserved timeout as already-inner to prevent a second
+    // headroom subtraction. Old supervisors ignore this query key.
+    fallbackQuery.set("timeoutKind", SUPERVISOR_INNER_TIMEOUT_KIND);
+    serialized = fallbackQuery.toString();
+  }
+  return serialized === "" ? path : `${path}?${serialized}`;
+}
+
+function withFrozenTimeout(
+  options: SupervisorClientOptions,
+  timeoutMs: number,
+): SupervisorClientOptions {
+  // Spell out the fields: spreading `options` would evaluate a
+  // clock-backed timeout getter a second time before this override.
+  return {
+    fetchFn: options.fetchFn,
+    baseUrl: options.baseUrl,
+    token: options.token,
+    timeoutMs,
+  };
+}
+
+/**
  * Parse a supervisor response body, folding schema violations into
  * SupervisorError. A drifted supervisor version must surface as "this
  * supervisor call failed" (which callers treat per-domain), never as a
@@ -105,11 +178,28 @@ function parseAs<T>(schema: z.ZodType<T>, path: string, body: unknown): T {
  * reconciler composes them into re-entrant step executors.
  */
 export const supervisorClient = {
-  async status(options: SupervisorClientOptions): Promise<SupervisorStatus> {
+  async status(
+    options: SupervisorClientOptions,
+    modelNames?: readonly string[],
+  ): Promise<SupervisorStatus> {
+    // Freeze a potentially clock-backed getter exactly once. The
+    // supervisor receives a strictly shorter per-vLLM timeout, leaving
+    // headroom to serialize and return sleeping:null before this HTTP
+    // call's outer timer fires.
+    const outerTimeoutMs = options.timeoutMs;
+    const innerTimeoutMs = Math.min(
+      SUPERVISOR_STATUS_MODEL_TIMEOUT_MS,
+      supervisorInnerTimeoutMs(outerTimeoutMs),
+    );
+    const path = pathWithModelSelector(
+      "/v1/status",
+      modelNames,
+      innerTimeoutMs,
+    );
     return parseAs(
       supervisorStatusSchema,
       "/v1/status",
-      await call(options, "GET", "/v1/status"),
+      await call(withFrozenTimeout(options, outerTimeoutMs), "GET", path),
     );
   },
   async stopTraining(
@@ -138,19 +228,22 @@ export const supervisorClient = {
     options: SupervisorClientOptions,
     prompt: string,
     maxTokens: number,
-    timeoutMs: number,
+    modelNames: readonly string[],
   ): Promise<ProbeResponse> {
-    // The probe budget rides in the body so the supervisor's inner
-    // per-model timers stay in sync with this client call's timeout;
-    // otherwise a lowered policy budget would abort the HTTP call
-    // while the supervisor keeps the vLLM request running.
+    // Freeze the remaining step budget exactly once. The shorter
+    // timeout rides in the body while the full value bounds this HTTP
+    // exchange, so the supervisor can report per-model timeout results
+    // before the reconciler stops waiting.
+    const outerTimeoutMs = options.timeoutMs;
+    const innerTimeoutMs = supervisorInnerTimeoutMs(outerTimeoutMs);
+    const path = pathWithModelSelector("/v1/probe", modelNames);
     return parseAs(
       probeResponseSchema,
       "/v1/probe",
-      await call(options, "POST", "/v1/probe", {
+      await call(withFrozenTimeout(options, outerTimeoutMs), "POST", path, {
         prompt,
         maxTokens,
-        timeoutMs,
+        timeoutMs: innerTimeoutMs,
       }),
     );
   },

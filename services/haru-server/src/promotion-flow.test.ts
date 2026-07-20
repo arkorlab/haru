@@ -263,9 +263,9 @@ describe("full promotion flow", () => {
 
   it("passes the policy probe budget through to the supervisor probe call", async () => {
     await seed({ probeTimeoutMs: 12_345 });
-    // Frozen clock: the probe request budget is min(probeTimeoutMs,
-    // remaining step budget), and with zero elapsed time those are
-    // equal, keeping the wire assertion exact.
+    // Frozen clock: the outer probe request budget is exactly the
+    // policy value. The supervisor receives a 1s-shorter inner budget
+    // so it can serialize timeout results before the outer call ends.
     const frozen = new Date();
     const app = makeApp(() => frozen);
 
@@ -276,7 +276,7 @@ describe("full promotion flow", () => {
     });
     const result = await reconcileUntilSettled(app);
     expect((result.operation as { state: string }).state).toBe("succeeded");
-    expect(betaSupervisor.lastProbeBody).toMatchObject({ timeoutMs: 12_345 });
+    expect(betaSupervisor.lastProbeBody).toMatchObject({ timeoutMs: 11_345 });
   });
 
   it("re-promoting after success is an idempotent no-op", async () => {
