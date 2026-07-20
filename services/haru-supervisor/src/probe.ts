@@ -22,6 +22,7 @@ export async function probeModel(
   prompt: string,
   maxTokens: number,
   timeoutMs: number = DEFAULT_PROBE_CALL_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<ProbeResult> {
   const startedAt = now();
   try {
@@ -39,6 +40,7 @@ export async function probeModel(
           max_tokens: maxTokens,
           stream: false,
         }),
+        signal,
       },
       timeoutMs,
     );

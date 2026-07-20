@@ -13,7 +13,7 @@ catalog:
   "@neondatabase/serverless": "^1.1.0"
   "@stylistic/eslint-plugin": "^5.10.0"
   "@types/eslint-plugin-promise": "^7.3.0"
-  "@types/node": "^26"
+  "@types/node": "^24.10.0"
   "@types/pg": "^8.20.0"
   "@vitest/coverage-v8": "^4.1.10"
   "@vitest/eslint-plugin": "^1.6.17"

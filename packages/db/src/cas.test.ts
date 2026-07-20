@@ -1,4 +1,5 @@
 import { fleetLayoutSchema } from "@haru/protocol";
+import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { transitionDomain, markDomainSeen } from "./repo/domains.js";
@@ -6,6 +7,7 @@ import { switchActive } from "./repo/fleets.js";
 import { applyFleetLayout } from "./repo/layout.js";
 import { transitionDomainSlots, transitionSlot } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
+import { operations } from "./schema/index.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
 import type { HaruDatabase } from "./client.js";
@@ -56,6 +58,24 @@ describe("switchActive", () => {
     expect(after?.routeRevision).toBe(fleet.routeRevision);
   });
 
+  it("refuses to point at another fleet's domain", async () => {
+    const otherLayout = loadExampleFleetLayout() as { slug: string };
+    otherLayout.slug = "other";
+    await applyFleetLayout(database, otherLayout);
+    const otherFleet = await getFleetSnapshot(database, "other");
+    const otherTarget = otherFleet?.domains.find(
+      (domain) => domain.slug === "beta",
+    );
+    if (!otherTarget) throw new Error("second fleet seed failed");
+
+    expect(
+      await switchActive(database, fleet.id, alpha().id, otherTarget.id),
+    ).toBeNull();
+    const after = await getFleetSnapshot(database, "default");
+    expect(after?.activeDomainId).toBe(alpha().id);
+    expect(after?.routeRevision).toBe(fleet.routeRevision);
+  });
+
   it("requireRunningOperationId gates the pointer commit on the operation state", async () => {
     const { createOperation, claimOperation, failOperation } =
       await import("./repo/operations.js");
@@ -96,6 +116,60 @@ describe("switchActive", () => {
         fleet.id,
         beta().id,
         alpha().id,
+        operation.id,
+      ),
+    ).toBeNull();
+  });
+
+  it("requires the exact promote target and switch_active step", async () => {
+    const { createOperation, claimOperation } =
+      await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "promote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "verify_gpu");
+
+    // A running promote is not sufficient: only its switch_active step
+    // may authorise the routing commit.
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        alpha().id,
+        beta().id,
+        operation.id,
+      ),
+    ).toBeNull();
+    // Nor can an operation authorise a destination other than the
+    // target captured when it was created.
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        alpha().id,
+        alpha().id,
+        operation.id,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not let a demote operation authorise a pointer move", async () => {
+    const { createOperation, claimOperation } =
+      await import("./repo/operations.js");
+    const { operation } = await createOperation(database, {
+      fleetId: fleet.id,
+      kind: "demote",
+      targetDomainId: beta().id,
+    });
+    await claimOperation(database, operation.id, "switch_active");
+    expect(
+      await switchActive(
+        database,
+        fleet.id,
+        alpha().id,
+        beta().id,
         operation.id,
       ),
     ).toBeNull();
@@ -535,16 +609,26 @@ describe("failOperationWithPromotionCleanup", () => {
     });
     const other = await getFleetSnapshot(database, "other");
     if (!other) throw new Error("second fleet seed failed");
-    const {
-      createOperation,
-      claimOperation,
-      failOperationWithPromotionCleanup,
-    } = await import("./repo/operations.js");
-    const { operation } = await createOperation(database, {
-      fleetId: other.id,
-      kind: "promote",
-      targetDomainId: beta().id,
-    });
+    const { claimOperation, failOperationWithPromotionCleanup } =
+      await import("./repo/operations.js");
+    // Simulate an operation inherited from an older or manually
+    // drifted database. Normal writes cannot create this row now:
+    // createOperation uses INSERT ... SELECT and the composite FK is
+    // the database-level backstop.
+    await database.execute(
+      sql`ALTER TABLE "operations" DROP CONSTRAINT "operations_target_domain_membership_fk"`,
+    );
+    const inserted = await database
+      .insert(operations)
+      .values({
+        fleetId: other.id,
+        kind: "promote",
+        targetDomainId: beta().id,
+        sourceDomainId: other.activeDomainId,
+      })
+      .returning();
+    const operation = inserted[0];
+    if (!operation) throw new Error("drifted operation insert failed");
     await claimOperation(database, operation.id, "probe");
     const failedRow = await failOperationWithPromotionCleanup(
       database,

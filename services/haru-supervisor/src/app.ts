@@ -1,8 +1,11 @@
 import {
-  isBearerTokenValid,
   errorBody,
+  isBearerTokenValid,
   probeRequestSchema,
   readOptionalJsonBody,
+  SUPERVISOR_INNER_TIMEOUT_KIND,
+  supervisorInnerTimeoutMs,
+  supervisorStatusQuerySchema,
   trainingStopRequestSchema,
   vllmTargetRequestSchema,
   type ReadyResponse,
@@ -10,6 +13,7 @@ import {
   type SupervisorSlotStatus,
 } from "@haru/protocol";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 
 import { readGpuMemory, type ExecFunction } from "./gpu.js";
 import { probeModel } from "./probe.js";
@@ -20,20 +24,31 @@ import { isServerSleeping, sleepServer, wakeServer } from "./vllm-client.js";
 async function sleepingOrNull(
   fetchFunction: typeof fetch,
   port: number,
+  timeoutMs: number | undefined,
+  signal: AbortSignal,
 ): Promise<boolean | null> {
   try {
-    return await isServerSleeping(fetchFunction, port);
+    return await isServerSleeping(fetchFunction, port, timeoutMs, signal);
   } catch {
     return null;
   }
 }
 
-/** Ready = every inference model is awake and reachable. */
-function isReady(statuses: SupervisorSlotStatus[]): boolean {
+/** Ready = every requested inference model exists, is awake and reachable. */
+function isReady(
+  statuses: SupervisorSlotStatus[],
+  requestedModelNames?: readonly string[],
+): boolean {
   const models = statuses
     .filter((s) => s.kind === "inference")
     .flatMap((s) => s.models ?? []);
-  return models.length > 0 && models.every((m) => m.sleeping === false);
+  const reportedModelNames = new Set(models.map((model) => model.name));
+  return (
+    models.length > 0 &&
+    models.every((model) => model.sleeping === false) &&
+    (requestedModelNames === undefined ||
+      requestedModelNames.every((name) => reportedModelNames.has(name)))
+  );
 }
 
 export interface SupervisorDependencies {
@@ -48,6 +63,38 @@ export interface SupervisorDependencies {
 }
 
 const DEFAULT_TRAINING_GRACE_MS = 30_000;
+const SUPERVISOR_MAX_BODY_BYTES = 64 * 1024;
+
+const supervisorBodyLimit = bodyLimit({
+  maxSize: SUPERVISOR_MAX_BODY_BYTES,
+  onError: (c) =>
+    c.json(
+      errorBody(
+        "payload_too_large",
+        `request body exceeds the ${String(SUPERVISOR_MAX_BODY_BYTES)}-byte limit`,
+      ),
+      413,
+    ),
+});
+
+/**
+ * No `model` query means the legacy all-model target. A lone empty
+ * value is the explicit empty selection emitted by haru-server for a
+ * training-only domain.
+ */
+function modelSelectionQuery(
+  values: string[] | undefined,
+): string[] | undefined {
+  return values?.length === 1 && values[0] === "" ? [] : values;
+}
+
+function readSingleQueryValue(
+  values: string[] | undefined,
+): { ok: true; value: string | undefined } | { ok: false } {
+  return values === undefined || values.length === 1
+    ? { ok: true, value: values?.[0] }
+    : { ok: false };
+}
 
 /**
  * The GPU-domain-side control surface. vLLM's sleep/wake admin
@@ -108,22 +155,42 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     }
     await next();
   });
+  // Registered after auth: an unauthenticated oversized upload is
+  // rejected without the body limiter consuming it.
+  app.on("POST", "/v1/*", supervisorBodyLimit);
 
-  async function slotStatuses(): Promise<SupervisorSlotStatus[]> {
+  async function slotStatuses(
+    modelNames: readonly string[] | undefined,
+    timeoutMs: number | undefined,
+    signal: AbortSignal,
+  ): Promise<SupervisorSlotStatus[]> {
     // All local vLLM servers are probed concurrently (across slots,
     // not just within one) so a multi-model host answers /v1/status
     // within one admin-call round trip.
+    const selectedModelNames =
+      modelNames === undefined ? undefined : new Set(modelNames);
     const inferenceStatuses = await Promise.all(
       inferenceSlots.map(
         async (slot): Promise<SupervisorSlotStatus> => ({
           gpuIndex: slot.gpuIndex,
           kind: "inference",
           models: await Promise.all(
-            slot.models.map(async (model) => ({
-              name: model.name,
-              port: model.port,
-              sleeping: await sleepingOrNull(fetchFunction, model.port),
-            })),
+            slot.models
+              .filter(
+                (model) =>
+                  selectedModelNames === undefined ||
+                  selectedModelNames.has(model.name),
+              )
+              .map(async (model) => ({
+                name: model.name,
+                port: model.port,
+                sleeping: await sleepingOrNull(
+                  fetchFunction,
+                  model.port,
+                  timeoutMs,
+                  signal,
+                ),
+              })),
           ),
         }),
       ),
@@ -143,12 +210,48 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   }
 
   app.get("/v1/status", async (c) => {
-    const slots = await slotStatuses();
-    return c.json({ slots, ready: isReady(slots) });
+    const rawTimeoutValues = c.req.queries("timeoutMs");
+    const timeoutKind = readSingleQueryValue(c.req.queries("timeoutKind"));
+    if (!timeoutKind.ok) {
+      return c.json(
+        errorBody("invalid_request", "timeoutKind must appear at most once"),
+        400,
+      );
+    }
+    if (
+      rawTimeoutValues !== undefined &&
+      (rawTimeoutValues.length !== 1 ||
+        !/^[1-9]\d*$/.test(rawTimeoutValues[0] ?? ""))
+    ) {
+      return c.json(
+        errorBody("invalid_request", "timeoutMs must be a positive integer"),
+        400,
+      );
+    }
+    const parsed = supervisorStatusQuerySchema.safeParse({
+      models: modelSelectionQuery(c.req.queries("model")),
+      timeoutMs:
+        rawTimeoutValues === undefined
+          ? undefined
+          : Number(rawTimeoutValues[0]),
+      timeoutKind: timeoutKind.value,
+    });
+    if (!parsed.success) {
+      return c.json(errorBody("invalid_request", parsed.error.message), 400);
+    }
+    const slots = await slotStatuses(
+      parsed.data.models,
+      parsed.data.timeoutMs,
+      c.req.raw.signal,
+    );
+    return c.json({
+      slots,
+      ready: isReady(slots, parsed.data.models),
+    });
   });
 
   app.get("/v1/ready", async (c) => {
-    const slots = await slotStatuses();
+    const slots = await slotStatuses(undefined, undefined, c.req.raw.signal);
     return c.json({ ready: isReady(slots) } satisfies ReadyResponse);
   });
 
@@ -329,6 +432,20 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   });
 
   app.post("/v1/probe", async (c) => {
+    const timeoutKind = readSingleQueryValue(c.req.queries("timeoutKind"));
+    if (!timeoutKind.ok) {
+      return c.json(
+        errorBody("invalid_request", "timeoutKind must appear at most once"),
+        400,
+      );
+    }
+    const selected = supervisorStatusQuerySchema.safeParse({
+      models: modelSelectionQuery(c.req.queries("model")),
+      timeoutKind: timeoutKind.value,
+    });
+    if (!selected.success) {
+      return c.json(errorBody("invalid_request", selected.error.message), 400);
+    }
     // Empty body = "target everything" (all fields optional), but a
     // MALFORMED body must 400 rather than silently widen the target.
     const body = await readOptionalJsonBody(c.req, {});
@@ -339,7 +456,29 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
     if (!parsed.success) {
       return c.json(errorBody("invalid_request", parsed.error.message), 400);
     }
-    const models = inferenceSlots.flatMap((slot) => slot.models);
+    const selectedModelNames =
+      selected.data.models === undefined
+        ? undefined
+        : new Set(selected.data.models);
+    const models = inferenceSlots
+      .flatMap((slot) => slot.models)
+      .filter(
+        (model) =>
+          selectedModelNames === undefined ||
+          selectedModelNames.has(model.name),
+      );
+    // A pre-selector server sends its OUTER probe budget here. Reserve
+    // response headroom on that legacy shape. A new server either
+    // supplies a model selector or, when that selector would make the
+    // URL unsafe, the explicit inner-timeout marker. In both cases it
+    // has already shortened the per-model timeout, so do not subtract
+    // twice.
+    const perModelTimeoutMs =
+      selected.data.models === undefined &&
+      selected.data.timeoutKind !== SUPERVISOR_INNER_TIMEOUT_KIND &&
+      parsed.data.timeoutMs !== undefined
+        ? supervisorInnerTimeoutMs(parsed.data.timeoutMs)
+        : parsed.data.timeoutMs;
     // ok must not be vacuously true: a host with zero configured
     // inference models cannot pass a readiness probe.
     const results = await Promise.all(
@@ -350,12 +489,20 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
           model,
           parsed.data.prompt,
           parsed.data.maxTokens,
-          parsed.data.timeoutMs,
+          perModelTimeoutMs,
+          c.req.raw.signal,
         ),
       ),
     );
+    const probedModelNames = new Set(results.map((result) => result.model));
+    const didProbeEveryRequestedModel =
+      selected.data.models === undefined ||
+      selected.data.models.every((name) => probedModelNames.has(name));
     return c.json({
-      ok: results.length > 0 && results.every((r) => r.ok),
+      ok:
+        results.length > 0 &&
+        results.every((result) => result.ok) &&
+        didProbeEveryRequestedModel,
       results,
     });
   });

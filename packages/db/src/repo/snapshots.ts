@@ -1,3 +1,4 @@
+import { isValidSlotState } from "@haru/core";
 import {
   fleetSnapshotSchema,
   resolveFleetPolicy,
@@ -142,7 +143,7 @@ export async function getFleetSnapshot(
   // validates the rest, and consumers must see ONE typed error for any
   // corrupt persisted state, whichever column it hides in.
   try {
-    return fleetSnapshotSchema.parse({
+    const snapshot = fleetSnapshotSchema.parse({
       id: fleet.id,
       slug: fleet.slug,
       displayName: fleet.displayName,
@@ -170,6 +171,21 @@ export async function getFleetSnapshot(
         })),
       })),
     });
+    // Slot-state semantics intentionally live in @haru/core, below the
+    // protocol package in the dependency graph. Validate them at this
+    // DB read boundary instead of duplicating the kind/state table in a
+    // protocol schema. The database CHECK is defense in depth; this
+    // still catches rows from an older or manually drifted database.
+    for (const domain of snapshot.domains) {
+      for (const slot of domain.slots) {
+        if (!isValidSlotState(slot.kind, slot.state)) {
+          throw new Error(
+            `slot ${slot.id} has invalid ${slot.kind} state ${slot.state}`,
+          );
+        }
+      }
+    }
+    return snapshot;
   } catch (error) {
     throw new MalformedFleetStateError(error);
   }

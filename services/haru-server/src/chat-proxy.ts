@@ -32,13 +32,14 @@ export type ChatProxyResult =
  * passthrough body). `clientSignal` (the incoming request's signal)
  * aborts the upstream fetch when the client goes away pre-headers, so
  * an abandoned request does not keep generating for a full TTFB
- * window. The body text is forwarded verbatim: unknown OpenAI params
- * and vendor extensions survive untouched.
+ * window. The original body bytes are forwarded verbatim: unknown
+ * OpenAI params, vendor extensions, whitespace and an optional UTF-8
+ * BOM survive untouched.
  */
 export async function proxyChatCompletion(
   fetchFunction: typeof fetch,
   servingUrl: string,
-  bodyText: string,
+  bodyBytes: ArrayBuffer,
   headerTimeoutMs: number,
   clientSignal?: AbortSignal,
 ): Promise<ChatProxyResult> {
@@ -57,7 +58,7 @@ export async function proxyChatCompletion(
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: bodyText,
+        body: bodyBytes,
       },
       headerTimeoutMs,
       clientSignal,

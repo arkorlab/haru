@@ -97,6 +97,26 @@ describe("createOperation", () => {
     expect(second.created).toBe(true);
     expect(second.operation.id).not.toBe(first.operation.id);
   });
+
+  it("cannot create an operation targeting another fleet's domain", async () => {
+    const otherLayout = loadExampleFleetLayout() as { slug: string };
+    otherLayout.slug = "other";
+    await applyFleetLayout(database, otherLayout);
+    const otherFleet = await getFleetSnapshot(database, "other");
+    const otherTarget = otherFleet?.domains.find(
+      (domain) => domain.slug === "beta",
+    );
+    if (!otherTarget) throw new Error("second fleet seed failed");
+
+    await expect(
+      createOperation(database, {
+        fleetId: fleet.id,
+        kind: "promote",
+        targetDomainId: otherTarget.id,
+      }),
+    ).rejects.toThrow(/could not create or join an operation/);
+    expect(await getInFlightOperation(database, fleet.id)).toBeNull();
+  });
 });
 
 describe("createOperation source capture", () => {

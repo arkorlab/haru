@@ -1,4 +1,9 @@
-import { requestTargetUrl, supervisorStatusSchema } from "@haru/protocol";
+import {
+  MAX_PROBE_PROMPT_CODE_POINTS,
+  MAX_PROBE_TOKENS,
+  requestTargetUrl,
+  supervisorStatusSchema,
+} from "@haru/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createSupervisorApp } from "./app.js";
@@ -106,6 +111,55 @@ describe("auth", () => {
       ).status,
     ).toBe(200);
   });
+
+  it("authenticates before rejecting an oversized POST body", async () => {
+    const state = freshState();
+    const app = makeApp({ state, token: "secret" });
+    const body = JSON.stringify({ prompt: "x".repeat(65 * 1024) });
+
+    const unauthorized = await app.request("/v1/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const oversized = await app.request("/v1/probe", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({
+      error: { code: "payload_too_large" },
+    });
+    expect(state.calls).toHaveLength(0);
+  });
+
+  it("caps a streamed POST body without relying on Content-Length", async () => {
+    const state = freshState();
+    const app = makeApp({ state, token: "secret" });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65 * 1024));
+        controller.close();
+      },
+    });
+    const response = await app.request("/v1/probe", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    expect(response.status).toBe(413);
+    expect(state.calls).toHaveLength(0);
+  });
 });
 
 describe("healthz", () => {
@@ -190,6 +244,94 @@ describe("GET /v1/status and /v1/ready", () => {
     const models = status.slots.find((s) => s.kind === "inference")?.models;
     expect(models?.every((m) => m.sleeping === null)).toBe(true);
     expect(status.ready).toBe(false);
+  });
+
+  it("checks only selected models and fails readiness when one is unknown", async () => {
+    const state = freshState();
+    state.sleeping.set(9001, false);
+    state.sleeping.set(9002, false);
+    const app = makeApp({ state });
+
+    const selected = supervisorStatusSchema.parse(
+      await (
+        await app.request("/v1/status?model=example-chat-small&timeoutMs=1000")
+      ).json(),
+    );
+    expect(selected.ready).toBe(true);
+    expect(
+      selected.slots.find((slot) => slot.kind === "inference")?.models,
+    ).toMatchObject([{ name: "example-chat-small" }]);
+    expect(state.calls.filter((call) => call.includes("/is_sleeping"))).toEqual(
+      ["GET 127.0.0.1:9001/is_sleeping"],
+    );
+
+    const withUnknown = supervisorStatusSchema.parse(
+      await (
+        await app.request(
+          "/v1/status?model=example-chat-small&model=not-configured&timeoutMs=1000",
+        )
+      ).json(),
+    );
+    expect(withUnknown.ready).toBe(false);
+  });
+
+  it("supports an explicit empty model selection for training-only callers", async () => {
+    const state = freshState();
+    const app = makeApp({ state });
+    const status = supervisorStatusSchema.parse(
+      await (await app.request("/v1/status?model=&timeoutMs=1000")).json(),
+    );
+    expect(status.ready).toBe(false);
+    expect(
+      status.slots.find((slot) => slot.kind === "inference")?.models,
+    ).toEqual([]);
+    expect(status.slots.find((slot) => slot.kind === "training")).toBeDefined();
+    expect(state.calls).toHaveLength(0);
+  });
+
+  it("strictly rejects invalid or repeated inner-timeout markers", async () => {
+    const state = freshState();
+    const app = makeApp({ state });
+    const invalid = await app.request("/v1/status?timeoutKind=outer");
+    expect(invalid.status).toBe(400);
+    const repeated = await app.request(
+      "/v1/probe?timeoutKind=inner&timeoutKind=inner",
+      { method: "POST" },
+    );
+    expect(repeated.status).toBe(400);
+    expect(state.calls).toHaveLength(0);
+  });
+
+  it("propagates a status request abort to the local vLLM read", async () => {
+    const inboundAbort = new AbortController();
+    const started = Promise.withResolvers<undefined>();
+    const aborted = Promise.withResolvers<undefined>();
+    const hangingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        started.resolve(undefined);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted.resolve(undefined);
+            reject(new Error("inbound request aborted"));
+          },
+          { once: true },
+        );
+      });
+    const { app } = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: hangingFetch,
+      spawnFn: noopSpawn,
+    });
+    const response = app.request(
+      "/v1/status?model=example-chat-small&timeoutMs=4000",
+      { signal: inboundAbort.signal },
+    );
+    await started.promise;
+    inboundAbort.abort();
+    await aborted.promise;
+    expect((await response).status).toBe(200);
   });
 });
 
@@ -396,6 +538,46 @@ describe("POST /v1/probe", () => {
     expect(body.results[0].error).toContain("500");
   });
 
+  it("probes only selected models and fails aggregate ok for an unknown one", async () => {
+    const state = freshState();
+    state.sleeping.set(9001, false);
+    state.sleeping.set(9002, false);
+    const app = makeApp({ state });
+    const response = await app.request(
+      "/v1/probe?model=example-chat-small&model=not-configured",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.results).toMatchObject([
+      { model: "example-chat-small", ok: true },
+    ]);
+    expect(
+      state.calls.filter((call) => call.includes("/v1/chat/completions")),
+    ).toEqual(["POST 127.0.0.1:9001/v1/chat/completions"]);
+  });
+
+  it("rejects probe work above the shared policy bounds", async () => {
+    const state = freshState();
+    const app = makeApp({ state });
+    const longPrompt = await app.request("/v1/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "x".repeat(MAX_PROBE_PROMPT_CODE_POINTS + 1),
+      }),
+    });
+    expect(longPrompt.status).toBe(400);
+    const tooManyTokens = await app.request("/v1/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ maxTokens: MAX_PROBE_TOKENS + 1 }),
+    });
+    expect(tooManyTokens.status).toBe(400);
+    expect(state.calls).toHaveLength(0);
+  });
+
   it("bounds each completion by the caller-provided timeoutMs", async () => {
     // vLLM never answers; the caller's tiny budget must abort the
     // request instead of holding it for the built-in 60s default.
@@ -426,6 +608,88 @@ describe("POST /v1/probe", () => {
         r.error?.includes("aborted"),
       ),
     ).toBe(true);
+  });
+
+  it("adds headroom to legacy probe budgets without shortening new selector calls twice", async () => {
+    const timedOutFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            const reason = init.signal?.reason;
+            reject(
+              reason instanceof Error ? reason : new Error(String(reason)),
+            );
+          },
+          { once: true },
+        );
+      });
+    const { app } = createSupervisorApp({
+      config: loadSupervisorConfig(CONFIG_JSON),
+      token: undefined,
+      fetchFn: timedOutFetch,
+      spawnFn: noopSpawn,
+    });
+
+    const legacy = await (
+      await app.request("/v1/probe", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ timeoutMs: 10 }),
+      })
+    ).json();
+    expect(legacy.results[0].error).toContain("within 9ms");
+
+    const selected = await (
+      await app.request("/v1/probe?model=example-chat-small", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ timeoutMs: 10 }),
+      })
+    ).json();
+    expect(selected.results[0].error).toContain("within 10ms");
+  });
+
+  it("does not shorten an oversized-selector fallback's 4500ms inner budget to 4050ms", async () => {
+    vi.useFakeTimers();
+    try {
+      const timedOutFetch: typeof fetch = (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              const reason = init.signal?.reason;
+              reject(
+                reason instanceof Error ? reason : new Error(String(reason)),
+              );
+            },
+            { once: true },
+          );
+        });
+      const { app } = createSupervisorApp({
+        config: loadSupervisorConfig(CONFIG_JSON),
+        token: undefined,
+        fetchFn: timedOutFetch,
+        spawnFn: noopSpawn,
+      });
+      const pending = app.request("/v1/probe?timeoutKind=inner", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ timeoutMs: 4500 }),
+      });
+
+      await vi.advanceTimersByTimeAsync(4500);
+      const response = await pending;
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(
+        (body.results as { error?: string }[]).every((result) =>
+          result.error?.includes("within 4500ms"),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

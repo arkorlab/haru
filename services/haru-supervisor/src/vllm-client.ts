@@ -8,7 +8,11 @@
  * host is through the supervisor's authenticated control API.
  */
 
-import { fetchJsonWithTimeout, joinUrl } from "@haru/protocol";
+import {
+  fetchJsonWithTimeout,
+  joinUrl,
+  SUPERVISOR_STATUS_MODEL_TIMEOUT_MS,
+} from "@haru/protocol";
 
 export class VllmAdminError extends Error {
   constructor(message: string) {
@@ -23,11 +27,11 @@ const ADMIN_CALL_TIMEOUT_MS = 120_000;
 /**
  * /is_sleeping is an in-memory read polled on every /v1/status
  * heartbeat: it must never share the sleep/wake budget. Callers
- * (haru-server heartbeats) give up after ~5s, so a wedged vLLM
+ * (haru-server heartbeats) give up after ~6s, so a wedged vLLM
  * holding this fetch for two minutes would accumulate one stuck
  * local call per reconcile tick.
  */
-const STATUS_CALL_TIMEOUT_MS = 5000;
+const STATUS_CALL_TIMEOUT_MS = SUPERVISOR_STATUS_MODEL_TIMEOUT_MS;
 
 async function adminCall(
   fetchFunction: typeof fetch,
@@ -35,6 +39,7 @@ async function adminCall(
   method: "GET" | "POST",
   pathAndQuery: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   try {
     // One timer bounds headers AND the JSON body read (the admin
@@ -42,7 +47,7 @@ async function adminCall(
     const { response, body } = await fetchJsonWithTimeout(
       fetchFunction,
       joinUrl(`http://${LOCAL_HOST}:${port}`, pathAndQuery),
-      { method },
+      { method, signal },
       timeoutMs,
     );
     if (!response.ok) {
@@ -96,13 +101,16 @@ export async function wakeServer(
 export async function isServerSleeping(
   fetchFunction: typeof fetch,
   port: number,
+  timeoutMs: number = STATUS_CALL_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const body = (await adminCall(
     fetchFunction,
     port,
     "GET",
     "/is_sleeping",
-    STATUS_CALL_TIMEOUT_MS,
+    timeoutMs,
+    signal,
   )) as { is_sleeping?: unknown } | undefined;
   const sleeping: unknown = body?.is_sleeping;
   if (typeof sleeping !== "boolean") {
