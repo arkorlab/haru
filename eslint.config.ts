@@ -120,13 +120,14 @@ export default defineConfig(
     },
     rules: {
       eqeqeq: ["error", "always"],
-      // The production DB handle is drizzle-orm/neon-http, whose HTTP
-      // driver has NO interactive transactions: `db.transaction()`
-      // typechecks, works on PGlite AND real Postgres in tests, and
-      // THROWS at runtime only on Neon - which nothing in CI exercises.
-      // Ban the call outright so a regression can't slip through green;
-      // every state transition must be a single-statement compare-and-swap
-      // instead (see the concurrency model in AGENTS.md).
+      // db.transaction() throws at runtime on the Neon HTTP driver but
+      // passes on PGlite AND real Postgres in CI. The HaruDatabase type
+      // OMITS `transaction` so a call on the typed handle is a compile
+      // error; this lint is the secondary guard that also catches a call
+      // on a RAW drizzle instance (e.g. inside client.ts before it is
+      // typed as HaruDatabase), which the type cannot see. Every state
+      // transition must be a single-statement compare-and-swap instead
+      // (see the concurrency model in AGENTS.md).
       "no-restricted-syntax": [
         "error",
         {
