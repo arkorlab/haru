@@ -58,6 +58,20 @@ describe("renderSkyServiceYaml", () => {
     expect(yaml).toContain("use_spot: true");
     expect(yaml).toContain("- 9001");
   });
+
+  it("quotes YAML-1.1-ambiguous env values so PyYAML keeps them strings", () => {
+    // SkyServe reads service YAML with PyYAML (YAML 1.1); `off`/`no`/`y`
+    // and sexagesimal `12:34:56` must stay quoted strings, not booleans
+    // or base-60 integers.
+    const yaml = renderSkyServiceYaml({
+      ...SPEC,
+      envs: { VLLM_FLAG: "off", SHORT: "n", WINDOW: "12:34:56" },
+    });
+    expect(yaml).toContain('VLLM_FLAG: "off"');
+    expect(yaml).toContain('SHORT: "n"');
+    expect(yaml).toContain('WINDOW: "12:34:56"');
+    expect(yaml).toContain("use_spot: true");
+  });
 });
 
 describe("createSkyserveDriver", () => {
