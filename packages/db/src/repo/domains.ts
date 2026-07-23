@@ -16,7 +16,7 @@ import {
 import { domains, fleets, operations, slots } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
-import type { DomainState } from "@haru/protocol";
+import type { DomainState, FleetPolicy } from "@haru/protocol";
 
 /**
  * Guarded domain state transition. The `from` list is the set of
@@ -89,11 +89,14 @@ export async function escalateDomainIfFleetIdle(
   domainId: string,
   fleetId: string,
   at: Date,
-  heartbeatStaleMs: number,
-  degradedGraceMs: number,
+  // Named object, not two adjacent `number`s: the heartbeat-staleness and
+  // degraded-grace budgets are both durations and default to DIFFERENT
+  // values (30s vs 60s), so a positional pair would let a caller transpose
+  // them undetectably. Pick from FleetPolicy so a field rename breaks here.
+  budgets: Pick<FleetPolicy, "heartbeatStaleMs" | "degradedGraceMs">,
 ): Promise<boolean> {
   assertDomainTransition("degraded", "failed");
-  const degradedCutoff = new Date(at.getTime() - degradedGraceMs);
+  const degradedCutoff = new Date(at.getTime() - budgets.degradedGraceMs);
   const pointerAtDomain = database
     .select({ one: sql`1` })
     .from(fleets)
@@ -108,7 +111,7 @@ export async function escalateDomainIfFleetIdle(
       ),
     );
   const standby = aliasedTable(domains, "standby");
-  const heartbeatCutoff = new Date(at.getTime() - heartbeatStaleMs);
+  const heartbeatCutoff = new Date(at.getTime() - budgets.heartbeatStaleMs);
   const standbyInferenceSlot = database
     .select({ one: sql`1` })
     .from(slots)

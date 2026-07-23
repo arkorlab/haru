@@ -30,6 +30,19 @@ afterEach(async () => {
 const alpha = () => fleet.domains.find((d) => d.slug === "alpha")!;
 const beta = () => fleet.domains.find((d) => d.slug === "beta")!;
 
+// Degrade alpha well before the escalation clock so the in-CAS grace guard
+// (stateUpdatedAt < at - degradedGraceMs) is satisfied and each escalation
+// test below isolates the guard it names rather than the grace window.
+async function degradeAlphaBeforeGrace(): Promise<void> {
+  await transitionDomain(
+    database,
+    alpha().id,
+    ["ready"],
+    "degraded",
+    new Date(Date.now() - 60_000),
+  );
+}
+
 describe("switchActive", () => {
   it("moves the pointer and bumps the revision when the CAS holds", async () => {
     const result = await switchActive(
@@ -182,16 +195,7 @@ describe("transitionDomain", () => {
 
   it("escalateDomainIfFleetIdle refuses once the pointer moved off the domain", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    // Degrade well before the escalation clock so the in-CAS grace guard
-    // (stateUpdatedAt < at - degradedGraceMs) is satisfied and each test
-    // isolates the guard it names.
-    await transitionDomain(
-      database,
-      alpha().id,
-      ["ready"],
-      "degraded",
-      new Date(Date.now() - 60_000),
-    );
+    await degradeAlphaBeforeGrace();
     // Beta is otherwise a viable standby, so the POINTER guard is
     // what must refuse here.
     await markDomainSeen(database, beta().id, new Date());
@@ -205,8 +209,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     const after = await getFleetSnapshot(database, "default");
@@ -217,16 +220,7 @@ describe("transitionDomain", () => {
 
   it("escalateDomainIfFleetIdle requires a viable standby in the same statement", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    // Degrade well before the escalation clock so the in-CAS grace guard
-    // (stateUpdatedAt < at - degradedGraceMs) is satisfied and each test
-    // isolates the guard it names.
-    await transitionDomain(
-      database,
-      alpha().id,
-      ["ready"],
-      "degraded",
-      new Date(Date.now() - 60_000),
-    );
+    await degradeAlphaBeforeGrace();
     // Beta has never heartbeated: no viable standby, no escalation
     // (failing the active would drop its remaining healthy models
     // with nobody able to take over).
@@ -236,8 +230,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     await markDomainSeen(database, beta().id, new Date());
@@ -247,24 +240,14 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(true);
   });
 
   it("escalateDomainIfFleetIdle refuses when the standby has a failed inference slot", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    // Degrade well before the escalation clock so the in-CAS grace guard
-    // (stateUpdatedAt < at - degradedGraceMs) is satisfied and each test
-    // isolates the guard it names.
-    await transitionDomain(
-      database,
-      alpha().id,
-      ["ready"],
-      "degraded",
-      new Date(Date.now() - 60_000),
-    );
+    await degradeAlphaBeforeGrace();
     await markDomainSeen(database, beta().id, new Date());
     // A concurrent heartbeat failed the standby's slot between the
     // in-memory viability decision and this UPDATE: waking it would
@@ -282,8 +265,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
   });
@@ -316,8 +298,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         withinGraceAt,
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     const held = await getFleetSnapshot(database, "default");
@@ -332,8 +313,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         pastGraceAt,
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(true);
   });

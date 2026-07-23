@@ -371,8 +371,7 @@ describe("switch_active under concurrent ticks", () => {
         domainId("alpha"),
         staleFleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     // Once the slot frees, the same CAS lands.
@@ -387,8 +386,7 @@ describe("switch_active under concurrent ticks", () => {
         domainId("alpha"),
         staleFleet.id,
         new Date(),
-        30_000,
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(true);
     const after = await getFleetSnapshot(database, "default");

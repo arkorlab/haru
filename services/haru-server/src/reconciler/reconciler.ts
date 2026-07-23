@@ -653,8 +653,10 @@ export async function reconcileFleet(
         escalation.domainId,
         fleet.id,
         dependencies.now(),
-        fleet.policy.heartbeatStaleMs,
-        fleet.policy.degradedGraceMs,
+        {
+          heartbeatStaleMs: fleet.policy.heartbeatStaleMs,
+          degradedGraceMs: fleet.policy.degradedGraceMs,
+        },
       );
       if (didEscalate) {
         await appendEvent(dependencies.database, {
