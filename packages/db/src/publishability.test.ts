@@ -16,19 +16,21 @@ import { describe, expect, it } from "vitest";
  * publisher (Arkor, in LICENSE/CONTRIBUTING), so a mechanical org
  * denylist would flag legitimate ownership references.
  */
-const DENYLIST: readonly { readonly label: string; readonly pattern: RegExp }[] =
-  [
-    {
-      label: "specific GPU model name",
-      pattern:
-        /\b(?:H100|H200|H800|A100|A800|A6000|A40|V100|L40S|L40|GH200|GB200|MI\d{2,3}X?|RTX ?\d{3,4})\b/i,
-    },
-    {
-      label: "specific LLM model family",
-      pattern:
-        /\b(?:code)?llama\b|\bmi[sx]tral\b|\bqwen\b|\bgemma\b|\bdeepseek\b|\bvicuna\b|\bstarcoder\b|\b(?:gpt|phi)-\d/i,
-    },
-  ];
+const DENYLIST: readonly {
+  readonly label: string;
+  readonly pattern: RegExp;
+}[] = [
+  {
+    label: "specific GPU model name",
+    pattern:
+      /\b(?:H100|H200|H800|A100|A800|A6000|A40|V100|L40S|L40|GH200|GB200|MI\d{2,3}X?|RTX ?\d{3,4})\b/i,
+  },
+  {
+    label: "specific LLM model family",
+    pattern:
+      /\b(?:code)?llama\b|\bmi[sx]tral\b|\bqwen\b|\bgemma\b|\bdeepseek\b|\bvicuna\b|\bstarcoder\b|\b(?:gpt|phi)-\d/i,
+  },
+];
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const SCAN_ROOTS = ["packages", "services"];
@@ -45,7 +47,8 @@ const SELF = "publishability.test.ts";
 
 function scannableFiles(directory: string): string[] {
   const found: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  const entries = readdirSync(directory, { withFileTypes: true });
+  for (const entry of entries) {
     const path = `${directory}/${entry.name}`;
     if (entry.isDirectory()) {
       if (!SKIP_DIRECTORIES.has(entry.name)) {
@@ -74,7 +77,7 @@ describe("publishability", () => {
     for (const root of SCAN_ROOTS) {
       for (const file of scannableFiles(`${REPO_ROOT}${root}`)) {
         const lines = readFileSync(file, "utf8").split("\n");
-        lines.forEach((line, index) => {
+        for (const [index, line] of lines.entries()) {
           for (const { label, pattern } of DENYLIST) {
             const match = pattern.exec(line);
             if (match) {
@@ -84,7 +87,7 @@ describe("publishability", () => {
               );
             }
           }
-        });
+        }
       }
     }
     expect(violations, violations.join("\n")).toEqual([]);

@@ -304,7 +304,10 @@ describe("transitionDomain", () => {
       degradedAt,
     );
     // Beta heartbeats fresh relative to both escalation clocks below.
-    await markDomainSeen(database, beta().id, new Date(degradedAt.getTime() + 15_000));
+    const seenAt = new Date(degradedAt.getTime() + 15_000);
+    const withinGraceAt = new Date(degradedAt.getTime() + 20_000);
+    const pastGraceAt = new Date(degradedAt.getTime() + 40_000);
+    await markDomainSeen(database, beta().id, seenAt);
     // 20s < 30s grace: the fresh degraded period has not aged out, so the
     // CAS must refuse even though the stale snapshot wanted to escalate.
     expect(
@@ -312,16 +315,15 @@ describe("transitionDomain", () => {
         database,
         alpha().id,
         fleet.id,
-        new Date(degradedAt.getTime() + 20_000),
+        withinGraceAt,
         30_000,
         30_000,
       ),
     ).toBe(false);
-    expect(
-      (await getFleetSnapshot(database, "default"))?.domains.find(
-        (d) => d.slug === "alpha",
-      )?.state,
-    ).toBe("degraded");
+    const held = await getFleetSnapshot(database, "default");
+    expect(held?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "degraded",
+    );
     // Once the SAME degraded period passes the grace window, the identical
     // CAS lands.
     expect(
@@ -329,7 +331,7 @@ describe("transitionDomain", () => {
         database,
         alpha().id,
         fleet.id,
-        new Date(degradedAt.getTime() + 40_000),
+        pastGraceAt,
         30_000,
         30_000,
       ),

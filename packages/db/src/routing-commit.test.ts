@@ -207,21 +207,25 @@ describe("routing commit guard", () => {
       failOperationWithPromotionCleanup(
         database,
         operation.id,
-        { step: "switch_active", code: "step_timeout", message: "stale pointer" },
+        {
+          step: "switch_active",
+          code: "step_timeout",
+          message: "stale pointer",
+        },
         "switch_active",
         "target_not_routed",
       ),
     ]);
-    const switchWon = moved !== null;
-    const failWon = failed !== null;
+    const isSwitchWinner = moved !== null;
+    const isFailWinner = failed !== null;
     // The load-bearing invariant: routing commit and a target_not_routed
     // fail can never both succeed, under any interleaving.
-    expect(switchWon && failWon).toBe(false);
-    expect(switchWon || failWon).toBe(true);
+    expect(isSwitchWinner && isFailWinner).toBe(false);
+    expect(isSwitchWinner || isFailWinner).toBe(true);
 
     const after = await getFleetSnapshot(database, "default");
     const reread = await getOperation(database, operation.id);
-    if (switchWon) {
+    if (isSwitchWinner) {
       // Routing committed: the fail refused and the live target still serves.
       expect(after?.activeDomainId).toBe(beta);
       expect(reread?.routingCommitted).toBe(true);

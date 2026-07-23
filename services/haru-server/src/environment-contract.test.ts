@@ -15,7 +15,9 @@ import { serverEnvironmentSchema } from "./environment.js";
  * not asserted - they change wording too often to gate mechanically.)
  */
 function documentedServerVariables(): Set<string> {
-  const readmePath = fileURLToPath(new URL("../../../README.md", import.meta.url));
+  const readmePath = fileURLToPath(
+    new URL("../../../README.md", import.meta.url),
+  );
   const readme = readFileSync(readmePath, "utf8");
   const lines = readme.split("\n");
   const start = lines.findIndex((line) =>
@@ -26,14 +28,15 @@ function documentedServerVariables(): Set<string> {
   }
   const documented = new Set<string>();
   // Walk the table until the section ends (next heading).
-  for (const line of lines.slice(start + 1)) {
+  const body = lines.slice(start + 1);
+  for (const line of body) {
     if (line.startsWith("#")) {
       break;
     }
     // First table cell of a data row: | `VARIABLE_NAME` | ... |
-    const match = /^\|\s*`([A-Z][A-Z0-9_]*)`\s*\|/.exec(line);
-    if (match) {
-      documented.add(match[1]);
+    const name = /^\|\s*`([A-Z][A-Z0-9_]*)`\s*\|/.exec(line)?.[1];
+    if (name !== undefined) {
+      documented.add(name);
     }
   }
   return documented;
@@ -44,8 +47,8 @@ describe("haru-server environment docs", () => {
     const documented = documentedServerVariables();
     const inSchema = new Set(Object.keys(serverEnvironmentSchema.shape));
 
-    const undocumented = [...inSchema].filter((key) => !documented.has(key));
-    const stale = [...documented].filter((key) => !inSchema.has(key));
+    const undocumented = [...inSchema.difference(documented)];
+    const stale = [...documented.difference(inSchema)];
 
     expect(
       undocumented,
