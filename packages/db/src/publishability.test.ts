@@ -99,6 +99,12 @@ function violationsInFile(file: string): string[] {
   const relative = file.slice(REPO_ROOT.length);
   const found: string[] = [];
   for (const [index, line] of content.split("\n").entries()) {
+    // Escape hatch: a legitimate token that collides with a denylist word
+    // (e.g. a variable or comment mentioning "granite"/"falcon") opts out
+    // with a `publishability-allow` marker on that line. None exist today.
+    if (line.includes("publishability-allow")) {
+      continue;
+    }
     for (const { label, pattern } of DENYLIST) {
       const match = pattern.exec(line);
       if (match) {
@@ -117,5 +123,20 @@ describe("publishability", () => {
       ),
     );
     expect(violations, violations.join("\n")).toEqual([]);
+  });
+
+  it("actually scans files and would catch a leak (positive control)", () => {
+    // A green `toEqual([])` above must mean "no leaks", not "scanned
+    // nothing" or "the matcher is vacuous". Guard both failure modes: a
+    // non-trivial file set is discovered, and the full readFileSync ->
+    // fast-path -> per-line matcher DOES flag this very test file, whose
+    // regex literals contain denylisted tokens (which is exactly why SELF
+    // is excluded from the real scan above).
+    const scanned = SCAN_ROOTS.flatMap((root) =>
+      scannableFiles(`${REPO_ROOT}${root}`),
+    );
+    expect(scanned.length).toBeGreaterThan(20);
+    const selfPath = fileURLToPath(import.meta.url);
+    expect(violationsInFile(selfPath).length).toBeGreaterThan(0);
   });
 });

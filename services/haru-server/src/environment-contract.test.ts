@@ -38,7 +38,13 @@ function documentedServerVariables(): Set<string> {
       isInFence = !isInFence;
       continue;
     }
-    if (!isInFence && /^#{1,3} /.test(line)) {
+    // Everything inside a fenced code block is a sample, not section
+    // structure: a `#`-comment there is not a heading AND a pipe-shaped
+    // line there is not a documented-var row, so skip the whole line.
+    if (isInFence) {
+      continue;
+    }
+    if (/^#{1,3} /.test(line)) {
       break;
     }
     // First table cell of a data row: | `VARIABLE_NAME` | ... |
