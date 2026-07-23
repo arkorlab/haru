@@ -120,6 +120,21 @@ export default defineConfig(
     },
     rules: {
       eqeqeq: ["error", "always"],
+      // The production DB handle is drizzle-orm/neon-http, whose HTTP
+      // driver has NO interactive transactions: `db.transaction()`
+      // typechecks, works on PGlite AND real Postgres in tests, and
+      // THROWS at runtime only on Neon - which nothing in CI exercises.
+      // Ban the call outright so a regression can't slip through green;
+      // every state transition must be a single-statement compare-and-swap
+      // instead (see the concurrency model in AGENTS.md).
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='transaction']",
+          message:
+            "db.transaction() throws at runtime on the Neon HTTP driver. Use a single-statement compare-and-swap instead (see AGENTS.md).",
+        },
+      ],
       "@typescript-eslint/consistent-type-imports": [
         "error",
         { prefer: "type-imports", fixStyle: "inline-type-imports" },
