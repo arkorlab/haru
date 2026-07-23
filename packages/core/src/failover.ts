@@ -92,6 +92,12 @@ export interface DegradedEscalation {
  * clock. Standbys are never escalated: failed would strip their
  * promotability, and a degraded standby already surfaces in route
  * intent eligibility.
+ *
+ * MIRRORED IN SQL: the grace comparison is re-checked inside the
+ * escalation CAS (`escalateDomainIfFleetIdle` in @haru/db) against the
+ * live `stateUpdatedAt`, so a concurrent reconciler that recovered then
+ * re-degraded the active between this tick's snapshot and its CAS cannot
+ * escalate on a stale-but-past-grace timestamp. Keep the two in sync.
  */
 export function detectDegradedEscalation(
   fleet: FleetSnapshot,

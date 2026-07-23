@@ -347,7 +347,15 @@ describe("switch_active under concurrent ticks", () => {
   });
 
   it("escalation is refused in the same statement while an operation is in flight", async () => {
-    await transitionDomain(database, domainId("alpha"), ["ready"], "degraded");
+    // Degrade before the escalation clock so the in-CAS grace guard is
+    // satisfied and this test isolates the in-flight guard.
+    await transitionDomain(
+      database,
+      domainId("alpha"),
+      ["ready"],
+      "degraded",
+      new Date(Date.now() - 60_000),
+    );
     // Beta is otherwise a viable failover target, so the in-flight
     // guard is what must refuse here.
     await markDomainSeen(database, domainId("beta"), new Date());
@@ -364,6 +372,7 @@ describe("switch_active under concurrent ticks", () => {
         staleFleet.id,
         new Date(),
         30_000,
+        30_000,
       ),
     ).toBe(false);
     // Once the slot frees, the same CAS lands.
@@ -378,6 +387,7 @@ describe("switch_active under concurrent ticks", () => {
         domainId("alpha"),
         staleFleet.id,
         new Date(),
+        30_000,
         30_000,
       ),
     ).toBe(true);

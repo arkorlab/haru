@@ -119,8 +119,11 @@ Dependency graph (enforce it when adding imports):
   `policy.degradedGraceMs` (autoFailover on, AND a viable standby exists -
   viable means READY, supervised, bound, fresh-heartbeat, no failed
   inference slot - AND no operation is in flight AND the pointer still
-  targets it; the in-flight, pointer AND viable-standby guards all ride
-  inside the escalation UPDATE itself) is CAS-escalated to `failed`,
+  targets it; the grace, in-flight, pointer AND viable-standby guards all
+  ride inside the escalation UPDATE itself - the grace re-checks the live
+  `stateUpdatedAt` against the injected clock so a concurrent reconciler
+  that recovered-then-re-degraded the active cannot escalate on a
+  stale-but-past-grace snapshot) is CAS-escalated to `failed`,
   which makes `detectFailover`'s failed trigger fire in the same tick; a
   reachable supervisor recovers a failed domain via `failed -> degraded`
   (the active additionally has to serve every LAYOUT-bound model, not
