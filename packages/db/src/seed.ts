@@ -55,4 +55,15 @@ try {
 } catch {
   // No .env file; rely on the process environment.
 }
-await main();
+
+try {
+  await main();
+} catch (error) {
+  // A missing/invalid layout file (readFileSync/JSON.parse) or a schema
+  // validation failure (applyFleetLayout) should exit like the
+  // DATABASE_URL guard - a clean one-line message, not a raw stack trace.
+  console.error(
+    `seed failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(1);
+}
