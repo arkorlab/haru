@@ -27,10 +27,18 @@ function documentedServerVariables(): Set<string> {
     throw new Error("README is missing the 'haru-server environment' section");
   }
   const documented = new Set<string>();
-  // Walk the table until the section ends (next heading).
+  // Walk to the end of THIS section: the next same-or-higher-level heading
+  // (`# `/`## `/`### `). A `####` sub-note stays inside the section, and a
+  // `#`-prefixed line inside a fenced code block (e.g. a shell comment) is
+  // not a heading at all, so track fence state and ignore it.
+  let isInFence = false;
   const body = lines.slice(start + 1);
   for (const line of body) {
-    if (line.startsWith("#")) {
+    if (line.startsWith("```")) {
+      isInFence = !isInFence;
+      continue;
+    }
+    if (!isInFence && /^#{1,3} /.test(line)) {
       break;
     }
     // First table cell of a data row: | `VARIABLE_NAME` | ... |
