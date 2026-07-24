@@ -7,41 +7,37 @@ import { describe, expect, it } from "vitest";
  * Publishability gate. AGENTS.md requires this repo carry no specific
  * model or GPU names in code, seeds, or example layouts (workloads are
  * pure data). That rule was enforced by human review only; this scans
- * the source + shipped data (any layout/seed/schema JSON, not just the
- * bundled example) for a denylist so a leak fails CI.
+ * the source + shipped data for a denylist so a leak fails CI.
  *
- * The denylists are necessarily heuristic - a gate, not a proof - but
- * they cover the current-generation datacenter accelerators and the
- * common open-weight model families, so the obvious leaks fail loudly.
+ * The forbidden identifiers live in `publishability-denylist.txt`, a
+ * governed policy DATA file - NOT a scanned source file - so no specific
+ * model or GPU name is embedded in this (or any) code the gate governs.
+ * The denylists are necessarily heuristic (a gate, not a proof) but cover
+ * the current-generation datacenter accelerators and common open-weight
+ * model families, so the obvious leaks fail loudly.
  *
- * Deliberately NOT flagged: `nvidia-smi` (a required CLI tool name, not
- * a GPU-model leak) and `vLLM` (the inference engine, referenced
- * throughout by design). The private-repo/infra half of the rule stays
- * human-reviewed: the only org name in the tree is the repo's own
- * publisher (in LICENSE/CONTRIBUTING), so a mechanical org denylist
- * would flag legitimate ownership references.
+ * Deliberately NOT flagged: `nvidia-smi` (a required CLI tool name) and
+ * `vLLM` (the inference engine). The private-repo/infra half of the rule
+ * stays human-reviewed: the only org name in the tree is the repo's own
+ * publisher (in LICENSE/CONTRIBUTING).
  */
+const DENYLIST_PATH = fileURLToPath(
+  new URL("publishability-denylist.txt", import.meta.url),
+);
+
 const DENYLIST: readonly {
   readonly label: string;
   readonly pattern: RegExp;
-}[] = [
-  {
-    label: "specific GPU model name",
-    // Hopper/Blackwell (H100/H200/H800, B100/B200/B300, GH200/GB200/GB300),
-    // Ampere (A100/A800/A40/A6000), Volta (V100), Ada (L40/L40S), AMD
-    // Instinct (MI250/MI300A/MI300X/MI325X), and RTX consumer cards. The
-    // MI branch allows a trailing A (APU) or X (accelerator) suffix.
-    pattern:
-      /\b(?:H100|H200|H800|B100|B200|B300|A100|A800|A6000|A40|V100|L40S|L40|GH200|GB200|GB300|MI\d{2,3}[AX]?|RTX ?\d{3,4})\b/i,
-  },
-  {
-    label: "specific LLM model family",
-    // Common open-weight families and the numbered proprietary lines. `yi`
-    // is matched only as `yi-<n>` to avoid tripping on the bare syllable.
-    pattern:
-      /\b(?:code)?llama\b|\bmi[sx]tral\b|\bqwen\b|\bgemma\b|\bdeepseek\b|\bvicuna\b|\bstarcoder\b|\bfalcon\b|\bnemotron\b|\bgranite\b|\binternlm\b|\bbaichuan\b|\bcommand-r\b|\bdbrx\b|\bwizardlm\b|\byi-\d|\b(?:gpt|phi)-\d/i,
-  },
-];
+}[] = readFileSync(DENYLIST_PATH, "utf8")
+  .split("\n")
+  .filter((line) => line.trim() !== "" && !line.startsWith("#"))
+  .map((line) => {
+    const tab = line.indexOf("\t");
+    return {
+      label: line.slice(0, tab),
+      pattern: new RegExp(line.slice(tab + 1), "i"),
+    };
+  });
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const SCAN_ROOTS = ["packages", "services"];
@@ -52,18 +48,15 @@ const SKIP_DIRECTORIES = new Set([
   ".turbo",
   "drizzle",
 ]);
-// The scanner file names the very tokens it bans; excluding it keeps the
-// gate from flagging itself.
-const SELF = "publishability.test.ts";
+// Every module extension the repo ships (nodenext ESM/CJS + the .mjs
+// generator scripts), so the gate governs ALL code, not only .ts.
+const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".mjs", ".cjs", ".js"];
 
 function isScannable(name: string): boolean {
-  if (name === SELF) {
-    return false;
-  }
-  if (name.endsWith(".ts")) {
+  if (SOURCE_EXTENSIONS.some((extension) => name.endsWith(extension))) {
     return true;
   }
-  // All shipped data (layouts, seeds, generated schemas) - but not the
+  // Shipped data (layouts, seeds, generated schemas), but not the
   // build/config JSON, which carries no workload data.
   return (
     name.endsWith(".json") &&
@@ -99,9 +92,9 @@ function violationsInFile(file: string): string[] {
   const relative = file.slice(REPO_ROOT.length);
   const found: string[] = [];
   for (const [index, line] of content.split("\n").entries()) {
-    // Escape hatch: a legitimate token that collides with a denylist word
-    // (e.g. a variable or comment mentioning "granite"/"falcon") opts out
-    // with a `publishability-allow` marker on that line. None exist today.
+    // Escape hatch: a line with a legitimate token that collides with a
+    // denylist word opts out with a `publishability-allow` marker. None
+    // exist today.
     if (line.includes("publishability-allow")) {
       continue;
     }
@@ -125,18 +118,37 @@ describe("publishability", () => {
     expect(violations, violations.join("\n")).toEqual([]);
   });
 
-  it("actually scans files and would catch a leak (positive control)", () => {
+  it("scans the governed roots and its matcher is non-vacuous (positive control)", () => {
     // A green `toEqual([])` above must mean "no leaks", not "scanned
-    // nothing" or "the matcher is vacuous". Guard both failure modes: a
-    // non-trivial file set is discovered, and the full readFileSync ->
-    // fast-path -> per-line matcher DOES flag this very test file, whose
-    // regex literals contain denylisted tokens (which is exactly why SELF
-    // is excluded from the real scan above).
-    const scanned = SCAN_ROOTS.flatMap((root) =>
-      scannableFiles(`${REPO_ROOT}${root}`),
+    // nothing" or "the matcher is vacuous". Prove coverage with explicit
+    // sentinels - representative governed files that MUST be scanned,
+    // spanning both roots and every kind (.ts, .mjs, .json data) - so a
+    // REPO_ROOT / isScannable regression cannot silently scan nothing.
+    const scanned = new Set(
+      SCAN_ROOTS.flatMap((root) => scannableFiles(`${REPO_ROOT}${root}`)),
     );
-    expect(scanned.length).toBeGreaterThan(20);
-    const selfPath = fileURLToPath(import.meta.url);
-    expect(violationsInFile(selfPath).length).toBeGreaterThan(0);
+    for (const relative of [
+      "packages/db/src/seed.ts",
+      "packages/protocol/scripts/generate-schemas.mjs",
+      "services/haru-server/src/environment.ts",
+      "packages/db/examples/fleet.example.json",
+      "packages/protocol/schemas/fleet-layout.schema.json",
+    ]) {
+      expect(
+        scanned.has(`${REPO_ROOT}${relative}`),
+        `scanner must cover ${relative}`,
+      ).toBe(true);
+    }
+    // The policy file itself is intentionally NOT scanned (it is the one
+    // governed home for the names) yet the matcher must be non-vacuous:
+    // every pattern matches the tokens on its own policy line.
+    expect(scanned.has(DENYLIST_PATH)).toBe(false);
+    const policy = readFileSync(DENYLIST_PATH, "utf8");
+    for (const { label, pattern } of DENYLIST) {
+      expect(
+        pattern.test(policy),
+        `${label} pattern must match its own policy line`,
+      ).toBe(true);
+    }
   });
 });
