@@ -182,6 +182,63 @@ describe("routing commit guard", () => {
     expect(await betaSlotStates()).toEqual(["failed"]);
   });
 
+  it("keeps commit and a target_not_routed fail mutually exclusive when they race", async () => {
+    // The sequential tests above prove the post-commit guarantee. This
+    // one fires switchActive and the timeout-fail CONCURRENTLY. On the CI
+    // Postgres lane the two statements genuinely contend for the
+    // operation row lock: whichever loses blocks, then re-evaluates its
+    // guard under READ COMMITTED on unblock - the exact block-then-unblock
+    // interleave the routingCommitted-column guard exists for (a
+    // fleets-pointer subquery would keep its pre-block snapshot and let a
+    // fail land on an already-committed promotion). PGlite serializes the
+    // pair, still proving winner/loser semantics. Either way the invariant
+    // is the same: NEVER both, and the persisted state matches the winner.
+    const { fleetId, alpha, beta } = await ids();
+    const { operation } = await createOperation(database, {
+      fleetId,
+      kind: "promote",
+      targetDomainId: beta,
+    });
+    await claimOperation(database, operation.id, "switch_active");
+    await walkBetaToServing(beta);
+
+    const [moved, failed] = await Promise.all([
+      switchActive(database, fleetId, alpha, beta, operation.id),
+      failOperationWithPromotionCleanup(
+        database,
+        operation.id,
+        {
+          step: "switch_active",
+          code: "step_timeout",
+          message: "stale pointer",
+        },
+        "switch_active",
+        "target_not_routed",
+      ),
+    ]);
+    const isSwitchWinner = moved !== null;
+    const isFailWinner = failed !== null;
+    // The load-bearing invariant: routing commit and a target_not_routed
+    // fail can never both succeed, under any interleaving.
+    expect(isSwitchWinner && isFailWinner).toBe(false);
+    expect(isSwitchWinner || isFailWinner).toBe(true);
+
+    const after = await getFleetSnapshot(database, "default");
+    const reread = await getOperation(database, operation.id);
+    if (isSwitchWinner) {
+      // Routing committed: the fail refused and the live target still serves.
+      expect(after?.activeDomainId).toBe(beta);
+      expect(reread?.routingCommitted).toBe(true);
+      expect(reread?.state).toBe("running");
+      expect(await betaSlotStates()).toEqual(["serving"]);
+    } else {
+      // Fail landed first: the pointer never moved and cleanup ran.
+      expect(after?.activeDomainId).toBe(alpha);
+      expect(reread?.state).toBe("failed");
+      expect(await betaSlotStates()).toEqual(["failed"]);
+    }
+  });
+
   it("plain failOperation with the guard also refuses once routing committed", async () => {
     const { fleetId, alpha, beta } = await ids();
     const { operation } = await createOperation(database, {

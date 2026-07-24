@@ -71,10 +71,14 @@ Dependency graph (enforce it when adding imports):
 
 - **Every state transition is a single-statement compare-and-swap**
   (`UPDATE ... WHERE state IN (...) RETURNING`, row-count checked). The Neon
-  HTTP driver has NO interactive transactions - `db.transaction()` typechecks
-  on `HaruDatabase`, works on PGlite in tests, and **throws at runtime on
-  Neon**. Never introduce it; never hold external work (supervisor HTTP,
-  `sky` exec) between a read and its dependent write.
+  HTTP driver has NO interactive transactions - `db.transaction()` works on
+  PGlite AND real Postgres in tests but **throws at runtime on Neon**, so it
+  is OMITTED from the `HaruDatabase` type (a call is a compile error) and
+  additionally lint-banned (`no-restricted-syntax` in
+  [eslint.config.ts](eslint.config.ts), which also catches a call on a raw
+  drizzle handle before it is typed). Never re-introduce it; never hold
+  external work (supervisor HTTP, `sky` exec) between a read and its
+  dependent write.
 - `fleets.activeDomainId` is the single routing pointer; `switchActive` is the
   only writer and takes an optional `requireRunningOperationId` (single-
   statement EXISTS + `FOR UPDATE` guard) so a tick racing a concurrent
@@ -119,8 +123,11 @@ Dependency graph (enforce it when adding imports):
   `policy.degradedGraceMs` (autoFailover on, AND a viable standby exists -
   viable means READY, supervised, bound, fresh-heartbeat, no failed
   inference slot - AND no operation is in flight AND the pointer still
-  targets it; the in-flight, pointer AND viable-standby guards all ride
-  inside the escalation UPDATE itself) is CAS-escalated to `failed`,
+  targets it; the grace, in-flight, pointer AND viable-standby guards all
+  ride inside the escalation UPDATE itself - the grace re-checks the live
+  `stateUpdatedAt` against the injected clock so a concurrent reconciler
+  that recovered-then-re-degraded the active cannot escalate on a
+  stale-but-past-grace snapshot) is CAS-escalated to `failed`,
   which makes `detectFailover`'s failed trigger fire in the same tick; a
   reachable supervisor recovers a failed domain via `failed -> degraded`
   (the active additionally has to serve every LAYOUT-bound model, not

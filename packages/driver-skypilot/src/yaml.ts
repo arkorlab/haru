@@ -18,6 +18,22 @@ export function placementToResources(
 }
 
 /**
+ * Serialize a Sky task/service object to YAML for `sky`. Shared by both
+ * the SkyPilot and SkyServe renderers so the schema choice lives in ONE
+ * place.
+ *
+ * Uses the `yaml-1.1` schema on purpose: SkyPilot/SkyServe load YAML with
+ * PyYAML, whose implicit resolvers are YAML 1.1, so a string env value
+ * like `off`/`no`/`y` or a sexagesimal `12:34:56` would be reparsed as a
+ * boolean/integer under the 1.2 core schema's plain output. The 1.1
+ * schema quotes exactly those ambiguous scalars while leaving genuine
+ * booleans and multi-line block scalars untouched.
+ */
+export function stringifySkyYaml(value: Record<string, unknown>): string {
+  return stringify(value, { schema: "yaml-1.1" });
+}
+
+/**
  * Render a SkyPilot task YAML for one GPU domain. Pure: no filesystem
  * or process access, which keeps the translation snapshot-testable.
  */
@@ -29,5 +45,5 @@ export function renderSkyTaskYaml(spec: DomainLaunchSpec): string {
     setup: spec.setup,
     run: spec.run,
   };
-  return stringify(task);
+  return stringifySkyYaml(task);
 }

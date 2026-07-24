@@ -30,6 +30,19 @@ afterEach(async () => {
 const alpha = () => fleet.domains.find((d) => d.slug === "alpha")!;
 const beta = () => fleet.domains.find((d) => d.slug === "beta")!;
 
+// Degrade alpha well before the escalation clock so the in-CAS grace guard
+// (stateUpdatedAt < at - degradedGraceMs) is satisfied and each escalation
+// test below isolates the guard it names rather than the grace window.
+async function degradeAlphaBeforeGrace(): Promise<void> {
+  await transitionDomain(
+    database,
+    alpha().id,
+    ["ready"],
+    "degraded",
+    new Date(Date.now() - 60_000),
+  );
+}
+
 describe("switchActive", () => {
   it("moves the pointer and bumps the revision when the CAS holds", async () => {
     const result = await switchActive(
@@ -182,7 +195,7 @@ describe("transitionDomain", () => {
 
   it("escalateDomainIfFleetIdle refuses once the pointer moved off the domain", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    await degradeAlphaBeforeGrace();
     // Beta is otherwise a viable standby, so the POINTER guard is
     // what must refuse here.
     await markDomainSeen(database, beta().id, new Date());
@@ -196,7 +209,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     const after = await getFleetSnapshot(database, "default");
@@ -207,7 +220,7 @@ describe("transitionDomain", () => {
 
   it("escalateDomainIfFleetIdle requires a viable standby in the same statement", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    await degradeAlphaBeforeGrace();
     // Beta has never heartbeated: no viable standby, no escalation
     // (failing the active would drop its remaining healthy models
     // with nobody able to take over).
@@ -217,7 +230,7 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
     await markDomainSeen(database, beta().id, new Date());
@@ -227,14 +240,14 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(true);
   });
 
   it("escalateDomainIfFleetIdle refuses when the standby has a failed inference slot", async () => {
     const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
-    await transitionDomain(database, alpha().id, ["ready"], "degraded");
+    await degradeAlphaBeforeGrace();
     await markDomainSeen(database, beta().id, new Date());
     // A concurrent heartbeat failed the standby's slot between the
     // in-memory viability decision and this UPDATE: waking it would
@@ -252,9 +265,57 @@ describe("transitionDomain", () => {
         alpha().id,
         fleet.id,
         new Date(),
-        30_000,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
       ),
     ).toBe(false);
+  });
+
+  it("escalateDomainIfFleetIdle waits out the grace window inside the CAS", async () => {
+    const { escalateDomainIfFleetIdle } = await import("./repo/domains.js");
+    // Models the concurrent-reconciler race: another tick recovered then
+    // re-degraded the active, so its stateUpdatedAt is FRESH even though a
+    // stale tick holds an old snapshot and decided to escalate. Every
+    // other guard (pointer at alpha, no in-flight op, viable standby) is
+    // satisfied, so ONLY the in-CAS grace guard may hold escalation back.
+    const degradedAt = new Date("2026-03-01T00:00:00.000Z");
+    await transitionDomain(
+      database,
+      alpha().id,
+      ["ready"],
+      "degraded",
+      degradedAt,
+    );
+    // Beta heartbeats fresh relative to both escalation clocks below.
+    const seenAt = new Date(degradedAt.getTime() + 15_000);
+    const withinGraceAt = new Date(degradedAt.getTime() + 20_000);
+    const pastGraceAt = new Date(degradedAt.getTime() + 40_000);
+    await markDomainSeen(database, beta().id, seenAt);
+    // 20s < 30s grace: the fresh degraded period has not aged out, so the
+    // CAS must refuse even though the stale snapshot wanted to escalate.
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        withinGraceAt,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
+      ),
+    ).toBe(false);
+    const held = await getFleetSnapshot(database, "default");
+    expect(held?.domains.find((d) => d.slug === "alpha")?.state).toBe(
+      "degraded",
+    );
+    // Once the SAME degraded period passes the grace window, the identical
+    // CAS lands.
+    expect(
+      await escalateDomainIfFleetIdle(
+        database,
+        alpha().id,
+        fleet.id,
+        pastGraceAt,
+        { heartbeatStaleMs: 30_000, degradedGraceMs: 30_000 },
+      ),
+    ).toBe(true);
   });
 
   it("markDomainSeen records the heartbeat", async () => {
