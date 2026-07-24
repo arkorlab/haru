@@ -13,13 +13,19 @@ import { serverEnvironmentSchema } from "./environment.js";
  * the docs. This asserts the table's variable names match the schema
  * keys exactly, in both directions. (Defaults/prose are intentionally
  * not asserted - they change wording too often to gate mechanically.)
+ *
+ * The parser takes README TEXT (I/O stays at the test boundary) so its
+ * section-walking can be exercised with inline fixtures below.
  */
-function documentedServerVariables(): Set<string> {
-  const readmePath = fileURLToPath(
-    new URL("../../../README.md", import.meta.url),
+function readReadme(): string {
+  return readFileSync(
+    fileURLToPath(new URL("../../../README.md", import.meta.url)),
+    "utf8",
   );
-  const readme = readFileSync(readmePath, "utf8");
-  const lines = readme.split("\n");
+}
+
+function documentedServerVariables(markdown: string): Set<string> {
+  const lines = markdown.split("\n");
   const start = lines.findIndex((line) =>
     line.startsWith("### haru-server environment"),
   );
@@ -58,7 +64,7 @@ function documentedServerVariables(): Set<string> {
 
 describe("haru-server environment docs", () => {
   it("documents exactly the vars serverEnvironmentSchema reads", () => {
-    const documented = documentedServerVariables();
+    const documented = documentedServerVariables(readReadme());
     const inSchema = new Set(Object.keys(serverEnvironmentSchema.shape));
 
     const undocumented = [...inSchema.difference(documented)];
@@ -72,5 +78,33 @@ describe("haru-server environment docs", () => {
       stale,
       "env vars in the README table but not read by serverEnvironmentSchema",
     ).toEqual([]);
+  });
+
+  it("walks only the section, ignoring sub-notes and fenced samples", () => {
+    const markdown = [
+      "### haru-server environment",
+      "",
+      "| `DATABASE_URL` | conn |",
+      "#### A sub-note (still inside the section)",
+      "| `PORT` | port |",
+      "```sh",
+      "# a fenced shell comment, not a heading",
+      "| `FENCED_NOT_A_VAR` | ignored |",
+      "```",
+      "| `HARU_API_TOKEN` | token |",
+      "### Consumer contract (ends the section)",
+      "| `AFTER_SECTION` | ignored |",
+    ].join("\n");
+    expect([...documentedServerVariables(markdown)]).toEqual([
+      "DATABASE_URL",
+      "PORT",
+      "HARU_API_TOKEN",
+    ]);
+  });
+
+  it("throws when the section heading is absent", () => {
+    expect(() => documentedServerVariables("# Something else\n")).toThrow(
+      /haru-server environment/,
+    );
   });
 });
