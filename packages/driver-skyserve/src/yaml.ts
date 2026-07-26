@@ -1,12 +1,13 @@
-import { placementToResources } from "@haru/driver-skypilot";
-import { stringify } from "yaml";
+import { placementToResources, stringifySkyYaml } from "@haru/driver-skypilot";
 
 import type { ServiceLaunchSpec } from "./types.js";
 
 /**
  * Render a SkyServe service YAML. Same placement translation as the
  * SkyPilot task renderer, plus the `service` block that SkyServe uses
- * for readiness probing and replica management.
+ * for readiness probing and replica management. Serialized through the
+ * shared `stringifySkyYaml` so the YAML-1.1 schema choice is not
+ * duplicated here.
  */
 export function renderSkyServiceYaml(spec: ServiceLaunchSpec): string {
   const service: Record<string, unknown> = {
@@ -22,5 +23,5 @@ export function renderSkyServiceYaml(spec: ServiceLaunchSpec): string {
     setup: spec.setup,
     run: spec.run,
   };
-  return stringify(service);
+  return stringifySkyYaml(service);
 }

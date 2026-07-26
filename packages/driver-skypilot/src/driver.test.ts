@@ -75,6 +75,28 @@ describe("renderSkyTaskYaml", () => {
     expect(yaml).not.toContain("envs:");
     expect(yaml).not.toContain("ports:");
   });
+
+  it("quotes YAML-1.1-ambiguous env values so PyYAML keeps them strings", () => {
+    // SkyPilot reads task YAML with PyYAML (YAML 1.1), where `off`/`no`/`y`
+    // resolve to booleans and `12:34:56` to a sexagesimal integer. These
+    // string env values must round-trip as strings, i.e. be quoted.
+    const yaml = renderSkyTaskYaml({
+      ...SPEC,
+      envs: {
+        VLLM_FLAG: "off",
+        SHORT: "y",
+        WINDOW: "12:34:56",
+        PLAIN: "hello",
+      },
+    });
+    expect(yaml).toContain('VLLM_FLAG: "off"');
+    expect(yaml).toContain('SHORT: "y"');
+    expect(yaml).toContain('WINDOW: "12:34:56"');
+    // A genuinely unambiguous value stays plain, and real booleans in the
+    // resources block are not stringified.
+    expect(yaml).toContain("PLAIN: hello");
+    expect(yaml).toContain("use_spot: false");
+  });
 });
 
 describe("createSkypilotDriver", () => {

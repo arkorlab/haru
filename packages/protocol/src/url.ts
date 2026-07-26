@@ -39,6 +39,23 @@ export function joinUrl(baseUrl: string, path: string): string {
       `joinUrl refused to change origin (${base.origin} -> ${joined.origin})`,
     );
   }
+  // Second backstop: joinUrl must never ESCAPE the base path prefix it
+  // exists to preserve. A `..` segment in `path` is resolved by the URL
+  // parser and can walk above `prefix` (`joinUrl("https://h/api", "/../x")`
+  // -> `https://h/x`) without moving the origin, so the origin check above
+  // does not catch it. Every caller passes a code-literal path today, so a
+  // `..` is a bug or an injection attempt; require the resolved pathname to
+  // still sit under `prefix` (segment boundary, so `/api` cannot pass off
+  // `/apiroot` as inside it) and fail closed otherwise.
+  if (
+    prefix !== "" &&
+    joined.pathname !== prefix &&
+    !joined.pathname.startsWith(`${prefix}/`)
+  ) {
+    throw new Error(
+      `joinUrl refused to escape base path prefix (${prefix} -> ${joined.pathname})`,
+    );
+  }
   // Re-apply the base query params that `new URL` dropped. Snapshot the
   // path's OWN keys first so a same-named base param is skipped (path
   // wins on conflict) while EVERY value the base carries for other keys

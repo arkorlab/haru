@@ -1,0 +1,7 @@
+# Publishability denylist: forbidden specific model / GPU identifiers.
+# Format: <label><TAB><JS regex source> (matched case-insensitively).
+# This DATA file is the single governed home for these names; it is NOT a
+# scanned source file, so the publishability gate never flags its own policy.
+# (AGENTS.md scopes the no-model/GPU-names rule to code, seeds, and layouts.)
+specific GPU model name	\b(?:H100|H200|H800|B100|B200|B300|A100|A800|A6000|A40|V100|L40S|L40|GH200|GB200|GB300|MI\d{2,3}[AX]?|RTX ?\d{3,4})\b
+specific LLM model family	\b(?:code)?llama\b|\bmi[sx]tral\b|\bqwen\b|\bgemma\b|\bdeepseek\b|\bvicuna\b|\bstarcoder\b|\bfalcon\b|\bnemotron\b|\bgranite\b|\binternlm\b|\bbaichuan\b|\bcommand-r\b|\bdbrx\b|\bwizardlm\b|\byi-\d|\b(?:gpt|phi)-\d

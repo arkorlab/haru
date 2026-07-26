@@ -682,6 +682,30 @@ describe("joinUrl", () => {
     // catches what the path-side collapse cannot. Fail closed.
     expect(() => joinUrl("https://host.example//a/", "x")).toThrow(/origin/);
   });
+
+  it("refuses a `..` segment that escapes the base path prefix", () => {
+    // `..` is resolved by the URL parser and can climb above the base
+    // path without changing the origin, defeating the prefix this helper
+    // exists to preserve. Fail closed rather than route to the wrong path.
+    expect(() => joinUrl("https://gw.example/tenant-a", "/../secret")).toThrow(
+      /path prefix/,
+    );
+    expect(() =>
+      joinUrl("https://gw.example/tenant-a/v1", "/../../secret"),
+    ).toThrow(/path prefix/);
+    // A sibling-prefix escape must not slip past a substring check.
+    expect(() => joinUrl("https://gw.example/api", "/../apiroot")).toThrow(
+      /path prefix/,
+    );
+    // A `..` that stays within the prefix is still fine.
+    expect(joinUrl("https://gw.example/tenant-a", "/v1/../v2/status")).toBe(
+      "https://gw.example/tenant-a/v2/status",
+    );
+    // An origin-only base has no prefix to escape, so `..` just normalizes.
+    expect(joinUrl("https://host.example", "/../x")).toBe(
+      "https://host.example/x",
+    );
+  });
 });
 
 describe("errorBody", () => {

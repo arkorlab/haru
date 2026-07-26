@@ -7,6 +7,7 @@ import {
   gte,
   inArray,
   isNotNull,
+  lt,
   ne,
   notExists,
   sql,
@@ -15,7 +16,7 @@ import {
 import { domains, fleets, operations, slots } from "../schema/index.js";
 
 import type { HaruDatabase } from "../client.js";
-import type { DomainState } from "@haru/protocol";
+import type { DomainState, FleetPolicy } from "@haru/protocol";
 
 /**
  * Guarded domain state transition. The `from` list is the set of
@@ -53,8 +54,9 @@ export async function transitionDomain(
 
 /**
  * Escalate a degraded domain to failed ONLY while, in one statement:
- * the fleet has no in-flight operation, still routes to this domain,
- * AND a viable failover standby exists. Each guard closes a
+ * the domain has been degraded past the grace window, the fleet has no
+ * in-flight operation, still routes to this domain, AND a viable
+ * failover standby exists. Each guard closes a
  * multi-statement race a separate read-then-update would leave open:
  * a promote/demote created in between would occupy the one-in-flight
  * slot right as the active stops routing; a promotion that committed
@@ -71,15 +73,30 @@ export async function transitionDomain(
  * its commit can still slip through (that window is sub-statement and
  * self-heals: the failed trigger fires as soon as the slot frees),
  * but the multi-statement windows are gone.
+ *
+ * The grace guard (`stateUpdatedAt < at - degradedGraceMs`) rides
+ * inside the UPDATE too, not just in core's `detectDegradedEscalation`:
+ * a concurrent reconciler can recover then RE-degrade the active
+ * (fresh `stateUpdatedAt`) between this tick's snapshot load and its
+ * escalation CAS, so a caller keying only on the snapshot's stale
+ * `stateUpdatedAt` would escalate before the CURRENT degraded period
+ * reaches the grace window. Re-checking the live column against the
+ * injected clock closes that race. Uses `<` to match core's strict
+ * `degradedForMs > degradedGraceMs`, so exactly-at-grace does not fire.
  */
 export async function escalateDomainIfFleetIdle(
   database: HaruDatabase,
   domainId: string,
   fleetId: string,
   at: Date,
-  heartbeatStaleMs: number,
+  // Named object, not two adjacent `number`s: the heartbeat-staleness and
+  // degraded-grace budgets are both durations and default to DIFFERENT
+  // values (30s vs 60s), so a positional pair would let a caller transpose
+  // them undetectably. Pick from FleetPolicy so a field rename breaks here.
+  budgets: Pick<FleetPolicy, "heartbeatStaleMs" | "degradedGraceMs">,
 ): Promise<boolean> {
   assertDomainTransition("degraded", "failed");
+  const degradedCutoff = new Date(at.getTime() - budgets.degradedGraceMs);
   const pointerAtDomain = database
     .select({ one: sql`1` })
     .from(fleets)
@@ -94,7 +111,7 @@ export async function escalateDomainIfFleetIdle(
       ),
     );
   const standby = aliasedTable(domains, "standby");
-  const heartbeatCutoff = new Date(at.getTime() - heartbeatStaleMs);
+  const heartbeatCutoff = new Date(at.getTime() - budgets.heartbeatStaleMs);
   const standbyInferenceSlot = database
     .select({ one: sql`1` })
     .from(slots)
@@ -130,6 +147,7 @@ export async function escalateDomainIfFleetIdle(
       and(
         eq(domains.id, domainId),
         eq(domains.state, "degraded"),
+        lt(domains.stateUpdatedAt, degradedCutoff),
         exists(pointerAtDomain),
         notExists(inflightOperation),
         exists(viableStandby),

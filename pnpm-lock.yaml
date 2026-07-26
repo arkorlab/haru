@@ -276,9 +276,6 @@ importers:
       '@haru/protocol':
         specifier: workspace:*
         version: link:../protocol
-      yaml:
-        specifier: 'catalog:'
-        version: 2.9.0
       zod:
         specifier: 'catalog:'
         version: 4.4.3

@@ -21,7 +21,6 @@
   "dependencies": {
     "@haru/driver-skypilot": "workspace:*",
     "@haru/protocol": "workspace:*",
-    "yaml": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

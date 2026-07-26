@@ -209,3 +209,19 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 - Intended fix: pin the "unknown cluster" behavior with a test against
   the documented version and, if it exits non-zero, map that one case
   to `null`.
+
+### Publishability gate covers model/GPU names but not consumer-org identifiers
+
+- Where: `packages/db/src/publishability.test.ts`.
+- Current: the gate scans sources and example layouts for a denylist of
+  specific GPU model identifiers and LLM model families, but it does NOT
+  scan for the private repositories or infrastructure identifiers of the
+  project's consumers. The only organization name in the tree is the
+  repo's own publisher (in `LICENSE`/`CONTRIBUTING`), so a mechanical org
+  denylist would flag legitimate ownership references.
+- Why deferred: the consumer-org identifier set is not known to this
+  repo and cannot be safely enumerated here without guessing.
+- Intended fix: when the consumer-org identifier set is known, add a
+  scoped denylist for it (excluding the publisher's own name); the
+  private-repo/infra half of the AGENTS.md rule stays human-reviewed
+  until then.

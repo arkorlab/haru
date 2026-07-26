@@ -12,8 +12,18 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
  * Neon HTTP transport has no interactive transactions, so every state
  * transition is a compare-and-swap UPDATE that behaves identically on
  * both drivers.
+ *
+ * `transaction` is OMITTED on purpose: `db.transaction()` typechecks on
+ * a raw drizzle handle, works on PGlite AND real Postgres in tests, and
+ * throws at runtime ONLY on Neon HTTP - which nothing in CI exercises.
+ * Removing it from the handle turns any interactive-transaction attempt
+ * into a compile error with no runtime surprise. (The full drizzle
+ * instance is still assignable here: it is a supertype.)
  */
-export type HaruDatabase = PgDatabase<PgQueryResultHKT, typeof schema>;
+export type HaruDatabase = Omit<
+  PgDatabase<PgQueryResultHKT, typeof schema>,
+  "transaction"
+>;
 
 /** Create a Neon-backed database handle (the documented production target). */
 export function createDatabase(databaseUrl: string): HaruDatabase {

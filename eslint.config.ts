@@ -120,6 +120,22 @@ export default defineConfig(
     },
     rules: {
       eqeqeq: ["error", "always"],
+      // db.transaction() throws at runtime on the Neon HTTP driver but
+      // passes on PGlite AND real Postgres in CI. The HaruDatabase type
+      // OMITS `transaction` so a call on the typed handle is a compile
+      // error; this lint is the secondary guard that also catches a call
+      // on a RAW drizzle instance (e.g. inside client.ts before it is
+      // typed as HaruDatabase), which the type cannot see. Every state
+      // transition must be a single-statement compare-and-swap instead
+      // (see the concurrency model in AGENTS.md).
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='transaction']",
+          message:
+            "db.transaction() throws at runtime on the Neon HTTP driver. Use a single-statement compare-and-swap instead (see AGENTS.md).",
+        },
+      ],
       "@typescript-eslint/consistent-type-imports": [
         "error",
         { prefer: "type-imports", fixStyle: "inline-type-imports" },

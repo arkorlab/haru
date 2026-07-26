@@ -1,0 +1,47 @@
+# Publishability denylist SAMPLES: one identifier per line that the gate
+# MUST detect. These pin per-TOKEN coverage: the policy rules are large
+# alternations, and `pattern matches the policy text` stays true even if
+# individual alternatives are deleted, so every branch needs its own
+# sample here. Like the policy file this is governed DATA, not code, and
+# is never itself scanned.
+H100
+H200
+H800
+B100
+B200
+B300
+A100
+A800
+A6000
+A40
+V100
+L40S
+L40
+GH200
+GB200
+GB300
+MI300X
+MI300A
+MI250
+RTX 4090
+RTX4090
+llama
+codellama
+mistral
+mixtral
+qwen
+gemma
+deepseek
+vicuna
+starcoder
+falcon
+nemotron
+granite
+internlm
+baichuan
+command-r
+dbrx
+wizardlm
+yi-34b
+gpt-4
+phi-3

@@ -641,17 +641,22 @@ export async function reconcileFleet(
       dependencies.now().getTime(),
     );
     if (escalation) {
-      // Single-statement CAS: the fleet-idle, pointer and
+      // Single-statement CAS: the grace, fleet-idle, pointer and
       // viable-standby guards all ride INSIDE the update, so neither
-      // an operation created after the in-flight check above nor a
-      // concurrent heartbeat failing the last viable standby's slot
-      // can race the active into failed-with-no-failover.
+      // an operation created after the in-flight check above, a
+      // concurrent heartbeat failing the last viable standby's slot,
+      // nor a concurrent reconciler that recovered-then-re-degraded the
+      // active (resetting its grace window) can race the active into
+      // failed-with-no-failover or into a premature escalation.
       const didEscalate = await escalateDomainIfFleetIdle(
         dependencies.database,
         escalation.domainId,
         fleet.id,
         dependencies.now(),
-        fleet.policy.heartbeatStaleMs,
+        {
+          heartbeatStaleMs: fleet.policy.heartbeatStaleMs,
+          degradedGraceMs: fleet.policy.degradedGraceMs,
+        },
       );
       if (didEscalate) {
         await appendEvent(dependencies.database, {
