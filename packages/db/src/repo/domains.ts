@@ -63,7 +63,8 @@ export async function transitionDomain(
  * `detectDegradedEscalation` bet on (e.g. by failing its only
  * inference slot) - escalating then would drop the active's remaining
  * healthy models with only a doomed failover target left. The
- * viability predicate mirrors core's isViableFailoverTarget: ready
+ * viability predicate mirrors core's isViableFailoverTarget (held in
+ * sync by failover-parity.test.ts, not by hand): ready
  * state, a supervisor URL, at least one inference slot (the schema
  * guarantees an inference slot binds >= 1 model), none of them
  * failed, and a heartbeat no older than the caller's cutoff. A

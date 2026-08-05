@@ -43,7 +43,10 @@ export function hasInferenceBindings(domain: DomainSnapshot): boolean {
  * MIRRORED IN SQL: the escalation CAS re-checks this predicate inside
  * its UPDATE statement (escalateDomainIfFleetIdle in @haru/db) so a
  * concurrent heartbeat cannot strip the standby between the in-memory
- * decision and the escalation. Keep the two in sync.
+ * decision and the escalation. The two are held in sync by
+ * `failover-parity.test.ts` in @haru/db, which drives the same database
+ * state through both and asserts they agree - extend it when you add a
+ * condition here.
  */
 function isViableFailoverTarget(
   domain: DomainSnapshot,
