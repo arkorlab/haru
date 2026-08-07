@@ -7,7 +7,7 @@ import { z } from "zod";
  * config-time error.
  */
 const MAX_TIMEOUT_MS = 2_147_483_647;
-const timeoutMsSchema = z.number().int().positive().max(MAX_TIMEOUT_MS);
+export const timeoutMsSchema = z.number().int().positive().max(MAX_TIMEOUT_MS);
 
 const probePromptSchema = z.string().min(1);
 const probeMaxTokensSchema = z.number().int().positive();

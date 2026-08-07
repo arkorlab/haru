@@ -4,10 +4,18 @@
  * supervisor's protocol-only dependency rule holds.
  */
 
-function timeoutSignal(
+/**
+ * A timeout signal composed with whatever the caller already had.
+ *
+ * Exported because the database transport needs the same contract for a
+ * promise it does not build a `RequestInit` for: one budget, a
+ * `TimeoutError` on expiry, a timer the caller can clear, and any
+ * caller-supplied signal preserved rather than replaced.
+ */
+export function timeoutSignal(
   timeoutMs: number,
-  extraSignal: AbortSignal | undefined,
-  initSignal: AbortSignal | null | undefined,
+  extraSignal?: AbortSignal,
+  initSignal?: AbortSignal | null,
 ): { signal: AbortSignal; timer: ReturnType<typeof setTimeout> } {
   const controller = new AbortController();
   const timer = setTimeout(() => {

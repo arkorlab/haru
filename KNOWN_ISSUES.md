@@ -30,25 +30,25 @@ deferred, and the intended fix. Entries should be deleted when fixed.
   entry is exactly what the chat proxy's fail-open path serves from
   (see `failOpen` in the same file).
 
-### Outage detection latency on the chat path is unbounded
+### Outage detection on the chat path costs one budget per request
 
 - Where: `services/haru-server/src/app.ts` (`cachedSnapshot` calling
   `getFleetRoutePointer`).
-- Current: the pointer read has no timeout or AbortSignal and there is
-  no memoized outage state, so during a hang-mode outage (the store
-  accepts TCP but never answers) every chat request waits for the
-  transport's own failure before fail-open engages, potentially the
-  full undici header timeout, paid per request as time-to-first-byte.
-  A fast-fail outage (connection refused) is near-instant and
-  unaffected.
-- Why deferred: a detection bound is a design decision (fixed budget
-  vs config knob vs circuit breaker) and this slice deliberately adds
-  no new env knobs; the common outage mode (endpoint down) fails fast.
-- Intended fix: a small fixed AbortSignal budget around the pointer
-  read (well above healthy p99), optionally with a short-lived "store
-  is down" memo so consecutive requests skip straight to the cache.
-  Both must preserve the rule that only a FAILING pointer read
-  licenses fail-open.
+- Current: the transport half is now bounded.
+  `DEFAULT_QUERY_BUDGET_MS` in `@haru/db`'s `createDatabase` gives every
+  query its own AbortSignal, so a hang-mode outage (the store accepts
+  TCP but never answers) rejects at the budget instead of at undici's
+  default, and the rejection reaches `cachedSnapshot` as the transport
+  failure that licenses fail-open. What remains is that there is still
+  no memoized outage state, so each request pays the budget again as
+  time-to-first-byte rather than the first one paying it for the rest.
+  A fast-fail outage (connection refused) is near-instant either way.
+- Why deferred: the remaining half is a policy decision (how long a
+  "store is down" memo may be trusted, and what clears it) and this
+  slice deliberately adds no new env knobs.
+- Intended fix: a short-lived "store is down" memo so consecutive
+  requests skip straight to the cache, preserving the rule that only a
+  FAILING pointer read licenses fail-open.
 
 ### Fail-closed chat errors log once per request
 
