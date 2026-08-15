@@ -16,7 +16,7 @@ catalog:
   "@types/node": "^26"
   "@types/pg": "^8.20.0"
   "@vitest/coverage-v8": "^4.1.10"
-  "@vitest/eslint-plugin": "^1.6.17"
+  "@vitest/eslint-plugin": "^1.6.23"
   drizzle-kit: "^0.31.10"
   drizzle-orm: "^0.45.2"
   eslint: "^10.6.0"
