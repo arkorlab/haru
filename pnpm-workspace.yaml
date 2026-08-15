@@ -39,7 +39,7 @@ catalog:
   oxlint-tsgolint: "^0.24.0"
   tsx: "^4.23.0"
   turbo: "^2.10.4"
-  typescript: "^7.0.2"
+  typescript: "7.0.2"
   typescript-eslint: "^8.63.0"
   # Dedicated dispatcher for the chat proxy: Node's bundled fetch
   # enforces a fixed 300s headersTimeout that silently capped
