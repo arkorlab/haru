@@ -67,8 +67,8 @@ catalogs:
       specifier: ^17.7.0
       version: 17.7.0
     hono:
-      specifier: ^4.12.28
-      version: 4.12.28
+      specifier: ^4.12.30
+      version: 4.12.30
     jiti:
       specifier: ^2.7.0
       version: 2.7.0
@@ -334,10 +334,10 @@ importers:
         version: link:../../packages/protocol
       '@hono/node-server':
         specifier: 'catalog:'
-        version: 2.0.8(hono@4.12.28)
+        version: 2.0.8(hono@4.12.30)
       hono:
         specifier: 'catalog:'
-        version: 4.12.28
+        version: 4.12.30
       undici:
         specifier: 'catalog:'
         version: 8.7.0
@@ -368,10 +368,10 @@ importers:
         version: link:../../packages/protocol
       '@hono/node-server':
         specifier: 'catalog:'
-        version: 2.0.8(hono@4.12.28)
+        version: 2.0.8(hono@4.12.30)
       hono:
         specifier: 'catalog:'
-        version: 4.12.28
+        version: 4.12.30
       zod:
         specifier: 'catalog:'
         version: 4.4.3
@@ -441,11 +441,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -2205,8 +2205,8 @@ packages:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
     engines: {node: '>=8'}
 
-  hono@4.12.28:
-    resolution: {integrity: sha512-YwUvVpSF7m1yOblFPrU3Hbo8XhPheBoiyfGuII6z19LnOr6JpDnyyp7LFNrfV56wS8tpvtBFGRISHN02pDdLOA==}
+  hono@4.12.30:
+    resolution: {integrity: sha512-emn+JoJjrN9YTpRDS5it/UI2SO9BAE37T6I3d963RxcZ81G9A4pr2SZTEiiaiKbzx+NKRg5BZ89fCL7gCJCUog==}
     engines: {node: '>=16.9.0'}
 
   html-escaper@2.0.2:
@@ -3162,9 +3162,9 @@ snapshots:
       '@eslint/core': 1.2.1
       levn: 0.4.1
 
-  '@hono/node-server@2.0.8(hono@4.12.28)':
+  '@hono/node-server@2.0.8(hono@4.12.30)':
     dependencies:
-      hono: 4.12.28
+      hono: 4.12.30
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -4165,7 +4165,7 @@ snapshots:
 
   has-flag@4.0.0: {}
 
-  hono@4.12.28: {}
+  hono@4.12.30: {}
 
   html-escaper@2.0.2: {}
 
