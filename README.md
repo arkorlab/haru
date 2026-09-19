@@ -317,6 +317,13 @@ intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   Routing-pointer moves are exempt while the state store is reachable:
   every request revalidates against the fleet's route revision, so a
   promotion switches chat traffic immediately.
+- **The snapshot cache holds at most 256 fleets**, least recently used
+  evicted first. An evicted fleet is one the fail-open path can no
+  longer serve, so a deployment that actively serves more than 256
+  fleets from one process would see the coldest of them answer `503
+  state_store_unavailable` during an outage instead of going stale.
+  The cap is not an environment knob; the default is well above the
+  scale this slice targets (fleets are few and long-lived).
 - **While the state store is unreachable, chat routing itself goes
   stale** (fail-open; responses carry `X-Haru-Routing: stale`). The
   pointer cannot move during the outage either, so the served route

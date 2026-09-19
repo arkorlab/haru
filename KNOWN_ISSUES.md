@@ -13,22 +13,33 @@ deferred, and the intended fix. Entries should be deleted when fixed.
 
 ## Deferred (post-review backlog)
 
-### Chat snapshot cache has no size cap
+### The verdict-generation maps still have no size cap
 
-- Where: `services/haru-server/src/app.ts` (`snapshotCache`, plus the
-  `fleetIdByReference`, `forgottenGenerations` and
-  `referenceVerdictGenerations` maps that share its lifetime).
-- Current: entries are dropped when the store reports the fleet gone,
-  and quarantined when they are learned to be unusable (`forgetFleet`),
-  but a fleet that simply stops being queried pins its last
-  FleetSnapshot for process lifetime. Bounded by the number of distinct
-  fleets ever served.
-- Why deferred: fleets are few and long-lived in this slice.
-- Intended fix: a small LRU cap. Careful: eviction must stay driven by
-  what the store SAYS (a null lookup, an unusable snapshot), never by a
-  lookup that THROWS - a throw means the store is unreachable and the
-  entry is exactly what the chat proxy's fail-open path serves from
-  (see `failOpen` in the same file).
+- Where: `services/haru-server/src/app.ts` (`forgottenGenerations`,
+  `referenceVerdictGenerations`).
+- Current: `snapshotCache` and `fleetIdByReference` ARE capped now
+  (`snapshotCacheMaxEntries`, least recently used first, pruned
+  together in `evictForCapacity`). The two generation maps are not. A
+  counter is only ever created or incremented, never removed, so they
+  grow with the number of distinct fleet ids and reference spellings
+  this process has recorded a verdict for: bounded by history rather
+  than by live population. One integer per key, and
+  `forgetFleetByReference` already refuses to record a verdict for a
+  reference that named no knowledge, which keeps arbitrary
+  `X-Haru-Fleet` values out of the second map.
+- Why deferred: pruning them is not eviction, it is un-fencing. A
+  generation is read as `get(...) ?? 0`, so deleting a counter resets
+  it to 0, and the dangerous ordering is reachable: a snapshot load
+  captures 0 for a fleet that has no counter yet, a forget bumps it to
+  1, a prune deletes it, and the load then compares 0 against 0 and
+  publishes the entry the forget existed to bury. Dropping a counter
+  is only safe when no read predating it can still be in flight, which
+  this code cannot observe today. (Capacity eviction is safe for the
+  same reason inverted: it deliberately does NOT touch these maps.)
+- Intended fix: make the fence something a suppressed publish carries
+  itself, a token captured per load rather than a counter looked up
+  per fleet, so forgetting a fleet forgets its fence with it and the
+  maps inherit the cache's lifetime.
 
 ### Outage detection latency on the chat path is unbounded
 

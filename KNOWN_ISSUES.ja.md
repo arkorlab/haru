@@ -12,21 +12,32 @@
 
 ## 先送り (レビュー後のバックログ)
 
-### chat スナップショットキャッシュにサイズ上限がない
+### verdict generation マップにサイズ上限がない
 
-- 場所: `services/haru-server/src/app.ts` (`snapshotCache`。加えて
-  同じ寿命を共有する `fleetIdByReference` / `forgottenGenerations` /
-  `referenceVerdictGenerations` マップ)。
-- 現状: store が「フリートは存在しない」と答えたときの削除と、
-  使用不能と判明したエントリの隔離 (`forgetFleet`) は実装済み。
-  ただし単に参照されなくなっただけのフリートは、最終 FleetSnapshot
-  がプロセス寿命の間残る。上限は「これまでに配信したフリート数」。
-- 先送りの理由: このスライスではフリートは少数かつ長寿命。
-- 意図する修正: 小さな LRU 上限。注意: 削除は store が「そう言った」
-  ことだけを根拠にすること (null lookup、使用不能なスナップショット)。
-  lookup の throw を根拠にしてはいけない。throw は store 到達不能を
-  意味し、そのエントリこそ chat proxy の fail-open 経路が配信する
-  当のものだから (同ファイルの `failOpen`)。
+- 場所: `services/haru-server/src/app.ts` (`forgottenGenerations` /
+  `referenceVerdictGenerations`)。
+- 現状: `snapshotCache` と `fleetIdByReference` には上限が入った
+  (`snapshotCacheMaxEntries`、LRU 順。`evictForCapacity` で同時に
+  刈る)。generation マップ 2 つは対象外。カウンターは作成と加算
+  だけで削除されないため、このプロセスが verdict を記録した
+  「相異なるフリート id / 参照表記」の数だけ増える。上限を与えるのは
+  現存数ではなく履歴。1 キーあたり整数 1 個で、かつ
+  `forgetFleetByReference` は「何の知識も指していなかった参照」に
+  対しては verdict を記録しないので、任意の `X-Haru-Fleet` 値が
+  後者のマップを膨らませることはない。
+- 先送りの理由: これらの刈り取りは eviction ではなく fence の解除に
+  なる。generation は `get(...) ?? 0` で読むため、カウンター削除は
+  値を 0 に戻すことと同義で、危険な順序が実際に到達可能:
+  カウンター未作成のフリートに対してロードが 0 を捕捉 → forget が
+  1 へ加算 → 刈り取りで削除 → ロードが 0 と 0 を比較して、forget が
+  葬るはずだったエントリを publish する。カウンターを落として安全
+  なのは「それに先行する読み取りが飛行中でないと言えるとき」だけで、
+  現状のコードはそれを観測できない。(容量による eviction が安全なのは
+  同じ理由の裏返しで、これらのマップに意図的に触れないため。)
+- 意図する修正: fence を「抑制される側の publish が自分で持ち歩く
+  もの」にする。フリートごとに引くカウンターではなく、ロードごとに
+  捕捉するトークンにすれば、フリートを忘れるときに fence も一緒に
+  消え、マップの寿命がキャッシュと揃う。
 
 ### chat 経路の障害検知レイテンシに上限がない
 
